@@ -1,0 +1,18 @@
+{
+  "name": "bidvibe_be",
+  "version": "1.0.0",
+  "description": "BidVibe - backend nền tảng đấu giá trực tuyến",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "node --watch src/app.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.3",
+    "express": "^5.2.1",
+    "firebase-admin": "^14.5.0",
+    "socket.io": "^4.8.4"
+  }
+}
