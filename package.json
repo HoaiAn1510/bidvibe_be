@@ -5,7 +5,7 @@
   "main": "src/app.js",
   "scripts": {
     "start": "node src/app.js",
-    "dev": "node --watch src/app.js"
+    "dev": "nodemon src/app.js"
   },
   "license": "ISC",
   "dependencies": {
@@ -13,6 +13,10 @@
     "dotenv": "^18.0.3",
     "express": "^5.2.1",
     "firebase-admin": "^14.5.0",
+    "jsonwebtoken": "^9.0.2",
     "socket.io": "^4.8.4"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
   }
 }
