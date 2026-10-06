@@ -2,26 +2,81 @@
 
 Backend cho BidVibe - nền tảng đấu giá trực tuyến thời gian thực cho đồ cũ/vật phẩm sưu tầm.
 
+Công nghệ: Node.js + Express 5 + Socket.io, dữ liệu lưu trong PostgreSQL (host trên Supabase), kết nối bằng thư viện `pg`.
+
 ## Cài đặt
 
 ```bash
 npm install
 cp .env.example .env   # rồi điền giá trị thật vào .env
+npm run db:migrate     # tạo/cập nhật bảng trong database
 npm run dev
 ```
+
+### Biến môi trường
+
+Xem đầy đủ trong `.env.example`. Các biến quan trọng:
+
+| Biến | Ý nghĩa |
+|---|---|
+| `DATABASE_URL` | Chuỗi kết nối Postgres. Với Supabase dùng chuỗi **Session pooler** (host `*.pooler.supabase.com`, cổng 5432, username dạng `postgres.<mã project>`). **Không** dùng Direct connection: nó chỉ có IPv6 nên nhiều mạng không kết nối được. |
+| `DB_SSL` | `true` khi dùng Supabase. |
+| `JWT_SECRET` | Khoá ký token đăng nhập. Bắt buộc, không có giá trị mặc định. |
+
+File `.env` chứa mật khẩu nên **không được đưa lên git** (đã có trong `.gitignore`). Mỗi người tự tạo `.env` của mình.
+
+### Các lệnh npm
+
+| Lệnh | Việc |
+|---|---|
+| `npm run dev` | Chạy server, tự khởi động lại khi sửa code |
+| `npm start` | Chạy server (không tự khởi động lại) |
+| `npm run db:migrate` | Chạy các file trong `migrations/` chưa được áp dụng |
 
 ## Cấu trúc thư mục
 
 ```
+migrations/        # file SQL tạo/đổi cấu trúc database (001, 002, ...)
+scripts/           # script chạy tay (migrate.js, ...)
+docs/              # tài liệu kiến trúc và API
 src/
-├── config/       # kết nối DB, cấu hình dùng chung
+├── config/        # kết nối DB (db.js), biến môi trường (env.js)
 ├── middleware/    # auth, error handler
-├── models/        # định nghĩa dữ liệu Firestore
+├── models/        # truy vấn/ánh xạ dữ liệu theo từng bảng
 ├── routes/        # định tuyến API
-├── services/       # logic nghiệp vụ chính
-├── sockets/        # xử lý real-time (Socket.io)
-└── app.js          # entry point
+├── services/      # logic nghiệp vụ chính
+├── sockets/       # xử lý real-time (Socket.io)
+└── app.js         # entry point
 ```
+
+## Cơ sở dữ liệu
+
+Schema nằm trong `migrations/001_init_schema.sql` (23 bảng nghiệp vụ) và là nguồn sự thật cho cấu trúc dữ liệu. Sơ đồ quan hệ xem trong Supabase: **Database → Schema Visualizer**.
+
+| Nhóm | Bảng |
+|---|---|
+| Tài khoản | `accounts`, `bidders`, `sellers`, `ops_accounts` |
+| Tin đăng & thẩm định | `categories`, `listings`, `listing_photos`, `appraisals` |
+| Đấu giá | `auctions`, `auction_deposits`, `bids` |
+| Đơn hàng, kho, vận chuyển | `orders`, `warehouse_receipts`, `shipments`, `shipment_events` |
+| Ví | `wallet_transactions` |
+| Thông báo & chatbot | `notifications`, `chat_sessions`, `chat_messages` |
+| Gắn cờ & tranh chấp | `flagged_auctions`, `flag_evidence`, `disputes`, `dispute_timeline` |
+
+Quyết định thiết kế cần nhớ:
+
+- Bidder và Seller là hai role tách biệt: `accounts` giữ phần đăng nhập chung, `bidders` / `sellers` là bảng con 1-1, một account chỉ thuộc một trong hai. Ví (`wallet_balance`, `wallet_held`) chỉ Bidder có.
+- Tài khoản Thẩm định / Kho vận / Admin nằm riêng ở `ops_accounts`.
+- Cọc tham gia phiên (`auction_deposits`, 10% giá khởi điểm) tách khỏi lượt đặt giá (`bids`).
+- Tiền là VND, kiểu `BIGINT`, không có phần thập phân.
+- Hai mốc hạn trên `orders`: `payment_deadline` (+24 giờ kể từ lúc thắng, quá hạn thì mất cọc) và `payout_deadline` (+72 giờ sau khi giao, quá hạn thì tự giải ngân cho người bán).
+
+### Quy tắc làm việc với database
+
+- **Không sửa file migration đã chạy.** Muốn đổi cấu trúc thì thêm file mới (`003_...sql`). Chỉ một người chạy `npm run db:migrate` mỗi lần có file mới, rồi báo người còn lại.
+- **RLS đã bật cho mọi bảng và không có policy nào** (`002_enable_rls.sql`), để chặn truy cập qua API công khai của Supabase. Backend kết nối bằng tài khoản `postgres` nên bỏ qua RLS và vẫn đọc ghi bình thường. Bảng mới thêm sau này cũng phải bật RLS trong chính file migration của nó.
+- **Thao tác đụng tiền hoặc đổi trạng thái nhiều bảng phải nằm trong một giao dịch** (`BEGIN ... COMMIT`) dùng chung một kết nối lấy từ pool. Đặt giá phải khoá dòng phiên bằng `SELECT ... FOR UPDATE` để hai người không đặt trùng.
+- Không tự cộng/trừ số dư. Mọi thay đổi ví đi qua service ví (xem bên dưới) để luôn có dòng trong `wallet_transactions`.
 
 ## Phân chia công việc
 
@@ -30,6 +85,14 @@ src/
 | Auction Core | BE1 | `auction.*`, `bid.*`, `wallet.*`, `fraud_detection.js`, `sockets/` |
 | Marketplace Operations | BE2 | `auth.*`, `product.*`, `appraisal.*`, `warehouse.*`, `admin.*`, `ai_price_suggestion.js`, `ai_report_service.js` |
 
+Hai domain nối nhau qua các điểm sau, cần tôn trọng:
+
+- **Ví chỉ BE1 viết** (`wallet.*`), gồm các hàm giữ cọc, hoàn cọc, thanh toán, hoàn tiền; mỗi hàm nhận `client` để nằm chung giao dịch của nơi gọi. BE2 muốn hoàn tiền (ví dụ Admin xử lý tranh chấp) thì gọi hàm ví của BE1, không tự sửa số dư.
+- **Thông báo do BE2 viết** (hàm tạo thông báo, ghi bảng `notifications` và đẩy qua Socket.io nếu người nhận đang online). BE1 gọi hàm này khi có người bị vượt giá hoặc thắng phiên.
+- **Tạo phiên đấu giá:** khi Thẩm định duyệt một tin đăng, BE2 gọi một hàm do BE1 cung cấp để sinh `auctions`; BE2 không tự ghi vào bảng `auctions`.
+- **Đơn hàng (`orders`):** BE1 tạo khi phiên kết thúc; BE2 đọc và cập nhật phần kho, giao hàng, giải ngân.
+- **Đăng nhập:** `auth.*` do BE2 phụ trách, nhưng bảng `ops_accounts` hiện chưa có cột `password_hash`; cần thêm bằng migration `003` trước khi làm đăng nhập cho Thẩm định / Kho vận / Admin.
+
 Chi tiết quy ước API và kiến trúc: xem [`docs/architecture.md`](docs/architecture.md).
 
 ## Quy ước Git
@@ -37,3 +100,4 @@ Chi tiết quy ước API và kiến trúc: xem [`docs/architecture.md`](docs/ar
 - Nhánh chính: `main` (ổn định), `develop` (tích hợp)
 - Nhánh tính năng: `feature/be1-...` hoặc `feature/be2-...`
 - Merge vào `develop` qua Pull Request, cần review trước khi merge
+- Không commit `.env`, chuỗi kết nối hay mật khẩu
