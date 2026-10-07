@@ -2,15 +2,17 @@
 
 ## Quy ước response API
 
-Mọi endpoint trả về theo format thống nhất:
+Mọi endpoint trả về theo format thống nhất (theo đúng `middleware/errorHandler.js`):
 
 ```json
 // Thành công
-{ "success": true, "data": { ... } }
+{ "success": true, "data": { ... }, "error": null }
 
 // Lỗi
-{ "success": false, "error": "Mô tả lỗi ngắn gọn" }
+{ "success": false, "data": null, "error": { "code": "NOT_FOUND", "message": "Mô tả lỗi" } }
 ```
+
+`code` là mã lỗi dạng hằng (`NOT_FOUND`, `UNAUTHORIZED`, `INTERNAL_ERROR`...) để client switch theo, `message` là mô tả cho người dùng — khi `NODE_ENV=production` và lỗi 5xx thì `message` bị ẩn thành "Lỗi hệ thống" để không lộ chi tiết nội bộ.
 
 ## Phân chia domain
 
@@ -26,8 +28,9 @@ Mọi endpoint trả về theo format thống nhất:
 - `services/ai_price_suggestion.js`, `services/ai_report_service.js`, `services/appraisal_service.js`, `services/warehouse_service.js`
 
 ### Dùng chung (hạn chế sửa sau khi đã thống nhất)
-- `config/env.js`, `config/firebase.js`
-- `middleware/errorHandler.js`, `middleware/auth.js`
+- `config/env.js`, `config/db.js`
+- `middleware/errorHandler.js`, `middleware/auth.js` (`requireAuth` xác thực JWT, `requireRole` kiểm tra role)
+- `migrations/` (schema PostgreSQL, chạy bằng `npm run db:migrate`)
 
 ## Quy tắc khi cần sửa file dùng chung
 
