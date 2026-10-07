@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "nodemon src/app.js",
-    "db:migrate": "node scripts/migrate.js"
+    "db:migrate": "node scripts/migrate.js",
+    "db:seed": "node scripts/seed_demo.js",
+    "test:be1": "node scripts/test_be1.js"
   },
   "license": "ISC",
   "dependencies": {
