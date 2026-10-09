@@ -44,6 +44,7 @@ phiên được gia hạn còn đúng 30 giây (`extended: true`).
 | Method | Đường dẫn | Mô tả |
 |---|---|---|
 | GET | `/api/orders/mine` | Đơn của tôi: giá chốt, phí 5%, vận chuyển 40.000, cọc được trừ, hạn thanh toán |
+| GET | `/api/orders/:id` | Chi tiết một đơn của tôi (cùng cấu trúc như trong `/mine`); đơn của người khác → `404` |
 | POST | `/api/orders/:id/pay` | `{ "method": "wallet" \| "qr" \| "card" }` |
 
 Quá 24 giờ chưa thanh toán: đơn `expired`, cọc bị tịch thu (job nền, 5 giây/lần).
