@@ -1,6 +1,6 @@
 # Luồng chính của BidVibe
 
-Tài liệu này mô tả luồng nghiệp vụ từ lúc đăng ký đến lúc giải ngân, **dựa trên code backend và schema đang có** (migration 001–004). Mỗi bước có nhãn trạng thái triển khai:
+Tài liệu này mô tả luồng nghiệp vụ từ lúc đăng ký đến lúc giải ngân, **dựa trên code backend và schema đang có** (migration 001–005). Mỗi bước có nhãn trạng thái triển khai:
 
 - **[Đã có]** route đã đăng ký trong `src/routes/index.js`, có logic xử lý thật và đã chạy qua kiểm thử end-to-end (`npm test`, kết quả ở [`test-be2.md`](test-be2.md)).
 - **[Một phần]** mới làm được một phần.
@@ -14,7 +14,7 @@ BidVibe là sàn đấu giá trực tuyến theo thời gian thực cho đồ c�
 
 | Vai trò | Bảng tài khoản | Làm gì |
 |---|---|---|
-| Bidder (người mua) | `accounts` + `bidders` | Nạp ví, đặt cọc tham gia phiên, trả giá, thanh toán đơn thắng, xác nhận nhận hàng, mở tranh chấp |
+| Bidder (người mua) | `accounts` + `bidders` | Nạp ví, đặt cọc tham gia phiên, trả giá, thanh toán đơn thắng, chọn địa chỉ giao hàng, xác nhận nhận hàng, mở tranh chấp |
 | Seller (người bán) | `accounts` + `sellers` | Đăng tin ký gửi, bổ sung hồ sơ khi được yêu cầu, gửi hàng về kho, nhận giải ngân |
 | Appraiser (thẩm định) | `ops_accounts` (`role = 'appraiser'`) | Duyệt / từ chối / yêu cầu bổ sung tin đăng |
 | Warehouse (kho vận) | `ops_accounts` (`role = 'warehouse'`) | Nhận hàng, kiểm, đóng gói, gửi đi, báo sai lệch |
@@ -109,6 +109,20 @@ Một tài khoản `accounts` chỉ là Bidder **hoặc** Seller, không cả ha
 | Thông báo | Người mua: "Người bán đã gửi hàng đến kho" |
 | Giao dịch | Có, khoá dòng `orders` |
 
+### Bước 8b — Bidder chọn địa chỉ giao hàng [Đã có]
+
+| | |
+|---|---|
+| Ai | Bidder |
+| Endpoint | `GET/POST /api/addresses`, `PATCH/DELETE /api/addresses/:id`, `POST /api/addresses/:id/default`, `POST /api/orders/:id/shipping-address` `{ addressId }` |
+| Code | `services/address_service.js`, `fulfilment_service.setShippingAddress` |
+| Bảng | `addresses` (migration 005: `recipient_name`, `phone`, `address_line`, `ward`, `district`, `city`, `is_default`, `deleted_at`); `orders.shipping_address_id` |
+| Khi nào | Bất kỳ lúc nào từ khi có đơn (kể cả lúc chờ thanh toán) tới trước bước `ship` của kho; sau đó `409 ALREADY_SHIPPED` |
+| Quyền | Chỉ chủ đơn, chỉ địa chỉ của chính mình (khác → `404`) |
+| Lịch sử | Xoá là xoá mềm; sửa địa chỉ mà đơn đã gửi đang dùng thì tạo bản mới, đơn đã gửi giữ nguyên địa chỉ cũ |
+
+Luồng thanh toán của BE1 (`POST /api/orders/:id/pay`) không đổi; địa chỉ được chọn qua API riêng của BE2. Kho và người mua thấy địa chỉ trong `GET /api/warehouse/orders` và `GET /api/orders/:id/tracking`; người bán không thấy.
+
 ### Bước 9 — Kho nhận, kiểm, đóng gói, gửi, giao [Đã có]
 
 Endpoint chung: `GET /api/warehouse/orders?stage=` và `POST /api/warehouse/orders/:id/<bước>` (vai trò `warehouse`). Mỗi bước khoá dòng `orders` trong một giao dịch; sai thứ tự → `409 INVALID_STATE`.
@@ -118,7 +132,7 @@ Endpoint chung: `GET /api/warehouse/orders?stage=` và `POST /api/warehouse/orde
 | `receive` | Seller đã báo gửi, chưa nhận | `warehouse_receipts.received_at = now` | Người mua |
 | `inspect` `{ result, notes }` | Đã nhận, chưa kiểm | `inspection_result` (`match` / `mismatch`), `inspection_notes`, `inspected_by` | Có khi `mismatch` |
 | `pack` | Kiểm `match`, không tranh chấp | `shipments` (`status = 'packing'`) + `shipment_events` | — |
-| `ship` `{ carrier, trackingCode }` | `packing` | `shipments.status` → `shipped`, `tracking_code` + `shipment_events` | Người mua |
+| `ship` `{ carrier, trackingCode }` | `packing`, **đơn đã có địa chỉ giao hàng** (chưa có → `409 ORDER_NO_ADDRESS`) | `shipments.status` → `shipped`, `tracking_code` + `shipment_events` | Người mua |
 | `deliver` | `shipped` | `shipments.status` → `delivered` + `shipment_events`; `orders.payout_deadline = now + 72 giờ` | Người mua |
 
 Kiểm `mismatch` (bắt buộc ghi chú): tự mở `disputes` (`source = 'warehouse'`, `reporter_id = NULL`, `escrow_amount` = số người mua đã trả), ghi 2 dòng `dispute_timeline`, `orders.payout_status` → `disputed`, thông báo cả hai bên. Đơn dừng ở bước kho cho tới khi Admin xử lý.
@@ -200,6 +214,7 @@ sequenceDiagram
     B->>API: POST /api/orders/{id}/pay
     J->>API: processPaymentTimeouts (quá 24 giờ mất cọc)
     S->>API: POST /api/orders/{id}/ship-to-warehouse
+    B->>API: POST /api/orders/{id}/shipping-address
     W->>API: receive, inspect, pack, ship, deliver
     B->>API: POST /api/orders/{id}/confirm-delivery
     API-->>S: payout_status released, notification payout
@@ -266,7 +281,7 @@ stateDiagram-v2
     inspecting --> inspected : inspect match
     inspecting --> inspection_failed : inspect mismatch, mở tranh chấp
     inspected --> packed : pack
-    packed --> shipped : ship
+    packed --> shipped : ship, cần địa chỉ giao hàng
     shipped --> delivered : deliver, payout_deadline cộng 72 giờ
     delivered --> completed : confirm-delivery hoặc tự giải ngân
 ```
@@ -317,7 +332,7 @@ Scheduler chỉ khởi động khi chạy server trực tiếp (`npm start` / `n
 | 2–3. Đăng tin, thẩm định, gợi ý giá | BE2 | `listing_service.js`, `appraisal_service.js`, `ai_price_suggestion.js` |
 | 4. Tạo phiên | BE1 (BE2 gọi) | `createAuctionForListing` |
 | 5–7. Ví, cọc, đặt giá, đóng phiên, thanh toán, quá hạn | BE1 | `auction_engine.js`, `wallet_service.js`, `scheduler.js` |
-| 8–11. Gửi kho, kho vận, xác nhận, giải ngân | BE2 | `fulfilment_service.js`, `payout_service.js` |
+| 8–11. Gửi kho, địa chỉ giao hàng, kho vận, xác nhận, giải ngân | BE2 | `fulfilment_service.js`, `address_service.js`, `payout_service.js` |
 | 12. Tranh chấp | BE2 (gọi `refund` của BE1) | `dispute_service.js` |
 | 13. Gắn cờ | BE1 phát hiện, BE2 (Admin) xử lý | `fraud_detection.js`, `admin_service.js` |
 | Thông báo, chatbot, Admin | BE2 | `notification_service.js`, `chat_service.js`, `admin_service.js` |

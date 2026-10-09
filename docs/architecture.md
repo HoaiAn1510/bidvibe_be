@@ -76,6 +76,7 @@ Ghi lại để cả nhóm làm theo; đổi thì cập nhật mục này trư�
 5. **Duyệt tin:** BE2 đặt `listings.status = 'approved'` rồi gọi `createAuctionForListing` (BE1) trong cùng giao dịch; hàm đó chuyển tin sang `live`. Vì vậy sau khi duyệt, tin luôn ở `live`, còn `approved` chỉ tồn tại bên trong giao dịch.
 6. **"Seller đã gửi hàng về kho"** không có cột riêng trong schema: biểu diễn bằng một dòng `warehouse_receipts` có `received_at = NULL`; kho bấm nhận thì điền `received_at`. Không cần migration mới.
 7. **Hoàn tiền tranh chấp:** schema không có `payout_status` kiểu "đã hoàn", nên sau khi hoàn đơn giữ `payout_status = 'disputed'` và tranh chấp ghi `resolution = 'refund'`; tin đăng chuyển `cancelled`.
+8. **Địa chỉ giao hàng (migration 005):** đơn trỏ tới `addresses` qua `orders.shipping_address_id` (nullable cho đơn cũ). Để không làm sai lịch sử giao hàng: xoá là xoá mềm (`deleted_at`); sửa một địa chỉ mà đơn đã gửi đi đang dùng thì tạo dòng mới (id mới), đơn đã gửi giữ dòng cũ. Người mua chọn địa chỉ qua API riêng của BE2, không sửa luồng thanh toán của BE1.
 
 ## Dữ liệu demo
 

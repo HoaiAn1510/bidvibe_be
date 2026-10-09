@@ -133,8 +133,9 @@ Chưa gọi mô hình AI. Từ 3 phiên cùng danh mục đã kết thúc trở 
 |---|---|---|---|
 | GET | `/api/orders/selling` | seller | Đơn đã bán của tôi, `?stage=` (xem bảng giai đoạn) |
 | POST | `/api/orders/:id/ship-to-warehouse` | seller | Báo đã gửi hàng về kho. Đơn phải `paid`, chưa gửi, không có tranh chấp |
+| POST | `/api/orders/:id/shipping-address` | bidder | `{ addressId }` — chọn / đổi địa chỉ giao hàng cho đơn của mình, được đổi tới trước khi kho gửi đi (xem mục 6a) |
 | POST | `/api/orders/:id/confirm-delivery` | bidder | Xác nhận đã nhận hàng → giải ngân cho Seller |
-| GET | `/api/orders/:id/tracking` | bidder, seller | Tiến trình kho / vận chuyển / giải ngân của đơn của mình |
+| GET | `/api/orders/:id/tracking` | bidder, seller | Tiến trình kho / vận chuyển / giải ngân của đơn của mình. Chỉ người mua thấy `shippingAddress` |
 
 Đơn hàng do BE1 tạo khi phiên kết thúc; xem và thanh toán qua `GET /api/orders/mine`, `GET /api/orders/:id`, `POST /api/orders/:id/pay` (BE1).
 
@@ -159,21 +160,49 @@ Giai đoạn (`stage`) suy ra từ dữ liệu:
   "deliveredConfirmedAt": "2026-10-09T15:36:00.000Z", "stage": "completed",
   "warehouse": { "orderCode": "BV-091026-0018", "receivedAt": "...", "inspectionResult": "match", "inspectionNotes": "...", "inspectedBy": "Kho test" },
   "shipment": { "status": "delivered", "trackingCode": "GHNTEST0001", "updatedAt": "..." },
+  "shippingAddress": { "id": "1", "recipientName": "Người mua Một", "phone": "0903 112 233",
+    "addressLine": "45A Võ Văn Tần", "ward": "Phường 6", "district": "Quận 3", "city": "TP.HCM" },
   "events": [ { "step": "packing", "note": "...", "at": "..." }, { "step": "shipped", ... }, { "step": "delivered", ... } ]
 } }
 ```
 
 Lỗi `409`: `INVALID_STATE`, `ALREADY_SHIPPED`, `DISPUTE_OPEN`, `NOT_DELIVERED`, `ALREADY_CONFIRMED`, `ALREADY_RELEASED`.
 
+## 6a. Địa chỉ giao hàng (Bidder)
+
+| Method | Đường dẫn | Vai trò | Body |
+|---|---|---|---|
+| GET | `/api/addresses` | bidder | → `{ addresses: [...] }`, địa chỉ mặc định đứng đầu |
+| POST | `/api/addresses` | bidder | `{ recipientName, phone, addressLine, city, ward?, district?, isDefault? }` |
+| PATCH | `/api/addresses/:id` | bidder | Các trường như khi thêm (gửi trường nào sửa trường đó) |
+| POST | `/api/addresses/:id/default` | bidder | Đặt làm địa chỉ mặc định |
+| DELETE | `/api/addresses/:id` | bidder | Xoá |
+| POST | `/api/orders/:id/shipping-address` | bidder | `{ addressId }` — gắn địa chỉ vào đơn của mình |
+
+Quy tắc:
+- Bắt buộc `recipientName`, `phone` (9–15 chữ số, cho phép khoảng trắng, `+`, `-`, `.`, ngoặc), `addressLine`, `city`. Tối đa 10 địa chỉ mỗi tài khoản.
+- Địa chỉ đầu tiên tự thành mặc định; mỗi tài khoản chỉ có một địa chỉ mặc định. Xoá địa chỉ mặc định thì địa chỉ mới nhất còn lại thành mặc định.
+- Địa chỉ của người khác (hoặc đã xoá) trả `404 NOT_FOUND` ở mọi thao tác.
+- **Giữ đúng lịch sử giao hàng:** xoá là xoá mềm, đơn đã gửi vẫn đọc được địa chỉ cũ. Sửa một địa chỉ mà đơn đã gửi đi đang dùng thì backend tạo **địa chỉ mới với `id` mới** (phản hồi trả `id` mới), đơn đã gửi giữ bản cũ, đơn chưa gửi chuyển sang bản mới. Xoá địa chỉ thì đơn chưa gửi đang dùng nó bị bỏ gắn, người mua phải chọn lại.
+- Gắn vào đơn: đơn của mình, chưa quá hạn thanh toán, kho chưa gửi đi (sau bước `/ship` trả `409 ALREADY_SHIPPED`). Có thể gắn ngay từ lúc đơn còn chờ thanh toán.
+
+```json
+// POST /api/addresses -> 201
+{ "success": true, "error": null, "data": {
+  "id": "1", "recipientName": "Người mua Một", "phone": "0903 112 233", "addressLine": "45 Võ Văn Tần",
+  "ward": "Phường 6", "district": "Quận 3", "city": "TP.HCM", "isDefault": true, "createdAt": "..."
+} }
+```
+
 ## 7. Kho vận (Warehouse)
 
 | Method | Đường dẫn | Body | Điều kiện → kết quả |
 |---|---|---|---|
-| GET | `/api/warehouse/orders` | `?stage=` | Đơn Seller đã báo gửi; có tên, số điện thoại người mua |
+| GET | `/api/warehouse/orders` | `?stage=` | Đơn Seller đã báo gửi; có tên, số điện thoại người mua và `shippingAddress` (null nếu người mua chưa chọn) |
 | POST | `/api/warehouse/orders/:id/receive` | — | Seller đã báo gửi, chưa nhận → ghi `received_at` |
 | POST | `/api/warehouse/orders/:id/inspect` | `{ result: 'match' \| 'mismatch', notes }` | Đã nhận, chưa kiểm. `mismatch` bắt buộc `notes`, tự mở tranh chấp nguồn `warehouse` (`reporter_id` NULL), `payout_status` → `disputed` |
 | POST | `/api/warehouse/orders/:id/pack` | `{ notes? }` | Kiểm đạt, chưa có tranh chấp → `shipments.status = 'packing'` |
-| POST | `/api/warehouse/orders/:id/ship` | `{ carrier, trackingCode }` | `packing` → `shipped` |
+| POST | `/api/warehouse/orders/:id/ship` | `{ carrier, trackingCode }` | `packing` → `shipped`. Đơn chưa có địa chỉ giao hàng → `409 ORDER_NO_ADDRESS` |
 | POST | `/api/warehouse/orders/:id/deliver` | — | `shipped` → `delivered`, đặt `payout_deadline` = bây giờ + 72 giờ |
 
 Mỗi bước ghi một dòng `shipment_events`; sai thứ tự trả `409 INVALID_STATE`. Bước nhận / gửi / giao thông báo cho người mua.
