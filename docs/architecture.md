@@ -29,7 +29,7 @@ Mọi endpoint trả về theo format thống nhất (theo đúng `middleware/er
 
 ### Dùng chung (hạn chế sửa sau khi đã thống nhất)
 - `config/env.js`, `config/db.js`
-- `middleware/errorHandler.js`, `middleware/auth.js` (xác thực JWT tự ký, dựa trên `accounts.password_hash` — chưa triển khai)
+- `middleware/errorHandler.js`, `middleware/auth.js` (`requireAuth` xác thực JWT, `requireRole` kiểm tra role)
 - `migrations/` (schema PostgreSQL, chạy bằng `npm run db:migrate`)
 
 ## Quy tắc khi cần sửa file dùng chung
