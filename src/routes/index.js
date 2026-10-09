@@ -30,6 +30,9 @@ router.use('/listings', require('./listing.routes'));
 router.use('/appraisals', require('./appraisal.routes'));
 router.use('/ai', require('./ai.routes'));
 router.use('/warehouse', require('./warehouse.routes'));
+router.use('/disputes', require('./dispute.routes'));
+router.use('/admin', require('./admin.routes'));
+router.use('/chat', require('./chat.routes'));
 // Phải đứng TRƯỚC /orders của BE1 (xem chú thích trong fulfilment.routes.js).
 router.use('/orders', require('./fulfilment.routes'));
 
