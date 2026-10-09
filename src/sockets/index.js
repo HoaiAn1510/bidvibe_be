@@ -1,12 +1,15 @@
+const registerAuctionSocket = require('./auction_socket');
+
+let ioInstance = null;
+
 // Khởi tạo các handler Socket.io
-module.exports = (io) => {
-  io.on('connection', (socket) => {
-    console.log(`[socket] connected: ${socket.id}`);
-
-    // Vào / rời phòng đấu giá
-    socket.on('auction:join', (auctionId) => socket.join(`auction:${auctionId}`));
-    socket.on('auction:leave', (auctionId) => socket.leave(`auction:${auctionId}`));
-
-    socket.on('disconnect', () => console.log(`[socket] disconnected: ${socket.id}`));
-  });
+const registerSockets = (io) => {
+  ioInstance = io;
+  registerAuctionSocket(io);
 };
+
+// Cho service đẩy sự kiện real-time mà không cần truyền io qua từng hàm.
+// Trả về null khi chưa khởi tạo (ví dụ chạy script/test không có server).
+registerSockets.getIo = () => ioInstance;
+
+module.exports = registerSockets;
