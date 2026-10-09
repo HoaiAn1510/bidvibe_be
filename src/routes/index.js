@@ -1,6 +1,7 @@
 const express = require('express');
 const { requireAuth } = require('../middleware/auth');
 const authService = require('../services/auth_service');
+const listingService = require('../services/listing_service');
 
 const router = express.Router();
 
@@ -20,6 +21,16 @@ router.get('/me', requireAuth, async (req, res, next) => {
 });
 
 router.use('/notifications', require('./notification.routes'));
+
+// ---- BE2: Marketplace Operations ----
+router.get('/categories', requireAuth, async (req, res) => {
+  res.json({ success: true, data: { categories: await listingService.listCategories() }, error: null });
+});
+router.use('/listings', require('./listing.routes'));
+router.use('/appraisals', require('./appraisal.routes'));
+router.use('/ai', require('./ai.routes'));
+
+// ---- BE1: Auction Core ----
 
 router.use('/auctions', require('./auction.routes'));
 router.use('/bids', require('./bid.routes'));
