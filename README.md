@@ -32,6 +32,8 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 | `npm run dev` | Chạy server, tự khởi động lại khi sửa code |
 | `npm start` | Chạy server (không tự khởi động lại) |
 | `npm run db:migrate` | Chạy các file trong `migrations/` chưa được áp dụng |
+| `npm run db:seed` | Thêm dữ liệu demo (BE1 + BE2), chạy lại nhiều lần không bị trùng. Mật khẩu demo `123456` |
+| `npm run test:be1` | Kiểm thử end-to-end phần đấu giá/ví trên DB thật, tự dọn dữ liệu tạm |
 
 ## Cấu trúc thư mục
 
