@@ -29,6 +29,9 @@ router.get('/categories', requireAuth, async (req, res) => {
 router.use('/listings', require('./listing.routes'));
 router.use('/appraisals', require('./appraisal.routes'));
 router.use('/ai', require('./ai.routes'));
+router.use('/warehouse', require('./warehouse.routes'));
+// Phải đứng TRƯỚC /orders của BE1 (xem chú thích trong fulfilment.routes.js).
+router.use('/orders', require('./fulfilment.routes'));
 
 // ---- BE1: Auction Core ----
 

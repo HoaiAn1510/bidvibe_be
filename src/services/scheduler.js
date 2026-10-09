@@ -1,6 +1,7 @@
 // Tiến trình nền phía server: đóng phiên hết giờ và xử lý đơn quá hạn thanh toán.
 // Poll mỗi vài giây theo index idx_auctions_status_ends / idx_orders_payment_deadline.
 const engine = require('./auction_engine');
+const payout = require('./payout_service'); // BE2: tự giải ngân sau 72 giờ
 
 const INTERVAL_MS = 5000;
 let timer = null;
@@ -14,6 +15,8 @@ async function tick() {
     if (closed.length) console.log(`[scheduler] đã đóng ${closed.length} phiên`);
     const expired = await engine.processPaymentTimeouts();
     if (expired.length) console.log(`[scheduler] ${expired.length} đơn quá hạn thanh toán`);
+    const released = await payout.releaseOverduePayouts(); // BE2, tắt bằng AUTO_PAYOUT_ENABLED=false
+    if (released.length) console.log(`[scheduler] tự giải ngân ${released.length} đơn`);
   } catch (err) {
     console.error('[scheduler]', err.message);
   } finally {
