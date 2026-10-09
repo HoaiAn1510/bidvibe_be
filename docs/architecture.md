@@ -61,16 +61,9 @@ Hàm BE1 mà BE2 gọi (tên thật trong code, xem thêm `docs/api_be1.md`):
 - Real-time: sự kiện `notification:new` gửi vào phòng `user:<accountId>` (socket tự vào phòng này khi kết nối bằng JWT tài khoản). `io` lấy qua `registerSockets.getIo()`, không cần truyền qua tham số.
 - Chỉ tài khoản Bidder/Seller có thông báo; tài khoản nội bộ (ops) gọi API thông báo nhận `403 FORBIDDEN`.
 
-## API BE2 hiện có
+## API BE2
 
-| Method | Đường dẫn | Ghi chú |
-|---|---|---|
-| POST | `/api/auth/register` | `{ fullName, email, phone?, password, role: 'bidder' \| 'seller', shopName? }`; email trùng → `409 EMAIL_TAKEN` |
-| POST | `/api/auth/login` | Bidder/Seller → `{ account, role, token }` |
-| POST | `/api/auth/ops/login` | Thẩm định / Kho vận / Admin |
-| GET | `/api/me` | Hồ sơ của người đang đăng nhập (`kind: 'account' \| 'ops'`) |
-| GET | `/api/notifications?limit=&offset=` | `{ notifications, unreadCount }` |
-| POST | `/api/notifications/:id/read` | Đánh dấu đã đọc; thông báo của người khác → `404` |
+Danh sách đầy đủ (method, đường dẫn, vai trò, body, phản hồi mẫu, mã lỗi) nằm ở [`docs/api.md`](api.md). API BE1 ở [`docs/api_be1.md`](api_be1.md).
 
 ## Quyết định mặc định cho các câu hỏi còn mở
 
@@ -79,6 +72,10 @@ Ghi lại để cả nhóm làm theo; đổi thì cập nhật mục này trư�
 1. **Giải ngân cho Seller chỉ đổi `orders.payout_status`** (`pending` → `released`). Chưa có ví Seller, nên không cộng tiền vào đâu; tiền coi như nền tảng chuyển khoản cho người bán ngoài hệ thống.
 2. **Ảnh tin đăng chỉ lưu URL** trong `listing_photos` (`url`, `order_index`). Backend không nhận file upload; app tự tải ảnh lên nơi khác rồi gửi URL. Seed dùng ảnh mẫu `picsum.photos`.
 3. **AI gợi ý giá và chatbot dùng nội dung soạn sẵn**, chưa gọi mô hình thật (`ANTHROPIC_API_KEY` để trống). Giữ nguyên chữ ký hàm để sau này thay bằng lời gọi mô hình mà không đổi API.
+4. **Chống chốt phút chót là 30 giây**, đúng như code BE1 (`SNIPE_WINDOW_MS`).
+5. **Duyệt tin:** BE2 đặt `listings.status = 'approved'` rồi gọi `createAuctionForListing` (BE1) trong cùng giao dịch; hàm đó chuyển tin sang `live`. Vì vậy sau khi duyệt, tin luôn ở `live`, còn `approved` chỉ tồn tại bên trong giao dịch.
+6. **"Seller đã gửi hàng về kho"** không có cột riêng trong schema: biểu diễn bằng một dòng `warehouse_receipts` có `received_at = NULL`; kho bấm nhận thì điền `received_at`. Không cần migration mới.
+7. **Hoàn tiền tranh chấp:** schema không có `payout_status` kiểu "đã hoàn", nên sau khi hoàn đơn giữ `payout_status = 'disputed'` và tranh chấp ghi `resolution = 'refund'`; tin đăng chuyển `cancelled`.
 
 ## Dữ liệu demo
 
