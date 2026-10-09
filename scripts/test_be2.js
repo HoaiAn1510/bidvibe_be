@@ -39,7 +39,7 @@ function summarize(json) {
 }
 
 // Gọi API thật, kiểm tra mã trạng thái, ghi lại một dòng cho báo cáo.
-async function api(label, method, url, { token, body, raw, expect = 200, note } = {}) {
+async function api(label, method, url, { token, body, raw, expect = 200, code, note } = {}) {
   const res = await fetch(base + url, {
     method,
     headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
@@ -49,6 +49,7 @@ async function api(label, method, url, { token, body, raw, expect = 200, note } 
   const shown = url.replace(/^\/api/, '');
   assert.strictEqual(res.status, expect, `${label}: mong ${expect}, nhận ${res.status} ${JSON.stringify(json)}`);
   assert.ok('success' in json && 'data' in json && 'error' in json, `${label}: sai format phản hồi`);
+  if (code) assert.strictEqual(json.error && json.error.code, code, `${label}: mong mã ${code}, nhận ${JSON.stringify(json.error)}`);
   const summary = note ? note(json) : summarize(json);
   rows.push({ section, label, method, url: `/api${shown}`, status: res.status, summary });
   passed += 1;
@@ -193,7 +194,34 @@ async function main() {
   record('Người thua được hoàn cọc về ví', `Bidder 2: held ${b2Before.held} -> ${b2After.held}, balance ${b2Before.balance} -> ${b2After.balance}`);
 
   // ------------------------------------------------------------------
-  begin('4. Thanh toán, gửi kho, kho xử lý, xác nhận, giải ngân');
+  begin('4. Địa chỉ giao hàng của người mua');
+  await api('Bidder 1 chưa có địa chỉ', 'GET', '/api/addresses', { token: T.b1, note: (j) => `${j.data.addresses.length} địa chỉ` });
+  await api('Seller không dùng API địa chỉ', 'GET', '/api/addresses', { token: T.seller, expect: 403 });
+  await api('Thêm địa chỉ với số điện thoại sai', 'POST', '/api/addresses',
+    { token: T.b1, body: { recipientName: 'Người mua Một', phone: 'abc', addressLine: '45 Võ Văn Tần', city: 'TP.HCM' }, expect: 400, code: 'VALIDATION_ERROR' });
+  await api('Thêm địa chỉ thiếu địa chỉ', 'POST', '/api/addresses',
+    { token: T.b1, body: { recipientName: 'Người mua Một', phone: '0903112233', addressLine: '  ', city: 'TP.HCM' }, expect: 400, code: 'VALIDATION_ERROR' });
+  const addrA = await api('Thêm địa chỉ đầu tiên (tự thành mặc định)', 'POST', '/api/addresses', {
+    token: T.b1, expect: 201, note: (j) => `id=${j.data.id}, isDefault=${j.data.isDefault}`,
+    body: { recipientName: 'Người mua Một', phone: '0903 112 233', addressLine: '45 Võ Văn Tần', ward: 'Phường 6', district: 'Quận 3', city: 'TP.HCM' },
+  });
+  assert.strictEqual(addrA.isDefault, true);
+  const addrB = await api('Thêm địa chỉ thứ hai', 'POST', '/api/addresses', {
+    token: T.b1, expect: 201, note: (j) => `id=${j.data.id}, isDefault=${j.data.isDefault}`,
+    body: { recipientName: 'Người mua Một (cơ quan)', phone: '0903 112 234', addressLine: '12 Phố Huế', district: 'Hai Bà Trưng', city: 'Hà Nội' },
+  });
+  await api('Đặt địa chỉ thứ hai làm mặc định', 'POST', `/api/addresses/${addrB.id}/default`, { token: T.b1, note: (j) => `isDefault=${j.data.isDefault}` });
+  const listed = await api('Danh sách sau khi đổi mặc định', 'GET', '/api/addresses',
+    { token: T.b1, note: (j) => j.data.addresses.map((a) => `${a.id}${a.isDefault ? '(mặc định)' : ''}`).join(', ') });
+  assert.strictEqual(listed.addresses.filter((a) => a.isDefault).length, 1);
+  await api('Sửa địa chỉ (chưa đơn nào dùng, sửa tại chỗ)', 'PATCH', `/api/addresses/${addrA.id}`,
+    { token: T.b1, body: { addressLine: '45A Võ Văn Tần' }, note: (j) => `id=${j.data.id}, ${j.data.addressLine}` });
+  await api('Bidder 2 sửa địa chỉ của Bidder 1', 'PATCH', `/api/addresses/${addrA.id}`, { token: T.b2, body: { city: 'Huế' }, expect: 404 });
+  await api('Bidder 2 xoá địa chỉ của Bidder 1', 'DELETE', `/api/addresses/${addrA.id}`, { token: T.b2, expect: 404 });
+  await api('Bidder 2 đặt mặc định địa chỉ của Bidder 1', 'POST', `/api/addresses/${addrA.id}/default`, { token: T.b2, expect: 404 });
+
+  // ------------------------------------------------------------------
+  begin('5. Thanh toán, gửi kho, kho xử lý, xác nhận, giải ngân');
   const O1 = closed.orderId;
   await api('Đơn thắng của Bidder 1', 'GET', '/api/orders/mine',
     { token: T.b1, note: (j) => { const o = j.data.orders.find((x) => String(x.id) === String(O1)); return `totalDue=${o.totalDue}, amountToPay=${o.amountToPay}`; } });
@@ -214,8 +242,22 @@ async function main() {
     { token: T.wh, body: { result: 'match', notes: 'Đạt, tình trạng Như mới' }, note: (j) => `stage=${j.data.stage}` });
   await api('Gửi đi trước khi đóng gói', 'POST', `/api/warehouse/orders/${O1}/ship`, { token: T.wh, body: { carrier: 'GHN', trackingCode: 'X' }, expect: 409 });
   await api('Đóng gói', 'POST', `/api/warehouse/orders/${O1}/pack`, { token: T.wh, body: {}, note: (j) => `stage=${j.data.stage}` });
+  await api('Gửi đi khi đơn chưa có địa chỉ', 'POST', `/api/warehouse/orders/${O1}/ship`,
+    { token: T.wh, body: { carrier: 'GHN Express', trackingCode: 'GHNTEST0001' }, expect: 409, code: 'ORDER_NO_ADDRESS' });
+  await api('Bidder 2 gắn địa chỉ vào đơn của Bidder 1', 'POST', `/api/orders/${O1}/shipping-address`,
+    { token: T.b2, body: { addressId: Number(addrA.id) }, expect: 404 });
+  await api('Seller gắn địa chỉ vào đơn', 'POST', `/api/orders/${O1}/shipping-address`,
+    { token: T.seller, body: { addressId: Number(addrA.id) }, expect: 403 });
+  await api('Bidder 1 chọn địa chỉ giao hàng', 'POST', `/api/orders/${O1}/shipping-address`,
+    { token: T.b1, body: { addressId: Number(addrB.id) }, note: (j) => `${j.data.shippingAddress.addressLine}, ${j.data.shippingAddress.city}` });
+  await api('Bidder 1 đổi sang địa chỉ khác (còn trước khi gửi)', 'POST', `/api/orders/${O1}/shipping-address`,
+    { token: T.b1, body: { addressId: Number(addrA.id) }, note: (j) => `${j.data.shippingAddress.addressLine}, ${j.data.shippingAddress.city}` });
+  await api('Kho thấy địa chỉ giao hàng', 'GET', '/api/warehouse/orders?stage=packed',
+    { token: T.wh, note: (j) => { const o = j.data.orders.find((x) => String(x.id) === String(O1)); return `${o.shippingAddress.recipientName} · ${o.shippingAddress.phone} · ${o.shippingAddress.addressLine}, ${o.shippingAddress.city}`; } });
   await api('Gửi cho đơn vị vận chuyển', 'POST', `/api/warehouse/orders/${O1}/ship`,
     { token: T.wh, body: { carrier: 'GHN Express', trackingCode: 'GHNTEST0001' }, note: (j) => `stage=${j.data.stage}, mã ${j.data.shipment.trackingCode}` });
+  await api('Đổi địa chỉ khi đơn đã gửi đi', 'POST', `/api/orders/${O1}/shipping-address`,
+    { token: T.b1, body: { addressId: Number(addrB.id) }, expect: 409, code: 'ALREADY_SHIPPED' });
   await api('Bidder xác nhận khi chưa giao', 'POST', `/api/orders/${O1}/confirm-delivery`, { token: T.b1, expect: 409 });
   const dv = await api('Giao thành công', 'POST', `/api/warehouse/orders/${O1}/deliver`,
     { token: T.wh, note: (j) => `stage=${j.data.stage}, payoutDeadline=${j.data.payoutDeadline}` });
@@ -226,7 +268,24 @@ async function main() {
     { token: T.b1, note: (j) => `stage=${j.data.stage}, payoutStatus=${j.data.payoutStatus}` });
   await api('Xác nhận lần hai', 'POST', `/api/orders/${O1}/confirm-delivery`, { token: T.b1, expect: 409 });
   await api('Theo dõi đơn (người mua)', 'GET', `/api/orders/${O1}/tracking`,
-    { token: T.b1, note: (j) => `${j.data.events.map((e) => e.step).join(' -> ')}` });
+    { token: T.b1, note: (j) => `${j.data.events.map((e) => e.step).join(' -> ')}; giao tới ${j.data.shippingAddress.addressLine}` });
+  const sellerView = await api('Theo dõi đơn (người bán, không thấy địa chỉ)', 'GET', `/api/orders/${O1}/tracking`,
+    { token: T.seller, note: (j) => `có shippingAddress: ${'shippingAddress' in j.data}` });
+  assert.ok(!('shippingAddress' in sellerView));
+  // Địa chỉ đã gắn vào đơn đã gửi: sửa thì tạo bản mới, đơn cũ giữ nguyên nội dung.
+  const edited = await api('Sửa địa chỉ đơn đã gửi đang dùng (tạo bản mới)', 'PATCH', `/api/addresses/${addrA.id}`,
+    { token: T.b1, body: { addressLine: '99 Nguyễn Huệ' }, note: (j) => `id cũ=${addrA.id}, id mới=${j.data.id}` });
+  assert.notStrictEqual(String(edited.id), String(addrA.id));
+  const kept = await api('Đơn đã gửi vẫn giữ địa chỉ cũ', 'GET', `/api/orders/${O1}/tracking`,
+    { token: T.b1, note: (j) => `${j.data.shippingAddress.id}: ${j.data.shippingAddress.addressLine}` });
+  assert.strictEqual(kept.shippingAddress.addressLine, '45A Võ Văn Tần');
+  await api('Xoá địa chỉ (xoá mềm)', 'DELETE', `/api/addresses/${edited.id}`, { token: T.b1, note: (j) => `deleted=${j.data.deleted}` });
+  const remaining = await api('Danh sách sau khi xoá', 'GET', '/api/addresses',
+    { token: T.b1, note: (j) => `${j.data.addresses.length} địa chỉ, mặc định ${j.data.addresses.find((a) => a.isDefault).id}` });
+  assert.ok(!remaining.addresses.some((a) => String(a.id) === String(edited.id)));
+  const stillThere = await api('Đơn đã gửi vẫn đọc được địa chỉ sau khi xoá', 'GET', `/api/orders/${O1}/tracking`,
+    { token: T.b1, note: (j) => `${j.data.shippingAddress.addressLine}` });
+  assert.ok(stillThere.shippingAddress);
   const sn = await api('Seller nhận thông báo giải ngân', 'GET', '/api/notifications', { token: T.seller, note: (j) => j.data.notifications.map((n) => n.type).join(', ') });
   assert.ok(sn.notifications.some((n) => n.type === 'payout'));
 
@@ -246,15 +305,19 @@ async function main() {
     await api('Kho nhận hàng', 'POST', `/api/warehouse/orders/${c.orderId}/receive`, { token: T.wh });
     return { orderId: c.orderId, auctionId: a.auctionId };
   }
+  // Đơn của Bidder 1: chọn địa chỉ mặc định rồi đi hết các bước kho.
   async function shipAndDeliver(orderId) {
     await api('Kiểm hàng: khớp', 'POST', `/api/warehouse/orders/${orderId}/inspect`, { token: T.wh, body: { result: 'match' } });
     await api('Đóng gói', 'POST', `/api/warehouse/orders/${orderId}/pack`, { token: T.wh, body: {} });
+    const mine = await api('Bidder lấy địa chỉ mặc định', 'GET', '/api/addresses', { token: T.b1, note: (j) => `${j.data.addresses.length} địa chỉ` });
+    const def = mine.addresses.find((a) => a.isDefault);
+    await api('Bidder chọn địa chỉ giao hàng', 'POST', `/api/orders/${orderId}/shipping-address`, { token: T.b1, body: { addressId: Number(def.id) } });
     await api('Gửi đi', 'POST', `/api/warehouse/orders/${orderId}/ship`, { token: T.wh, body: { carrier: 'Viettel Post', trackingCode: `VTP${orderId}` } });
     await api('Giao thành công', 'POST', `/api/warehouse/orders/${orderId}/deliver`, { token: T.wh });
   }
 
   // ------------------------------------------------------------------
-  begin('5. Tranh chấp do Kho mở (hàng không khớp) -> Admin hoàn tiền');
+  begin('6. Tranh chấp do Kho mở (hàng không khớp) -> Admin hoàn tiền');
   const B = await sellOne('Bình gốm test BE2 (tranh chấp)', T.b2);
   await api('Kiểm hàng: không khớp thiếu ghi chú', 'POST', `/api/warehouse/orders/${B.orderId}/inspect`, { token: T.wh, body: { result: 'mismatch' }, expect: 400 });
   await api('Kiểm hàng: không khớp -> tự mở tranh chấp', 'POST', `/api/warehouse/orders/${B.orderId}/inspect`,
@@ -280,7 +343,7 @@ async function main() {
   await api('Phán quyết lần hai', 'POST', `/api/admin/disputes/${dB.id}/resolve`, { token: T.admin, body: { resolution: 'keep' }, expect: 409 });
 
   // ------------------------------------------------------------------
-  begin('6. Tranh chấp do Bidder mở sau khi giao -> Admin giữ nguyên, giải ngân');
+  begin('7. Tranh chấp do Bidder mở sau khi giao -> Admin giữ nguyên, giải ngân');
   const C = await sellOne('Đồng hồ test BE2 (giữ nguyên)', T.b1);
   await shipAndDeliver(C.orderId);
   await api('Bidder 2 mở tranh chấp đơn của người khác', 'POST', '/api/disputes',
@@ -292,7 +355,7 @@ async function main() {
     { token: T.admin, body: { resolution: 'keep' }, note: (j) => `resolution=${j.data.resolution}, payoutStatus=${j.data.payoutStatus}` });
 
   // ------------------------------------------------------------------
-  begin('7. Tự giải ngân sau 72 giờ');
+  begin('8. Tự giải ngân sau 72 giờ');
   const D = await sellOne('Radio test BE2 (tự giải ngân)', T.b1);
   await shipAndDeliver(D.orderId);
   const notYet = await payout.releaseOverduePayouts();
@@ -305,7 +368,7 @@ async function main() {
     { token: T.seller, note: (j) => `stage=${j.data.stage}, payoutStatus=${j.data.payoutStatus}, deliveredConfirmedAt=${j.data.deliveredConfirmedAt}` });
 
   // ------------------------------------------------------------------
-  begin('8. Phiên bị gắn cờ (fraud_detection của BE1) -> Admin xử lý');
+  begin('9. Phiên bị gắn cờ (fraud_detection của BE1) -> Admin xử lý');
   const l = await api('Tạo tin', 'POST', '/api/listings',
     { token: T.seller, expect: 201, body: { title: 'Máy ảnh test BE2 (gắn cờ)', categoryCode: 'elec', startingPrice: 1_000_000, durationHours: 24 } });
   await api('Thêm ảnh', 'POST', `/api/listings/${l.id}/photos`, { token: T.seller, body: { url: 'https://picsum.photos/seed/be2f/800/600' }, expect: 201 });
@@ -342,7 +405,7 @@ async function main() {
   await api('Xử lý cờ đã đóng', 'POST', `/api/admin/flags/${flag.id}/action`, { token: T.admin, body: { action: 'safe' }, expect: 409 });
 
   // ------------------------------------------------------------------
-  begin('9. Admin: bảng điều khiển, báo cáo, khoá tài khoản; Chatbot');
+  begin('10. Admin: bảng điều khiển, báo cáo, khoá tài khoản; Chatbot');
   await api('Bảng điều khiển', 'GET', '/api/admin/dashboard', { token: T.admin, note: (j) => `phiên live ${j.data.auctions.live}, tranh chấp mở ${j.data.disputes.open}, ký quỹ ${j.data.escrowHeld}` });
   await api('Báo cáo tuần', 'GET', '/api/admin/report/weekly', { token: T.admin, note: (j) => `${j.data.sales.orders} đơn, GMV ${j.data.sales.gmv}` });
   await api('Danh sách tài khoản (lọc theo từ khoá)', 'GET', `/api/admin/accounts?q=${PREFIX}`, { token: T.admin, note: (j) => `${j.data.accounts.length} tài khoản test` });
@@ -364,7 +427,7 @@ async function main() {
   await api('Người khác đọc lịch sử trò chuyện', 'GET', `/api/chat/sessions/${chat.sessionId}/messages`, { token: T.b2, expect: 404 });
 
   // ------------------------------------------------------------------
-  begin('10. Kiểm tra tính nhất quán của ví');
+  begin('11. Kiểm tra tính nhất quán của ví');
   const bad = await pool.query(
     `SELECT b.account_id FROM bidders b JOIN accounts a ON a.id = b.account_id
      JOIN LATERAL (SELECT balance_after FROM wallet_transactions w WHERE w.bidder_id = b.account_id ORDER BY id DESC LIMIT 1) t ON true
