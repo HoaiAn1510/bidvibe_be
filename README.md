@@ -96,6 +96,7 @@ Hai domain nối nhau qua các điểm sau, cần tôn trọng:
 - **Đăng nhập:** `auth.*` do BE2 phụ trách, nhưng bảng `ops_accounts` hiện chưa có cột `password_hash`; cần thêm bằng migration `003` trước khi làm đăng nhập cho Thẩm định / Kho vận / Admin.
 
 Chi tiết quy ước API và kiến trúc: xem [`docs/architecture.md`](docs/architecture.md).
+Luồng nghiệp vụ từ đăng ký đến giải ngân (kèm trạng thái triển khai, sơ đồ, luồng tiền): xem [`docs/mainflow.md`](docs/mainflow.md).
 
 ## Quy ước Git
 
