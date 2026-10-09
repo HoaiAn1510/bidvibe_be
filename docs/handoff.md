@@ -68,12 +68,10 @@ index (`idx_orders_payment_deadline`, `idx_orders_payout_deadline`).
 
 ## Việc cần làm tiếp theo (theo thứ tự)
 
-1. `migrations/003_...sql`: thêm cột `password_hash` cho `ops_accounts` (Thẩm định /
-   Kho vận / Admin hiện chưa đăng nhập được); đổi tên file số 003 không được đổi
-   lại 001/002 đã chạy.
-2. Thêm seed data tương đương dữ liệu giả hiện có trong `AppStore` (mỗi vai trò
-   >= 3 tài khoản, 10 phiên đấu giá a1-a10 ở đủ trạng thái, hàng chờ thẩm định, đơn
-   kho ở mọi trạng thái, phiên bị gắn cờ, tranh chấp).
+1. ~~`migrations/003_ops_password.sql`: thêm `password_hash` cho `ops_accounts`~~ — đã
+   xong, kèm đăng nhập JWT (`/api/auth/*`, `/api/me`).
+2. ~~Seed data tương đương dữ liệu giả trong `AppStore`~~ — đã xong: `npm run db:seed`
+   (xem mục "Dữ liệu demo" trong `docs/architecture.md`).
 3. Các thao tác ghi tiền và đổi trạng thái phải nằm trong một transaction ở phía
    server (tham gia phiên, đặt giá, thanh toán, đóng phiên, giải ngân, xử lý tranh
    chấp), dùng chung một client lấy từ pool. Với đặt giá, kiểm tra giá phải lớn hơn

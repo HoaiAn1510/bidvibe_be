@@ -11,4 +11,6 @@ module.exports = {
   databaseUrl: process.env.DATABASE_URL,
   dbSsl: process.env.DB_SSL === 'true',
   jwtSecret: process.env.JWT_SECRET,
+  // Job tự giải ngân sau 72 giờ (mặc định bật). Đặt AUTO_PAYOUT_ENABLED=false để tắt.
+  autoPayoutEnabled: process.env.AUTO_PAYOUT_ENABLED !== 'false',
 };

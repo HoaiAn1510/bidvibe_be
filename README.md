@@ -22,6 +22,7 @@ Xem đầy đủ trong `.env.example`. Các biến quan trọng:
 | `DATABASE_URL` | Chuỗi kết nối Postgres. Với Supabase dùng chuỗi **Session pooler** (host `*.pooler.supabase.com`, cổng 5432, username dạng `postgres.<mã project>`). **Không** dùng Direct connection: nó chỉ có IPv6 nên nhiều mạng không kết nối được. |
 | `DB_SSL` | `true` khi dùng Supabase. |
 | `JWT_SECRET` | Khoá ký token đăng nhập. Bắt buộc, không có giá trị mặc định. |
+| `AUTO_PAYOUT_ENABLED` | `false` để tắt job tự giải ngân sau 72 giờ (mặc định bật). |
 
 File `.env` chứa mật khẩu nên **không được đưa lên git** (đã có trong `.gitignore`). Mỗi người tự tạo `.env` của mình.
 
@@ -32,6 +33,10 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 | `npm run dev` | Chạy server, tự khởi động lại khi sửa code |
 | `npm start` | Chạy server (không tự khởi động lại) |
 | `npm run db:migrate` | Chạy các file trong `migrations/` chưa được áp dụng |
+| `npm run db:seed` | Thêm dữ liệu demo (BE1 + BE2), chạy lại nhiều lần không bị trùng. Mật khẩu demo `123456` |
+| `npm run test:be1` | Kiểm thử end-to-end phần đấu giá/ví trên DB thật, tự dọn dữ liệu tạm |
+| `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_*`, tự dọn) |
+| `npm test` | Chạy cả `test:be1` và `test:be2` |
 
 ## Cấu trúc thư mục
 
@@ -51,14 +56,14 @@ src/
 
 ## Cơ sở dữ liệu
 
-Schema nằm trong `migrations/001_init_schema.sql` (23 bảng nghiệp vụ) và là nguồn sự thật cho cấu trúc dữ liệu. Sơ đồ quan hệ xem trong Supabase: **Database → Schema Visualizer**.
+Schema gốc nằm trong `migrations/001_init_schema.sql` (23 bảng nghiệp vụ), các migration sau chỉ thêm: `003` mật khẩu tài khoản nội bộ, `004` loại giao dịch ví mất cọc, `005` bảng `addresses` và `orders.shipping_address_id`. Thư mục `migrations/` là nguồn sự thật cho cấu trúc dữ liệu. Sơ đồ quan hệ xem trong Supabase: **Database → Schema Visualizer**.
 
 | Nhóm | Bảng |
 |---|---|
 | Tài khoản | `accounts`, `bidders`, `sellers`, `ops_accounts` |
 | Tin đăng & thẩm định | `categories`, `listings`, `listing_photos`, `appraisals` |
 | Đấu giá | `auctions`, `auction_deposits`, `bids` |
-| Đơn hàng, kho, vận chuyển | `orders`, `warehouse_receipts`, `shipments`, `shipment_events` |
+| Đơn hàng, kho, vận chuyển | `orders`, `addresses` (địa chỉ giao hàng, migration 005), `warehouse_receipts`, `shipments`, `shipment_events` |
 | Ví | `wallet_transactions` |
 | Thông báo & chatbot | `notifications`, `chat_sessions`, `chat_messages` |
 | Gắn cờ & tranh chấp | `flagged_auctions`, `flag_evidence`, `disputes`, `dispute_timeline` |
@@ -90,10 +95,13 @@ Hai domain nối nhau qua các điểm sau, cần tôn trọng:
 - **Ví chỉ BE1 viết** (`wallet.*`), gồm các hàm giữ cọc, hoàn cọc, thanh toán, hoàn tiền; mỗi hàm nhận `client` để nằm chung giao dịch của nơi gọi. BE2 muốn hoàn tiền (ví dụ Admin xử lý tranh chấp) thì gọi hàm ví của BE1, không tự sửa số dư.
 - **Thông báo do BE2 viết** (hàm tạo thông báo, ghi bảng `notifications` và đẩy qua Socket.io nếu người nhận đang online). BE1 gọi hàm này khi có người bị vượt giá hoặc thắng phiên.
 - **Tạo phiên đấu giá:** khi Thẩm định duyệt một tin đăng, BE2 gọi một hàm do BE1 cung cấp để sinh `auctions`; BE2 không tự ghi vào bảng `auctions`.
-- **Đơn hàng (`orders`):** BE1 tạo khi phiên kết thúc; BE2 đọc và cập nhật phần kho, giao hàng, giải ngân.
-- **Đăng nhập:** `auth.*` do BE2 phụ trách, nhưng bảng `ops_accounts` hiện chưa có cột `password_hash`; cần thêm bằng migration `003` trước khi làm đăng nhập cho Thẩm định / Kho vận / Admin.
+- **Đơn hàng (`orders`):** BE1 tạo khi phiên kết thúc; BE2 đọc và cập nhật phần kho, giao hàng, giải ngân. Địa chỉ giao hàng (`orders.shipping_address_id`) do người mua chọn qua API của BE2 (`POST /api/orders/:id/shipping-address`), luồng thanh toán của BE1 không đổi; kho không gửi được hàng khi đơn chưa có địa chỉ (`409 ORDER_NO_ADDRESS`).
+- **Đăng nhập:** `auth.*` do BE2 phụ trách. Bidder / Seller đăng nhập qua `accounts.password_hash`, Thẩm định / Kho vận / Admin qua `ops_accounts.password_hash` (thêm ở migration `003`); tài khoản ops do Admin tạo qua `POST /api/admin/ops-accounts`.
+- **Tự giải ngân:** job của BE2 (`payout_service.releaseOverduePayouts`) chạy chung vòng `scheduler.js` của BE1, tắt bằng `AUTO_PAYOUT_ENABLED=false`.
 
 Chi tiết quy ước API và kiến trúc: xem [`docs/architecture.md`](docs/architecture.md).
+API: phần BE1 ở [`docs/api_be1.md`](docs/api_be1.md), phần BE2 ở [`docs/api.md`](docs/api.md). Kết quả kiểm thử BE2: [`docs/test-be2.md`](docs/test-be2.md).
+Luồng nghiệp vụ từ đăng ký đến giải ngân (kèm trạng thái triển khai, sơ đồ, luồng tiền): xem [`docs/mainflow.md`](docs/mainflow.md).
 
 ## Quy ước Git
 

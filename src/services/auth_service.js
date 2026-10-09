@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const { pool } = require('../config/db');
 const env = require('../config/env');
 const { AppError } = require('../middleware/errorHandler');
+const validate = require('../utils/validate');
 
 const SALT_ROUNDS = 10;
 const TOKEN_TTL = '7d';
@@ -22,15 +23,14 @@ function toAccountView(row) {
   };
 }
 
-async function register({ fullName, email, phone, password, role, shopName }) {
-  if (!['bidder', 'seller'].includes(role)) {
-    throw new AppError('Vai trò đăng ký phải là bidder hoặc seller', 400, 'VALIDATION_ERROR');
-  }
-  if (!fullName || !email || !password) {
-    throw new AppError('Thiếu họ tên, email hoặc mật khẩu', 400, 'VALIDATION_ERROR');
-  }
+async function register(input) {
+  const role = validate.oneOf(input.role, ['bidder', 'seller'], 'Vai trò đăng ký');
+  const fullName = validate.text(input.fullName, 'Họ tên', { max: 100 });
+  const normalizedEmail = validate.email(input.email);
+  const password = validate.password(input.password);
+  const phone = validate.text(input.phone, 'Số điện thoại', { max: 20, required: false });
+  const shopName = validate.text(input.shopName, 'Tên gian hàng', { max: 100, required: false });
 
-  const normalizedEmail = email.trim().toLowerCase();
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
 
   const client = await pool.connect();
@@ -176,4 +176,4 @@ async function getMe(user) {
   return { ...toAccountView(account), role: user.role, kind: 'account' };
 }
 
-module.exports = { register, login, loginOps, getMe };
+module.exports = { SALT_ROUNDS, register, login, loginOps, getMe };

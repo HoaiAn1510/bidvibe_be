@@ -14,6 +14,12 @@ const notFound = (req, res, next) => {
 
 // eslint-disable-next-line no-unused-vars
 const errorHandler = (err, req, res, next) => {
+  // express.json() ném lỗi này khi body không phải JSON hợp lệ.
+  if (err.type === 'entity.parse.failed') {
+    err = new AppError('Dữ liệu gửi lên không phải JSON hợp lệ', 400, 'INVALID_JSON');
+  } else if (err.type === 'entity.too.large') {
+    err = new AppError('Dữ liệu gửi lên quá lớn', 413, 'PAYLOAD_TOO_LARGE');
+  }
   const statusCode = err.statusCode || 500;
   if (statusCode >= 500) console.error(err);
 
