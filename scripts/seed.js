@@ -29,6 +29,15 @@ const BIDDERS = [
   ['Lê Bảo Châu', 'chau.le@outlook.com', '0938 778 899'],
   ['Phạm Gia Hưng', 'hung.pham@gmail.com', '0977 123 456'],
 ];
+// Địa chỉ giao hàng mặc định của người mua demo (migration 005, khớp app Flutter).
+// [email, người nhận, số điện thoại, địa chỉ, phường, quận, tỉnh / thành phố]
+const BUYER_ADDRESSES = [
+  ['minhanh@gmail.com', 'Nguyễn Minh Anh', '0903 112 233', '45 Võ Văn Tần', 'Phường 6', 'Quận 3', 'TP.HCM'],
+  ['viet.tran@gmail.com', 'Trần Quốc Việt', '0912 445 566', '12 Phố Huế', null, 'Hai Bà Trưng', 'Hà Nội'],
+  ['chau.le@outlook.com', 'Lê Bảo Châu', '0938 778 899', '27 Nguyễn Văn Linh', null, 'Hải Châu', 'Đà Nẵng'],
+  ['hung.pham@gmail.com', 'Phạm Gia Hưng', '0977 123 456', '88 Lý Thường Kiệt', null, 'Quận 10', 'TP.HCM'],
+];
+
 const SELLERS = [
   ['Nguyễn Hoàng Long', 'long@sneakersg.vn', '0908 556 120', 'Sneaker Sài Gòn', 4.9],
   ['Lê Thu Hà', 'ha@phocoxua.vn', '0983 220 415', 'Phố Cổ Collectibles', 4.9],
@@ -417,7 +426,8 @@ async function addTimeline(client, disputeId, entries) {
 
 async function main() {
   const stats = {
-    accounts: 0, ops: 0, pipeline: 0, sold: 0, flags: 0, approvals: 0, sellerDisputes: 0, skipped: [],
+    accounts: 0, ops: 0, pipeline: 0, sold: 0, flags: 0, approvals: 0, sellerDisputes: 0,
+    addresses: 0, linkedOrders: 0, skipped: [],
   };
 
   await inTransaction(async (client) => {
@@ -506,6 +516,33 @@ async function main() {
       stats.sold += 1;
     }
 
+    // Địa chỉ giao hàng: mỗi người mua demo có một địa chỉ mặc định (nếu chưa có địa chỉ nào),
+    // và đơn chờ thanh toán / đã thanh toán của họ chưa có địa chỉ thì gắn địa chỉ mặc định,
+    // để kho gửi được hàng (bước /ship đòi đơn phải có địa chỉ).
+    for (const [email, name, phone, line, ward, district, city] of BUYER_ADDRESSES) {
+      const accountId = ctx.accounts[email];
+      const has = await client.query(
+        'SELECT 1 FROM addresses WHERE account_id = $1 AND deleted_at IS NULL LIMIT 1', [accountId],
+      );
+      if (!has.rowCount) {
+        await client.query(
+          `INSERT INTO addresses (account_id, recipient_name, phone, address_line, ward, district, city, is_default)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, true)`,
+          [accountId, name, phone, line, ward, district, city],
+        );
+        stats.addresses += 1;
+      }
+      const linked = await client.query(
+        `UPDATE orders SET shipping_address_id = (
+           SELECT id FROM addresses WHERE account_id = $1 AND deleted_at IS NULL
+           ORDER BY is_default DESC, id DESC LIMIT 1)
+         WHERE bidder_id = $1 AND shipping_address_id IS NULL
+           AND payment_status IN ('awaiting_payment', 'paid')`,
+        [accountId],
+      );
+      stats.linkedOrders += linked.rowCount;
+    }
+
     // Cờ AI trên các phiên đang diễn ra.
     for (const f of FLAGS) {
       const { rows } = await client.query(
@@ -540,6 +577,7 @@ async function main() {
   console.log(`  lịch sử duyệt thêm cho phiên đang diễn ra: ${stats.approvals}`);
   console.log(`  phiên đã bán + đơn hàng: ${stats.sold} (tranh chấp từ người bán: ${stats.sellerDisputes})`);
   console.log(`  cờ AI: ${stats.flags}`);
+  console.log(`  địa chỉ giao hàng mới: ${stats.addresses}, đơn được gắn địa chỉ: ${stats.linkedOrders}`);
   stats.skipped.forEach((s) => console.log(`  bỏ qua: ${s}`));
   console.log(`Mật khẩu demo mọi tài khoản: ${PASSWORD}. Ops đăng nhập qua POST /api/auth/ops/login.`);
 }
