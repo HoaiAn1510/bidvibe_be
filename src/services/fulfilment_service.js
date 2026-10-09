@@ -46,6 +46,8 @@ const ORDER_SELECT = `
          r.id AS receipt_id, r.order_code, r.received_at, r.inspection_result, r.inspection_notes,
          ins.name AS inspected_by,
          s.id AS shipment_id, s.status AS shipment_status, s.tracking_code, s.updated_at AS shipment_updated_at,
+         sa.id AS addr_id, sa.recipient_name AS addr_name, sa.phone AS addr_phone, sa.address_line AS addr_line,
+         sa.ward AS addr_ward, sa.district AS addr_district, sa.city AS addr_city,
          ${STAGE_SQL} AS stage
   FROM orders o
   JOIN auctions a ON a.id = o.auction_id
@@ -56,9 +58,24 @@ const ORDER_SELECT = `
   LEFT JOIN warehouse_receipts r ON r.order_id = o.id
   LEFT JOIN ops_accounts ins ON ins.id = r.inspected_by
   LEFT JOIN shipments s ON s.order_id = o.id
+  LEFT JOIN addresses sa ON sa.id = o.shipping_address_id
 `;
 
-function toView(r, { withBuyerContact = false } = {}) {
+// Địa chỉ giao hàng chỉ hiện cho kho và chính người mua (người bán không cần biết).
+function shippingAddress(r) {
+  if (!r.addr_id) return null;
+  return {
+    id: r.addr_id,
+    recipientName: r.addr_name,
+    phone: r.addr_phone,
+    addressLine: r.addr_line,
+    ward: r.addr_ward,
+    district: r.addr_district,
+    city: r.addr_city,
+  };
+}
+
+function toView(r, { withBuyerContact = false, withAddress = withBuyerContact } = {}) {
   return {
     id: r.id,
     auctionId: r.auction_id,
@@ -87,6 +104,7 @@ function toView(r, { withBuyerContact = false } = {}) {
     shipment: r.shipment_id
       ? { status: r.shipment_status, trackingCode: r.tracking_code, updatedAt: r.shipment_updated_at }
       : null,
+    ...(withAddress ? { shippingAddress: shippingAddress(r) } : {}),
     createdAt: r.created_at,
   };
 }
@@ -113,7 +131,7 @@ async function loadView(executor, orderId, opts) {
 async function lockOrder(client, orderId) {
   const { rows } = await client.query(
     `SELECT o.id, o.auction_id, o.bidder_id, o.seller_id, o.final_price, o.payment_status,
-            o.payout_status, o.delivered_confirmed_at, l.title
+            o.payout_status, o.delivered_confirmed_at, o.shipping_address_id, l.title
      FROM orders o JOIN auctions a ON a.id = o.auction_id JOIN listings l ON l.id = a.listing_id
      WHERE o.id = $1 FOR UPDATE OF o`,
     [orderId],
@@ -295,6 +313,9 @@ async function ship(orderId, input = {}) {
     const s = await lockShipment(client, orderId);
     if (!s || s.status !== 'packing') throw conflict('Chỉ gửi đi được đơn đã đóng gói');
     if (o.payout_status === 'disputed') throw conflict('Đơn đang có tranh chấp, chờ Admin xử lý', 'DISPUTE_OPEN');
+    if (!o.shipping_address_id) {
+      throw conflict('Người mua chưa chọn địa chỉ giao hàng cho đơn này, chưa thể gửi đi', 'ORDER_NO_ADDRESS');
+    }
     await client.query(
       `UPDATE shipments SET status = 'shipped', tracking_code = $2, updated_at = now() WHERE id = $1`,
       [s.id, trackingCode],
@@ -337,13 +358,37 @@ async function confirmDelivery(bidderId, orderId) {
 
     await client.query('UPDATE orders SET delivered_confirmed_at = now() WHERE id = $1', [orderId]);
     const notes = await releasePayout(client, o, { auto: false });
-    return { notes, orderId };
+    return { notes, orderId, opts: { withAddress: true } };
   });
 }
 
+// Người mua chọn / đổi địa chỉ giao hàng cho đơn của mình, được phép tới trước khi kho gửi đi.
+async function setShippingAddress(bidderId, orderId, input = {}) {
+  const addressId = validate.int(input.addressId, 'addressId', { min: 1 });
+  await inTransaction(async (client) => {
+    const o = await lockOrder(client, orderId);
+    if (String(o.bidder_id) !== String(bidderId)) throw new AppError('Không tìm thấy đơn hàng', 404, 'NOT_FOUND');
+    if (o.payment_status === 'expired') throw conflict('Đơn đã bị huỷ do quá hạn thanh toán');
+    const s = await client.query('SELECT status FROM shipments WHERE order_id = $1', [orderId]);
+    if (s.rows[0] && s.rows[0].status !== 'packing') {
+      throw conflict('Đơn đã được gửi đi, không thể đổi địa chỉ giao hàng', 'ALREADY_SHIPPED');
+    }
+    const a = await client.query(
+      'SELECT account_id FROM addresses WHERE id = $1 AND deleted_at IS NULL FOR SHARE',
+      [addressId],
+    );
+    if (!a.rows[0] || String(a.rows[0].account_id) !== String(bidderId)) {
+      throw new AppError('Không tìm thấy địa chỉ', 404, 'NOT_FOUND');
+    }
+    await client.query('UPDATE orders SET shipping_address_id = $2 WHERE id = $1', [orderId, addressId]);
+  });
+  return loadView(pool, orderId, { withAddress: true });
+}
+
 // Người mua hoặc người bán của đơn xem tiến trình (kho, vận chuyển, giải ngân).
+// Chỉ người mua thấy địa chỉ giao hàng.
 async function tracking(user, orderId) {
-  const view = await loadView(pool, orderId);
+  const view = await loadView(pool, orderId, { withAddress: user.role === 'bidder' });
   const mine = (user.role === 'bidder' && String(view.buyer.id) === String(user.id))
     || (user.role === 'seller' && String(view.seller.id) === String(user.id));
   if (!mine) throw new AppError('Không tìm thấy đơn hàng', 404, 'NOT_FOUND');
@@ -352,5 +397,5 @@ async function tracking(user, orderId) {
 
 module.exports = {
   STAGES, STAGE_SQL, lockOrder, paidAmount, listSelling, shipToWarehouse, listForWarehouse,
-  receive, inspect, pack, ship, deliver, confirmDelivery, tracking,
+  receive, inspect, pack, ship, deliver, confirmDelivery, setShippingAddress, tracking,
 };

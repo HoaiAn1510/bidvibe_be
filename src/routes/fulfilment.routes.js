@@ -18,6 +18,11 @@ router.post('/:id/ship-to-warehouse', ...seller, async (req, res) => {
   ok(res, await fulfilment.shipToWarehouse(req.user.id, idParam(req.params.id)));
 });
 
+// { addressId } — chọn địa chỉ giao hàng, được đổi tới trước khi kho gửi đi.
+router.post('/:id/shipping-address', ...bidder, async (req, res) => {
+  ok(res, await fulfilment.setShippingAddress(req.user.id, idParam(req.params.id), req.body || {}));
+});
+
 router.post('/:id/confirm-delivery', ...bidder, async (req, res) => {
   ok(res, await fulfilment.confirmDelivery(req.user.id, idParam(req.params.id)));
 });

@@ -29,6 +29,7 @@ router.get('/categories', requireAuth, async (req, res) => {
 router.use('/listings', require('./listing.routes'));
 router.use('/appraisals', require('./appraisal.routes'));
 router.use('/ai', require('./ai.routes'));
+router.use('/addresses', require('./address.routes'));
 router.use('/warehouse', require('./warehouse.routes'));
 router.use('/disputes', require('./dispute.routes'));
 router.use('/admin', require('./admin.routes'));
