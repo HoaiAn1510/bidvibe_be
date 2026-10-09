@@ -19,6 +19,8 @@ router.get('/me', requireAuth, async (req, res, next) => {
   }
 });
 
+router.use('/notifications', require('./notification.routes'));
+
 router.use('/auctions', require('./auction.routes'));
 router.use('/bids', require('./bid.routes'));
 router.use('/wallet', require('./wallet.routes'));
