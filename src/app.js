@@ -25,8 +25,10 @@ app.use(errorHandler);
 registerSockets(io);
 
 if (require.main === module) {
-  server.listen(env.port, () => {
+  // 0.0.0.0 để emulator Android (10.0.2.2) và điện thoại thật cùng mạng kết nối được
+  server.listen(env.port, '0.0.0.0', () => {
     console.log(`BidVibe API đang chạy tại http://localhost:${env.port}`);
+    require('./services/scheduler').start();
   });
 }
 

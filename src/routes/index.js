@@ -19,6 +19,9 @@ router.get('/me', requireAuth, async (req, res, next) => {
   }
 });
 
-// TODO: router.use('/auctions', require('./auctions'));
+router.use('/auctions', require('./auction.routes'));
+router.use('/bids', require('./bid.routes'));
+router.use('/wallet', require('./wallet.routes'));
+router.use('/orders', require('./order.routes'));
 
 module.exports = router;
