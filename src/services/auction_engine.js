@@ -197,6 +197,7 @@ async function placeBid({ bidderId, auctionId, amount: requested, increment }) {
   // Sau COMMIT mới đẩy real-time, để client không nhận dữ liệu chưa chốt.
   emit(`auction:${auctionId}`, 'auction:update', {
     auctionId: String(auctionId),
+    reason: 'bid', // 'paused' | 'resumed' do sockets/pause_listener.js gửi
     currentPrice: result.currentPrice,
     bidCount: result.bidCount,
     endsAt: result.endsAt,
