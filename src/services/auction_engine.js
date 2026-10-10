@@ -120,8 +120,16 @@ function assertBiddable(a) {
 
 // ---------- Đặt giá ----------
 
-async function placeBid({ bidderId, auctionId, amount }) {
-  if (!Number.isInteger(amount) || amount <= 0) {
+// Truyền `amount` (giá tuyệt đối) HOẶC `increment` (cộng thêm vào giá hiện tại).
+// Với `increment`, giá hiện tại được đọc SAU khi khoá dòng phiên, nên hai người đặt
+// cùng lúc luôn nhận hai mức giá liên tiếp thay vì cùng đọc một giá cũ.
+async function placeBid({ bidderId, auctionId, amount: requested, increment }) {
+  const hasAmount = requested != null;
+  const hasIncrement = increment != null;
+  if (hasAmount === hasIncrement) {
+    throw new AppError('Chỉ truyền một trong hai: amount hoặc increment', 400, 'VALIDATION_ERROR');
+  }
+  if (!Number.isInteger(hasAmount ? requested : increment) || (hasAmount ? requested : increment) <= 0) {
     throw new AppError('Giá đặt phải là số nguyên dương (VND)', 400, 'VALIDATION_ERROR');
   }
 
@@ -129,6 +137,7 @@ async function placeBid({ bidderId, auctionId, amount }) {
     const a = await auctionModel.lockById(client, auctionId);
     if (!a) throw new AppError('Không tìm thấy phiên đấu giá', 404, 'NOT_FOUND');
     assertBiddable(a);
+    const amount = hasIncrement ? Number(a.current_price) + increment : requested;
 
     const dep = await client.query(
       `SELECT status FROM auction_deposits WHERE auction_id = $1 AND bidder_id = $2`,

@@ -34,9 +34,19 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 | `npm start` | Chạy server (không tự khởi động lại) |
 | `npm run db:migrate` | Chạy các file trong `migrations/` chưa được áp dụng |
 | `npm run db:seed` | Thêm dữ liệu demo (BE1 + BE2), chạy lại nhiều lần không bị trùng. Mật khẩu demo `123456` |
-| `npm run test:be1` | Kiểm thử end-to-end phần đấu giá/ví trên DB thật, tự dọn dữ liệu tạm |
+| `npm run test:be1` | Kiểm thử end-to-end phần đấu giá/ví/tạm dừng/gian lận trên DB dùng chung (tài khoản `test_be1_*`, tự dọn) |
 | `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_*`, tự dọn) |
 | `npm test` | Chạy cả `test:be1` và `test:be2` |
+
+#### Chạy kiểm thử trên database dùng chung
+
+Cả hai bộ test chạy trên Supabase dùng chung nên được viết để **không đụng dữ liệu thật**:
+
+- Mọi dữ liệu test có tiền tố riêng: `test_be1_*` (BE1: email `test_be1_<tên>_<số>@be1test.local`, tin đăng `test_be1_item`) và `test_be2_*` (BE2).
+- Test chỉ ghi/xoá các dòng đi ra từ những tài khoản có tiền tố đó. Cuối mỗi lần chạy (kể cả khi test lỗi) và đầu lần chạy kế tiếp, các dòng này được xoá sạch; dữ liệu seed và dữ liệu của đồng đội không bị sửa hay xoá.
+- Chạy được lúc đồng đội đang chạy server: scheduler của họ có thể đóng phiên test của bạn, test BE1 đã chờ DB về đúng trạng thái. Nếu vẫn lỗi lặt vặt thì chạy lại.
+- Nếu test bị ngắt giữa chừng (Ctrl+C), cứ chạy lại là dọn được phần dở. Kiểm tra còn sót không: `SELECT count(*) FROM accounts WHERE email LIKE 'test\_be1\_%'`.
+- Cần database đã chạy `npm run db:migrate` (test BE1 cần migration `006`).
 
 ## Cấu trúc thư mục
 
@@ -56,7 +66,7 @@ src/
 
 ## Cơ sở dữ liệu
 
-Schema gốc nằm trong `migrations/001_init_schema.sql` (23 bảng nghiệp vụ), các migration sau chỉ thêm: `003` mật khẩu tài khoản nội bộ, `004` loại giao dịch ví mất cọc, `005` bảng `addresses` và `orders.shipping_address_id`. Thư mục `migrations/` là nguồn sự thật cho cấu trúc dữ liệu. Sơ đồ quan hệ xem trong Supabase: **Database → Schema Visualizer**.
+Schema gốc nằm trong `migrations/001_init_schema.sql` (23 bảng nghiệp vụ), các migration sau chỉ thêm: `003` mật khẩu tài khoản nội bộ, `004` loại giao dịch ví mất cọc, `005` bảng `addresses` và `orders.shipping_address_id`, `006` (BE1) `auctions.paused_at` + trigger đóng băng đồng hồ khi tạm dừng, unique index chặn cờ gian lận `pending` trùng. Thư mục `migrations/` là nguồn sự thật cho cấu trúc dữ liệu. Sơ đồ quan hệ xem trong Supabase: **Database → Schema Visualizer**.
 
 | Nhóm | Bảng |
 |---|---|
@@ -100,7 +110,7 @@ Hai domain nối nhau qua các điểm sau, cần tôn trọng:
 - **Tự giải ngân:** job của BE2 (`payout_service.releaseOverduePayouts`) chạy chung vòng `scheduler.js` của BE1, tắt bằng `AUTO_PAYOUT_ENABLED=false`.
 
 Chi tiết quy ước API và kiến trúc: xem [`docs/architecture.md`](docs/architecture.md).
-API: phần BE1 ở [`docs/api_be1.md`](docs/api_be1.md), phần BE2 ở [`docs/api.md`](docs/api.md). Kết quả kiểm thử BE2: [`docs/test-be2.md`](docs/test-be2.md).
+API: phần BE1 ở [`docs/api_be1.md`](docs/api_be1.md), phần BE2 ở [`docs/api.md`](docs/api.md), sự kiện Socket.io ở [`docs/socket.md`](docs/socket.md). Kết quả kiểm thử BE2: [`docs/test-be2.md`](docs/test-be2.md).
 Luồng nghiệp vụ từ đăng ký đến giải ngân (kèm trạng thái triển khai, sơ đồ, luồng tiền): xem [`docs/mainflow.md`](docs/mainflow.md).
 
 ## Quy ước Git

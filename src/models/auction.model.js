@@ -9,12 +9,13 @@ function maskName(fullName) {
 
 const SELECT_AUCTION = `
   SELECT a.id, a.listing_id, a.current_price, a.bid_step, a.deposit_required,
-         a.starts_at, a.ends_at, a.status, a.winner_id, a.bid_count,
+         a.starts_at, a.ends_at, a.status, a.winner_id, a.bid_count, a.paused_at,
          l.title, l.description, l.condition, l.starting_price, l.seller_id,
          c.code AS category,
          s.store_name, s.rating,
          (SELECT url FROM listing_photos p WHERE p.listing_id = l.id ORDER BY p.order_index, p.id LIMIT 1) AS cover_url,
-         EXISTS (SELECT 1 FROM flagged_auctions f WHERE f.auction_id = a.id AND f.status = 'paused') AS paused,
+         (a.paused_at IS NOT NULL
+           OR EXISTS (SELECT 1 FROM flagged_auctions f WHERE f.auction_id = a.id AND f.status = 'paused')) AS paused,
          EXISTS (SELECT 1 FROM flagged_auctions f WHERE f.auction_id = a.id AND f.status = 'terminated') AS terminated,
          (SELECT b.bidder_id FROM bids b WHERE b.auction_id = a.id ORDER BY b.id DESC LIMIT 1) AS leader_id,
          (SELECT max(b.amount) FROM bids b WHERE b.auction_id = a.id AND b.bidder_id = $1::bigint) AS my_bid,
@@ -28,7 +29,11 @@ const SELECT_AUCTION = `
 
 function toView(r, viewerId) {
   const viewer = viewerId == null ? null : String(viewerId);
-  const live = r.status === 'active' && new Date(r.ends_at) > new Date();
+  const now = Date.now();
+  const endsAtMs = new Date(r.ends_at).getTime();
+  // Đang tạm dừng thì đồng hồ đứng: còn lại = ends_at - lúc bắt đầu dừng (ends_at được cộng bù khi tiếp tục).
+  const clockMs = r.paused && r.paused_at ? new Date(r.paused_at).getTime() : now;
+  const live = r.status === 'active' && (r.paused || endsAtMs > now);
   return {
     id: r.id,
     listingId: r.listing_id,
@@ -48,6 +53,9 @@ function toView(r, viewerId) {
     status: r.status,
     isLive: live && !r.paused,
     paused: r.paused,
+    pausedAt: r.paused_at,
+    // Giây còn lại của phiên đang diễn ra; đứng yên khi tạm dừng. 0 nếu đã kết thúc.
+    remainingSeconds: r.status === 'active' ? Math.max(Math.ceil((endsAtMs - clockMs) / 1000), 0) : 0,
     terminated: r.terminated,
     winnerId: r.winner_id,
     // Thông tin riêng của người đang xem
@@ -96,7 +104,8 @@ async function list({ viewerId = null, category, status, q, sort = 'ending', lim
 async function lockById(client, auctionId, { skipLocked = false } = {}) {
   const { rows } = await client.query(
     `SELECT a.*, l.seller_id, l.title, l.id AS l_id,
-            EXISTS (SELECT 1 FROM flagged_auctions f WHERE f.auction_id = a.id AND f.status = 'paused') AS paused
+            (a.paused_at IS NOT NULL
+              OR EXISTS (SELECT 1 FROM flagged_auctions f WHERE f.auction_id = a.id AND f.status = 'paused')) AS paused
      FROM auctions a JOIN listings l ON l.id = a.listing_id
      WHERE a.id = $1
      FOR UPDATE OF a ${skipLocked ? 'SKIP LOCKED' : ''}`,
@@ -108,7 +117,7 @@ async function lockById(client, auctionId, { skipLocked = false } = {}) {
 async function findExpiredIds(executor) {
   const { rows } = await (executor || pool).query(
     `SELECT a.id FROM auctions a
-     WHERE a.status = 'active' AND a.ends_at <= now()
+     WHERE a.status = 'active' AND a.ends_at <= now() AND a.paused_at IS NULL
        AND NOT EXISTS (SELECT 1 FROM flagged_auctions f WHERE f.auction_id = a.id AND f.status = 'paused')
      ORDER BY a.ends_at`,
   );
