@@ -64,4 +64,4 @@ async function releaseOverduePayouts() {
   return released;
 }
 
-module.exports = { ORDER_FOR_PAYOUT, releasePayout, releaseOverduePayouts };
+module.exports = { releasePayout, releaseOverduePayouts };

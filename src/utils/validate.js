@@ -55,4 +55,4 @@ function url(value, label = 'URL ảnh') {
   return v;
 }
 
-module.exports = { MIN_PASSWORD, invalid, text, email, password, oneOf, int, url };
+module.exports = { invalid, text, email, password, oneOf, int, url };
