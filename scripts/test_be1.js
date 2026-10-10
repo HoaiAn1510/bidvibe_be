@@ -323,6 +323,60 @@ async function main() {
     assert.ok(ev.rowCount >= 1);
   });
 
+  console.log('Đồng thời (nhiều request song song)');
+  await step('đặt giá kiểu increment song song: giá đọc sau khi khoá, hai người nhận hai mức liên tiếp', async () => {
+    const { auctionId: ar } = await mkAuction(seller, 1_000_000); // bước giá 50.000
+    await engine.joinAuction({ bidderId: A, auctionId: ar });
+    await engine.joinAuction({ bidderId: B, auctionId: ar });
+    const rs = await Promise.allSettled([
+      engine.placeBid({ bidderId: A, auctionId: ar, increment: 50_000 }),
+      engine.placeBid({ bidderId: B, auctionId: ar, increment: 50_000 }),
+    ]);
+    assert.deepStrictEqual(rs.map((r) => r.status), ['fulfilled', 'fulfilled'], JSON.stringify(rs.map((r) => r.reason?.code)));
+    const amounts = (await pool.query('SELECT amount::int AS a FROM bids WHERE auction_id = $1 ORDER BY id', [ar])).rows.map((r) => r.a);
+    assert.deepStrictEqual(amounts, [1_050_000, 1_100_000]); // không có hai lượt cùng giá
+    const au = (await pool.query('SELECT current_price::int AS p, bid_count FROM auctions WHERE id = $1', [ar])).rows[0];
+    assert.deepStrictEqual(au, { p: 1_100_000, bid_count: 2 });
+
+    // Vòng hai: người dẫn đầu (B) bị từ chối, người còn lại (A) thắng; giá chỉ tăng đúng một bước.
+    const rs2 = await Promise.allSettled([
+      engine.placeBid({ bidderId: A, auctionId: ar, increment: 50_000 }),
+      engine.placeBid({ bidderId: B, auctionId: ar, increment: 50_000 }),
+    ]);
+    assert.strictEqual(rs2.filter((r) => r.status === 'fulfilled').length, 1);
+    assert.strictEqual((await pool.query('SELECT current_price::int AS p FROM auctions WHERE id = $1', [ar])).rows[0].p, 1_150_000);
+    await rejects(engine.placeBid({ bidderId: A, auctionId: ar, amount: 2_000_000, increment: 50_000 }), 'VALIDATION_ERROR');
+  });
+  await step('nhiều lần quét gian lận song song: chỉ một cờ pending cho mỗi luật', async () => {
+    const { auctionId: af } = await mkAuction(seller, 1_000_000);
+    // Dựng sẵn 6 lượt xen kẽ A/B bằng SQL (không qua placeBid để không kích hoạt quét nền).
+    for (let i = 0; i < 6; i += 1) {
+      await pool.query(
+        `INSERT INTO bids (auction_id, bidder_id, amount, created_at)
+         VALUES ($1, $2, $3, now() - ($4 || ' seconds')::interval)`,
+        [af, i % 2 ? B : A, 1_000_000 + (i + 1) * 50_000, String((6 - i) * 20)]);
+    }
+    const created = await Promise.all(Array.from({ length: 8 }, () => fraud.scanAuction(af)));
+    assert.strictEqual(created.reduce((x, y) => x + y, 0), 1, `số cờ mới: ${created}`);
+    const n = await pool.query(`SELECT count(*)::int AS n FROM flagged_auctions WHERE auction_id = $1 AND status = 'pending'`, [af]);
+    assert.strictEqual(n.rows[0].n, 1);
+    const ev = await pool.query(
+      `SELECT count(*)::int AS n FROM flag_evidence e JOIN flagged_auctions f ON f.id = e.flagged_auction_id WHERE f.auction_id = $1`, [af]);
+    assert.strictEqual(ev.rows[0].n, 2); // đúng một bộ bằng chứng, không bị nhân đôi
+  });
+  await step('unique index chặn hai cờ pending giống nhau chèn cùng lúc', async () => {
+    const { auctionId: au2 } = await mkAuction(seller);
+    const reason = `${PREFIX}dup_reason`;
+    const ins = () => pool.query(
+      `INSERT INTO flagged_auctions (auction_id, severity, confidence, reason) VALUES ($1, 'low', 10, $2)`, [au2, reason]);
+    const rs = await Promise.allSettled([ins(), ins(), ins()]);
+    assert.strictEqual(rs.filter((r) => r.status === 'fulfilled').length, 1);
+    assert.ok(rs.filter((r) => r.status === 'rejected').every((r) => r.reason.code === '23505'));
+    // Cờ đã xử lý (không còn pending) thì được tạo cờ mới cùng lý do.
+    await pool.query(`UPDATE flagged_auctions SET status = 'safe' WHERE auction_id = $1`, [au2]);
+    await ins();
+  });
+
   console.log(`\nTất cả ${passed} bước đạt.`);
 }
 

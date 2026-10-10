@@ -2,6 +2,8 @@
 // để Admin xử lý (pause / terminate / verify / safe). Chỉ đọc dữ liệu của domain BE1.
 const { pool } = require('../config/db');
 const bidModel = require('../models/bid.model');
+// auction_engine chỉ require fraud_detection lười (trong setImmediate) nên không bị vòng phụ thuộc.
+const { inTransaction } = require('./auction_engine');
 
 const BURST_WINDOW_MS = 60_000;
 const BURST_COUNT = 5;
@@ -96,37 +98,45 @@ async function scanAuction(auctionId) {
 
   let created = 0;
   for (const s of signals) {
-    // Không tạo trùng: đã có cờ cùng lý do mà Admin chưa đánh dấu 'safe'.
-    const dup = await pool.query(
-      `SELECT 1 FROM flagged_auctions WHERE auction_id = $1 AND reason = $2 AND status <> 'safe'`,
-      [auctionId, s.reason],
-    );
-    if (dup.rowCount > 0) continue;
-
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      const f = await client.query(
-        `INSERT INTO flagged_auctions (auction_id, severity, confidence, reason, ai_explanation)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [auctionId, s.severity, s.confidence, s.reason, s.explanation],
-      );
-      for (const [label, value] of s.evidence) {
-        await client.query(
-          'INSERT INTO flag_evidence (flagged_auction_id, label, value) VALUES ($1, $2, $3)',
-          [f.rows[0].id, label, value],
-        );
-      }
-      await client.query('COMMIT');
-      created += 1;
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => {});
-      throw err;
-    } finally {
-      client.release();
-    }
+    // Kiểm tra trùng + ghi cờ nằm CHUNG một giao dịch, tuần tự theo phiên (xem raiseFlag).
+    const flagId = await inTransaction((client) => raiseFlag(client, auctionId, s));
+    if (flagId) created += 1;
   }
   return created;
 }
 
-module.exports = { analyze, scanAuction };
+// Khoá tư vấn (advisory) theo phiên, tự nhả khi COMMIT/ROLLBACK: mọi thao tác tạo cờ / thêm
+// bằng chứng cho cùng một phiên chạy lần lượt, nên "kiểm tra rồi ghi" không bị chen ngang.
+function lockFlags(client, auctionId) {
+  return client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`flags:${auctionId}`]);
+}
+
+// Ghi một cờ + bằng chứng trong giao dịch của nơi gọi. Trả về id cờ mới, hoặc null nếu đã có
+// cờ cùng lý do (chưa bị Admin đánh dấu 'safe'). Chốt chặn thứ hai: unique index
+// uq_flagged_auctions_pending_reason (migration 006) — một phiên không có hai cờ pending giống nhau.
+async function raiseFlag(client, auctionId, s) {
+  await lockFlags(client, auctionId);
+  const dup = await client.query(
+    `SELECT 1 FROM flagged_auctions WHERE auction_id = $1 AND reason = $2 AND status <> 'safe'`,
+    [auctionId, s.reason],
+  );
+  if (dup.rowCount > 0) return null;
+
+  const f = await client.query(
+    `INSERT INTO flagged_auctions (auction_id, severity, confidence, reason, ai_explanation)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (auction_id, reason) WHERE status = 'pending' DO NOTHING
+     RETURNING id`,
+    [auctionId, s.severity, s.confidence, s.reason, s.explanation],
+  );
+  if (!f.rows[0]) return null;
+  for (const [label, value] of s.evidence) {
+    await client.query(
+      'INSERT INTO flag_evidence (flagged_auction_id, label, value) VALUES ($1, $2, $3)',
+      [f.rows[0].id, label, value],
+    );
+  }
+  return f.rows[0].id;
+}
+
+module.exports = { analyze, scanAuction, raiseFlag, lockFlags };
