@@ -377,6 +377,100 @@ async function main() {
     await ins();
   });
 
+  console.log('Người dùng báo cáo phiên đáng ngờ');
+  const flagsOf = async (auctionId) => (await pool.query(
+    `SELECT f.id, f.severity, f.status, f.reason,
+            (SELECT count(*)::int FROM flag_evidence e WHERE e.flagged_auction_id = f.id) AS evidence
+     FROM flagged_auctions f WHERE f.auction_id = $1 ORDER BY f.id`, [auctionId])).rows;
+  await step('báo cáo phiên chưa có cờ: tạo cờ pending mức thấp kèm bằng chứng', async () => {
+    const { auctionId: ap } = await mkAuction(seller);
+    const r = await fraud.reportAuction({ reporterId: A, auctionId: ap, reason: 'Giá bất thường', note: 'Hai tài khoản đẩy giá' });
+    assert.deepStrictEqual(r, { reported: true, flagCreated: true });
+    const f = await flagsOf(ap);
+    assert.strictEqual(f.length, 1);
+    assert.deepStrictEqual([f[0].severity, f[0].status, f[0].evidence], ['low', 'pending', 1]);
+    const ev = (await pool.query('SELECT label, value FROM flag_evidence WHERE flagged_auction_id = $1', [f[0].id])).rows[0];
+    assert.strictEqual(ev.label, `Báo cáo từ người dùng #${A}`);
+    assert.strictEqual(ev.value, 'Giá bất thường — Hai tài khoản đẩy giá');
+
+    // Người thứ hai báo cáo: thêm bằng chứng vào cờ pending đó, không tạo cờ mới.
+    const r2 = await fraud.reportAuction({ reporterId: B, auctionId: ap, reason: 'Nghi gian lận' });
+    assert.deepStrictEqual(r2, { reported: true, flagCreated: false });
+    const f2 = await flagsOf(ap);
+    assert.deepStrictEqual([f2.length, f2[0].evidence], [1, 2]);
+    // Một người chỉ báo một lần mỗi phiên.
+    await rejects(fraud.reportAuction({ reporterId: A, auctionId: ap, reason: 'Lại báo' }), 'ALREADY_REPORTED');
+    assert.strictEqual((await flagsOf(ap))[0].evidence, 2);
+    await rejects(fraud.reportAuction({ reporterId: A, auctionId: '999999999', reason: 'x' }), 'NOT_FOUND');
+  });
+  await step('phiên đã có cờ pending do AI: thêm bằng chứng vào cờ đó, không tạo cờ mới', async () => {
+    const { auctionId: ap } = await mkAuction(seller);
+    for (let i = 0; i < 6; i += 1) {
+      await pool.query(
+        `INSERT INTO bids (auction_id, bidder_id, amount, created_at)
+         VALUES ($1, $2, $3, now() - ($4 || ' seconds')::interval)`,
+        [ap, i % 2 ? B : A, 1_000_000 + (i + 1) * 50_000, String((6 - i) * 20)]);
+    }
+    assert.strictEqual(await fraud.scanAuction(ap), 1);
+    const before = await flagsOf(ap);
+    assert.strictEqual(before[0].severity, 'high');
+    const r = await fraud.reportAuction({ reporterId: C, auctionId: ap, reason: 'Thấy hai người đặt qua lại' });
+    assert.strictEqual(r.flagCreated, false);
+    const after = await flagsOf(ap);
+    assert.deepStrictEqual([after.length, after[0].id, after[0].evidence], [1, before[0].id, before[0].evidence + 1]);
+  });
+  await step('cùng một người báo cáo song song: chỉ một báo cáo được ghi', async () => {
+    const { auctionId: ap } = await mkAuction(seller);
+    const rs = await Promise.allSettled(Array.from({ length: 5 }, () => fraud.reportAuction({ reporterId: A, auctionId: ap, reason: 'Spam' })));
+    assert.strictEqual(rs.filter((r) => r.status === 'fulfilled').length, 1);
+    assert.ok(rs.filter((r) => r.status === 'rejected').every((r) => r.reason.code === 'ALREADY_REPORTED'));
+    const f = await flagsOf(ap);
+    assert.deepStrictEqual([f.length, f[0].evidence], [1, 1]);
+  });
+  await step('nhiều người báo cáo song song: một cờ, đủ bằng chứng', async () => {
+    const { auctionId: ap } = await mkAuction(seller);
+    const rs = await Promise.all([A, B, C].map((id) => fraud.reportAuction({ reporterId: id, auctionId: ap, reason: 'Nghi ngờ' })));
+    assert.strictEqual(rs.filter((r) => r.flagCreated).length, 1);
+    const f = await flagsOf(ap);
+    assert.deepStrictEqual([f.length, f[0].evidence], [1, 3]);
+  });
+  await step('POST /api/auctions/:id/report: quyền, kiểm tra đầu vào, báo trùng', async () => {
+    const jwt = require('jsonwebtoken');
+    const env = require('../src/config/env');
+    const { server } = require('../src/app');
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    try {
+      const base = `http://127.0.0.1:${server.address().port}/api`;
+      const tok = (id, role) => jwt.sign({ sub: String(id), kind: 'account', role }, env.jwtSecret, { expiresIn: '5m' });
+      const post = async (path, token, body) => {
+        const r = await fetch(base + path, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify(body),
+        });
+        return { status: r.status, ...(await r.json()) };
+      };
+      const { auctionId: ap } = await mkAuction(seller);
+      const path = `/auctions/${ap}/report`;
+      assert.strictEqual((await post(path, null, { reason: 'x' })).status, 401);
+      assert.strictEqual((await post(path, tok(seller, 'seller'), { reason: 'x' })).status, 403);
+      assert.strictEqual((await post(path, tok(A, 'bidder'), {})).error.code, 'VALIDATION_ERROR');
+      assert.strictEqual((await post(path, tok(A, 'bidder'), { reason: 'x'.repeat(101) })).error.code, 'VALIDATION_ERROR');
+      assert.strictEqual((await post('/auctions/abc/report', tok(A, 'bidder'), { reason: 'x' })).error.code, 'VALIDATION_ERROR');
+      assert.strictEqual((await post('/auctions/999999999/report', tok(A, 'bidder'), { reason: 'x' })).error.code, 'NOT_FOUND');
+      const ok = await post(path, tok(A, 'bidder'), { reason: 'Giá lạ', note: 'ghi chú' });
+      assert.deepStrictEqual([ok.status, ok.success, ok.data], [201, true, { reported: true, flagCreated: true }]);
+      const dup = await post(path, tok(A, 'bidder'), { reason: 'Giá lạ' });
+      assert.deepStrictEqual([dup.status, dup.error.code], [409, 'ALREADY_REPORTED']);
+
+      // Gửi cả amount và increment, hoặc không gửi gì, đều bị từ chối trước khi đụng DB.
+      const bad = await post('/bids', tok(A, 'bidder'), { auctionId: String(ap), amount: 1, increment: 1 });
+      assert.deepStrictEqual([bad.status, bad.error.code], [400, 'VALIDATION_ERROR']);
+    } finally {
+      await new Promise((res) => server.close(res));
+    }
+  });
+
   console.log(`\nTất cả ${passed} bước đạt.`);
 }
 

@@ -24,6 +24,22 @@ Server lắng nghe `0.0.0.0` nên emulator truy cập được. Android 9+ chặ
 
 Mỗi phiên có thêm thông tin riêng của người xem: `joined`, `leading`, `myBid`, `myDeposit`, `won`.
 
+### Báo cáo phiên đáng ngờ — `POST /api/auctions/:id/report` (bidder)
+
+Body: `{ "reason": "Giá tăng bất thường", "note": "Hai tài khoản đặt qua lại liên tục" }` — `reason` bắt buộc, tối đa 100 ký tự; `note` tuỳ chọn, tối đa 500 ký tự.
+
+```json
+// 201
+{ "success": true, "data": { "reported": true, "flagCreated": true }, "error": null }
+// 409 — mỗi người chỉ báo cáo một lần mỗi phiên
+{ "success": false, "data": null, "error": { "code": "ALREADY_REPORTED", "message": "Bạn đã báo cáo phiên này rồi" } }
+```
+
+- Phiên đã có cờ `pending` (do luật gian lận hoặc báo cáo trước): báo cáo được thêm làm một dòng `flag_evidence` vào cờ đó (`flagCreated: false`).
+- Chưa có cờ `pending`: tạo cờ mới trong `flagged_auctions` (`severity = 'low'`, `confidence = 30`, `reason = 'Người dùng báo cáo phiên đáng ngờ'`) kèm bằng chứng (`flagCreated: true`).
+- Bằng chứng: `label = "Báo cáo từ người dùng #<accountId>"`, `value = "<reason> — <note>"`. Admin xem qua `GET /api/admin/flags` (BE2).
+- Lỗi: `400 VALIDATION_ERROR` (thiếu/quá dài), `403 FORBIDDEN` (không phải bidder), `404 NOT_FOUND` (không có phiên), `409 ALREADY_REPORTED`.
+
 ## Đặt giá — `/api/bids`
 
 `POST /api/bids` (bidder) — body `{ "auctionId": "12", "amount": 1250000 }` hoặc `{ "auctionId": "12", "increment": 50000 }`.

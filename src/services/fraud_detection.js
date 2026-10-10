@@ -4,6 +4,7 @@ const { pool } = require('../config/db');
 const bidModel = require('../models/bid.model');
 // auction_engine chỉ require fraud_detection lười (trong setImmediate) nên không bị vòng phụ thuộc.
 const { inTransaction } = require('./auction_engine');
+const { AppError } = require('../middleware/errorHandler');
 
 const BURST_WINDOW_MS = 60_000;
 const BURST_COUNT = 5;
@@ -139,4 +140,51 @@ async function raiseFlag(client, auctionId, s) {
   return f.rows[0].id;
 }
 
-module.exports = { analyze, scanAuction, raiseFlag, lockFlags };
+// ---------- Người dùng báo cáo phiên đáng ngờ ----------
+
+const REPORT_REASON = 'Người dùng báo cáo phiên đáng ngờ';
+// Mỗi báo cáo là một dòng flag_evidence; nhãn chứa mã người báo cáo nên cũng là khoá chống báo trùng.
+const reporterLabel = (accountId) => `Báo cáo từ người dùng #${accountId}`;
+
+// Mỗi người báo cáo tối đa một lần mỗi phiên. Phiên đã có cờ 'pending' thì thêm bằng chứng vào
+// cờ đó (ưu tiên cờ nghiêm trọng nhất), chưa có thì tạo cờ mới mức thấp để Admin xem xét.
+// Trả về { reported: true, flagCreated }.
+async function reportAuction({ reporterId, auctionId, reason, note = null }) {
+  return inTransaction(async (client) => {
+    const a = await client.query('SELECT 1 FROM auctions WHERE id = $1', [auctionId]);
+    if (!a.rowCount) throw new AppError('Không tìm thấy phiên đấu giá', 404, 'NOT_FOUND');
+
+    await lockFlags(client, auctionId); // hai báo cáo cùng lúc (kể cả của cùng một người) chạy lần lượt
+    const label = reporterLabel(reporterId);
+    const dup = await client.query(
+      `SELECT 1 FROM flag_evidence e JOIN flagged_auctions f ON f.id = e.flagged_auction_id
+       WHERE f.auction_id = $1 AND e.label = $2`,
+      [auctionId, label],
+    );
+    if (dup.rowCount > 0) throw new AppError('Bạn đã báo cáo phiên này rồi', 409, 'ALREADY_REPORTED');
+
+    const pending = await client.query(
+      `SELECT id FROM flagged_auctions WHERE auction_id = $1 AND status = 'pending'
+       ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, id LIMIT 1`,
+      [auctionId],
+    );
+    let flagId = pending.rows[0]?.id;
+    let flagCreated = false;
+    if (!flagId) {
+      const f = await client.query(
+        `INSERT INTO flagged_auctions (auction_id, severity, confidence, reason, ai_explanation)
+         VALUES ($1, 'low', 30, $2, $3) RETURNING id`,
+        [auctionId, REPORT_REASON, 'Có người dùng báo cáo phiên này; cần Admin xem xét thủ công.'],
+      );
+      flagId = f.rows[0].id;
+      flagCreated = true;
+    }
+    await client.query(
+      'INSERT INTO flag_evidence (flagged_auction_id, label, value) VALUES ($1, $2, $3)',
+      [flagId, label, note ? `${reason} — ${note}` : reason],
+    );
+    return { reported: true, flagCreated };
+  });
+}
+
+module.exports = { analyze, scanAuction, raiseFlag, lockFlags, reportAuction };
