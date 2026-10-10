@@ -114,8 +114,9 @@ Một số bản bàn giao trước đây dùng tên khác. Code **không** phá
 
 ## 6. Giới hạn hiện tại
 
-- Không đẩy sự kiện khi Admin **tạm dừng / tiếp tục** phiên. Khi tạm dừng, đồng hồ đứng yên ở server (`paused`, `remainingSeconds`
-  trong `GET /api/auctions/:id`); app nên tải lại chi tiết phiên khi nhận `notification:new` loại `warn` / `info`, hoặc khi
-  đặt giá bị `409 AUCTION_PAUSED`.
+- Không có sự kiện phòng phiên khi Admin **tạm dừng / tiếp tục** phiên; chỉ **người bán** nhận `notification:new`
+  (`warn` khi dừng, `info` khi chạy lại). Khi tạm dừng, đồng hồ đứng yên ở server (`paused`, `remainingSeconds` trong
+  `GET /api/auctions/:id`). Màn người mua nên tải lại chi tiết phiên khi đặt giá bị `409 AUCTION_PAUSED`, và định kỳ
+  (ví dụ 30 giây) khi đang xem một phiên.
 - Tài khoản bị khoá sau khi đã kết nối chưa bị ngắt socket (REST thì đã chặn bằng `403 ACCOUNT_SUSPENDED`).
 - Mỗi lần kết nối lại cần `auction:join` lại; bỏ lỡ sự kiện trong lúc mất mạng thì gọi lại `GET /api/auctions/:id`.
