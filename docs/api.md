@@ -243,9 +243,11 @@ Tất cả cần vai trò `admin`.
 | POST | `/api/admin/flags/:id/action` | `{ action: 'pause' \| 'terminate' \| 'verify' \| 'safe', reason }` | `terminate` bắt buộc `reason` |
 | GET | `/api/admin/ops-accounts` | `?role=&status=` | |
 | POST | `/api/admin/ops-accounts` | `{ name, email, role: 'appraiser' \| 'warehouse' \| 'admin', password }` | Mật khẩu băm bcrypt. Trùng email → `409 EMAIL_TAKEN` |
-| PATCH | `/api/admin/ops-accounts/:id` | `{ name?, role?, status?, password? }` | Không tự khoá / tự bỏ quyền Admin (`409 SELF_LOCKOUT`) |
+| PATCH | `/api/admin/ops-accounts/:id` | `{ name?, role?, status?, password? }` | Không tự khoá / tự bỏ quyền Admin (`409 SELF_LOCKOUT`). Khoá thì ngắt ngay socket đang mở (xem dưới) |
 | GET | `/api/admin/accounts` | `?role=bidder\|seller&status=&q=` | Tìm theo tên / email |
-| PATCH | `/api/admin/accounts/:id` | `{ status: 'active' \| 'suspended' }` | Khoá có hiệu lực ngay, kể cả với token đang dùng |
+| PATCH | `/api/admin/accounts/:id` | `{ status: 'active' \| 'suspended' }` | Khoá có hiệu lực ngay: REST trả `403 ACCOUNT_SUSPENDED` kể cả với token đang dùng, và socket đang mở bị ngắt (xem dưới) |
+
+**Khoá tài khoản và Socket.io.** Sau khi việc khoá đã lưu xuống DB, backend gọi `disconnectAccount` của BE1 (xem [`socket.md`](socket.md)). Mọi kết nối đang mở của tài khoản đó nhận sự kiện `account:disconnected` `{ code: 'ACCOUNT_SUSPENDED', message: 'Tài khoản đã bị khoá' }` rồi bị ngắt. Kết nối lại bị từ chối với `connect_error` `ACCOUNT_SUSPENDED` cho tới khi được mở khoá. Áp dụng cho cả Bidder / Seller và tài khoản nội bộ. Nếu việc ngắt socket bị lỗi thì backend chỉ ghi log, API khoá vẫn trả `200` vì tài khoản đã bị khoá. Mở khoá không cần làm gì thêm, app kết nối lại bình thường.
 
 Hành động với cờ (`flagged_auctions.status`):
 
