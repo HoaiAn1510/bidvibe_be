@@ -436,6 +436,29 @@ async function main() {
   );
   assert.strictEqual(bad.rowCount, 0);
   record('Số dư ví khớp balance_after của giao dịch cuối', 'cả hai Bidder test');
+
+  // ------------------------------------------------------------------
+  begin('12. Kết nối database bị rớt không làm sập tiến trình');
+  assert.ok(pool.listenerCount('error') > 0, 'pool phải có listener cho sự kiện error');
+  let exited = false;
+  const onExit = () => { exited = true; };
+  process.once('exit', onExit);
+  const origError = console.error;
+  const logged = [];
+  console.error = (...args) => logged.push(args.join(' '));
+  try {
+    const fake = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+    pool.emit('error', fake, {}); // không có listener thì EventEmitter ném lỗi ra ngoài
+  } finally {
+    console.error = origError;
+  }
+  assert.ok(logged.some((l) => l.includes('ECONNRESET')), 'lỗi phải được ghi log');
+  assert.ok(!logged.some((l) => /postgres(ql)?:\/\//.test(l)), 'log không được chứa chuỗi kết nối');
+  const alive = await q1('SELECT 1 AS ok');
+  process.removeListener('exit', onExit);
+  assert.ok(!exited && alive.ok === 1);
+  record('Mô phỏng pool.emit(\'error\', ECONNRESET)', `ghi log: "${logged[0]}"; tiến trình còn sống, truy vấn sau đó vẫn chạy`);
+  await api('API vẫn trả lời sau lỗi kết nối', 'GET', '/api/me', { token: T.b1, note: (j) => `role=${j.data.role}` });
 }
 
 function writeReport(ok, error) {
