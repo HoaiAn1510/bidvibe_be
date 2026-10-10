@@ -29,6 +29,7 @@ if (require.main === module) {
   server.listen(env.port, '0.0.0.0', () => {
     console.log(`BidVibe API đang chạy tại http://localhost:${env.port}`);
     require('./services/scheduler').start();
+    require('./sockets/pause_listener').start(); // BE1: auction:update khi tạm dừng / tiếp tục
   });
 }
 
