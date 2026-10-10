@@ -541,6 +541,8 @@ function writeReport(ok, error) {
   const out = [
     '# Kết quả kiểm thử BE2',
     '',
+    `> Cập nhật: ${new Date().toISOString().slice(0, 10)}. File này được sinh tự động, không sửa tay.`,
+    '',
     `Chạy lúc ${new Date().toISOString()} bằng \`node scripts/test_be2.js --report docs/test-be2.md\`.`,
     'Gọi API thật qua HTTP (server chạy trong tiến trình, cổng ngẫu nhiên) trên database thật dùng chung.',
     'Tài khoản test có email `test_be2_<thời điểm>_...@example.com` và được dọn sạch sau khi chạy.',

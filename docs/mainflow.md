@@ -1,5 +1,7 @@
 # Luồng chính của BidVibe
 
+> Cập nhật: 2026-10-10.
+
 Tài liệu này mô tả luồng nghiệp vụ từ lúc đăng ký đến lúc giải ngân, **dựa trên code backend và schema đang có** (migration 001–007). Mỗi bước có nhãn trạng thái triển khai:
 
 - **[Đã có]** route đã đăng ký trong `src/routes/index.js`, có logic xử lý thật và đã chạy qua kiểm thử end-to-end (`npm test`, kết quả ở [`test-be2.md`](test-be2.md)).
