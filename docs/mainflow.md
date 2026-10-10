@@ -35,6 +35,7 @@ Một tài khoản `accounts` chỉ là Bidder **hoặc** Seller, không cả ha
 | Kiểm tra đầu vào | Email đúng định dạng, mật khẩu 6–72 ký tự, họ tên không rỗng, vai trò chỉ `bidder` / `seller` |
 | Giao dịch | Có: đăng ký tạo `accounts` + bảng con trong một giao dịch |
 | Kết quả | JWT 7 ngày, payload `{ sub, kind: 'account' \| 'ops', role }`. Mỗi request, `requireAuth` kiểm tra lại `status` trong DB: tài khoản bị khoá trả `403 ACCOUNT_SUSPENDED` dù token còn hạn |
+| Socket.io | Cùng JWT, gửi trong `auth.token` lúc kết nối; server kiểm tra chữ ký **và** `status` trong DB (tài khoản bị khoá → `connect_error` `ACCOUNT_SUSPENDED`). Tự vào phòng `user:{id}` (Bidder / Seller) hoặc `ops:{id}` (tài khoản nội bộ). Chi tiết: [`socket.md`](socket.md) |
 
 ### Bước 2 — Seller đăng tin ký gửi [Đã có]
 
@@ -179,7 +180,7 @@ Cờ đã `terminated` / `safe` không đổi nữa (`409`).
 
 ### Ngoài luồng chính [Đã có]
 
-- **Admin**: `GET /api/admin/dashboard`, `GET /api/admin/report/weekly` (7 ngày, từ dữ liệu thật), quản lý tài khoản ops (`GET/POST/PATCH /api/admin/ops-accounts`, mật khẩu bcrypt) và khoá / mở khoá Bidder, Seller (`GET/PATCH /api/admin/accounts`).
+- **Admin**: `GET /api/admin/dashboard`, `GET /api/admin/report/weekly` (7 ngày, từ dữ liệu thật), quản lý tài khoản ops (`GET/POST/PATCH /api/admin/ops-accounts`, mật khẩu bcrypt) và khoá / mở khoá Bidder, Seller (`GET/PATCH /api/admin/accounts`). Khoá tài khoản (cả hai loại): sau khi `UPDATE` đã lưu, `admin_service` gọi `disconnectAccount(id, { kind, reason: 'Tài khoản đã bị khoá' })` của BE1 — mọi socket đang mở nhận `account:disconnected` rồi bị ngắt và không kết nối lại được cho tới khi mở khoá; REST trả `403 ACCOUNT_SUSPENDED` ngay. Ngắt socket lỗi thì chỉ ghi log, API khoá vẫn trả `200`.
 - **Chatbot**: `POST /api/chat/messages`, `GET /api/chat/sessions/:id/messages`; ghi `chat_sessions`, `chat_messages`; trả lời soạn sẵn theo từ khoá.
 - **Thông báo**: `GET /api/notifications`, `POST /api/notifications/:id/read`.
 
@@ -220,6 +221,9 @@ sequenceDiagram
     API-->>S: payout_status released, notification payout
     J->>API: releaseOverduePayouts (quá 72 giờ tự giải ngân)
     AD->>API: POST /api/admin/disputes/{id}/resolve, /api/admin/flags/{id}/action
+    API-->>B: Socket auction:update reason paused hoặc resumed khi Admin tạm dừng / tiếp tục
+    AD->>API: PATCH /api/admin/accounts/{id} suspended
+    API-->>B: Socket account:disconnected rồi ngắt kết nối
 ```
 
 ### 3b. Trạng thái tin đăng (`listings.status`)
@@ -322,6 +326,8 @@ Giới hạn hiện tại:
 | Hạn tự giải ngân | Lúc giao + 72 giờ (`orders.payout_deadline`) | `PAYOUT_WINDOW_HOURS`, `fulfilment_service.js` | Có |
 | Quét đơn quá hạn giải ngân | Mỗi 5 giây | `scheduler.js` → `payout_service.releaseOverduePayouts` (BE2) | Có, tắt bằng `AUTO_PAYOUT_ENABLED=false` |
 | Hạn token đăng nhập | 7 ngày | `TOKEN_TTL`, `auth_service.js` | Có |
+| Đẩy tạm dừng / tiếp tục | Ngay sau COMMIT, qua `LISTEN auction_pause` (một kết nối Postgres riêng, tự kết nối lại sau 5 giây nếu rớt) | `sockets/pause_listener.js` (BE1), trigger migration 007 | Có |
+| Kết nối DB rảnh bị rớt | Ghi log, không sập tiến trình; chờ kết nối tối đa 20 giây | `pool.on('error')`, `connectionTimeoutMillis`, `config/db.js` | Có |
 
 Scheduler chỉ khởi động khi chạy server trực tiếp (`npm start` / `npm run dev`); chạy script hoặc test thì không có tiến trình nền. Nhiều máy cùng chạy server trên database dùng chung thì khoá `FOR UPDATE SKIP LOCKED` ngăn xử lý trùng.
 
@@ -337,6 +343,7 @@ Scheduler chỉ khởi động khi chạy server trực tiếp (`npm start` / `n
 | 12. Tranh chấp | BE2 (gọi `refund` của BE1) | `dispute_service.js` |
 | 13. Gắn cờ | BE1 phát hiện, BE2 (Admin) xử lý | `fraud_detection.js`, `admin_service.js` |
 | Thông báo, chatbot, Admin | BE2 | `notification_service.js`, `chat_service.js`, `admin_service.js` |
+| Socket.io (xác thực, phòng, sự kiện phiên, ngắt tài khoản bị khoá) | BE1 | `sockets/auction_socket.js`, `sockets/index.js`, `sockets/pause_listener.js` |
 
 Điểm tiếp giáp:
 
@@ -349,27 +356,26 @@ Scheduler chỉ khởi động khi chạy server trực tiếp (`npm start` / `n
 | `auction.model.listEndedHistory({ categoryCode })` | BE1 | `ai_price_suggestion.suggestPrice` |
 | `createNotification`, `emitNotification`, `notify` | BE2 | BE1 (outbid, win, refund, sold, warn) và BE2 |
 | `payout_service.releaseOverduePayouts()` | BE2 | `scheduler.js` của BE1 (3 dòng thêm vào vòng `tick`) |
+| `disconnectAccount(accountId, { kind, reason })` | BE1 | `admin_service.setAccountStatus` / `updateOps` (BE2), sau khi khoá đã lưu |
+| Trigger `sync_auction_pause` (migration 006, 007) | BE1 | Tự chạy khi `admin_service.flagAction` (BE2) đổi `flagged_auctions.status`; BE2 không phải gọi gì |
 
 ## 7. Còn thiếu và việc tiếp theo
 
-Các mục "Chặn luồng chính" trong lần quét trước đều đã có. Còn lại:
+Quét lại sau khi merge PR #13 và #14 vào `develop`. Mọi bước 1–13 của backend đã có route và logic thật, `npm test` đạt (BE1 37 bước, BE2 190 bước). Chỉ liệt kê các việc mức **Chặn luồng chính** và **Nên có** còn lại.
+
+### Chặn luồng chính
+
+| # | Việc | Chủ |
+|---|---|---|
+| 1 | **App Flutter chưa gọi backend.** `bidvibe_fe/lib` chưa có mã gọi HTTP hay Socket.io; app vẫn chạy bằng dữ liệu giả trong `AppStore`. Cần làm phần 4–5 của [`handoff.md`](handoff.md): tách repository, thêm implementation gọi API ([`api.md`](api.md), [`api_be1.md`](api_be1.md)) và Socket.io ([`socket.md`](socket.md)), giữ bản mock cho `flutter test` | Front-end (ngoài BE1 / BE2) |
+
+Không còn việc nào chặn luồng chính ở phía backend.
 
 ### Nên có
 
 | # | Việc | Chủ |
 |---|---|---|
-| 1 | ~~Tạm dừng chưa "đóng băng" đồng hồ~~ — **xong** (migration 006, trigger `sync_auction_pause`) | BE1 |
-| 2 | Socket.io và tài khoản bị khoá: BE1 **đã xong** (kết nối kiểm tra `status` như `requireAuth`, hàm `disconnectAccount(id, { kind })` ngắt kết nối đang mở — `socket.md` mục 5). **Còn lại BE2**: gọi `disconnectAccount` sau khi khoá trong `setAccountStatus` / `updateOps` | BE2 |
-| 3 | Kiểm thử chạy trên database dùng chung. Đã giảm rủi ro: dữ liệu test có tiền tố `test_be1_` / `test_be2_`, chỉ dọn đúng dòng của mình (README). Vẫn nên có database riêng cho test hoặc CI | BE1, BE2 |
-| 3b | ~~Không có sự kiện socket khi tạm dừng / tiếp tục~~ — **xong**: `auction:update` với `reason` `paused` / `resumed` (migration 007, `sockets/pause_listener.js`) | BE1 |
+| 2 | **Nhắc người mua chọn địa chỉ giao hàng.** Không có thông báo nào nhắc, nên đơn chưa có địa chỉ sẽ dừng ở `packed` (kho bị `409 ORDER_NO_ADDRESS`). Nên thông báo khi thắng phiên / khi kho đóng gói mà đơn chưa có địa chỉ, và cho kho lọc đơn thiếu địa chỉ | BE2 (nhắc lúc thắng phiên cần BE1 đồng ý) |
+| 3 | **Seller không quản lý được ảnh / tin nháp:** chưa có API xoá ảnh, xem chi tiết một tin, hay huỷ tin nháp (hiện chỉ có danh sách `GET /api/listings/mine`). Khi bị yêu cầu bổ sung ảnh, Seller chỉ thêm được ảnh (tối đa 10), không bỏ ảnh xấu | BE2 |
+| 4 | **Kiểm thử chạy trên database dùng chung**, chạy tay, không có CI. Dữ liệu test có tiền tố riêng và tự dọn, nhưng trong lúc chạy vẫn có tài khoản / phiên test trên DB thật và job nền của server đang chạy có thể chạm vào | BE1, BE2 |
 
-Đã xử lý thêm ở BE1: chống trùng khi nhiều lượt giá đến cùng lúc (cờ gian lận trong giao dịch + unique index; `increment` đọc giá sau khi khoá); chốt tên sự kiện Socket.io ([`socket.md`](socket.md)).
-
-### Có thì tốt
-
-| # | Việc | Chủ |
-|---|---|---|
-| 4 | ~~Người dùng tự báo cáo phiên đáng ngờ~~ — **xong** (`POST /api/auctions/:id/report`) | BE1 |
-| 5 | Ví Seller và dòng tiền giải ngân thật; hoàn tiền phần trả qua QR / thẻ về đúng kênh | BE1, BE2 |
-| 6 | Gợi ý giá, chatbot, báo cáo gọi mô hình AI thật | BE2 |
-| 7 | Giới hạn số lần thử đăng nhập | BE2 |
