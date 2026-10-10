@@ -1,5 +1,7 @@
 # Socket.io — sự kiện real-time của BidVibe
 
+> Cập nhật: 2026-10-10. REST API xem [`api.md`](api.md); hướng dẫn nối nhanh xem [`fe-quickstart.md`](fe-quickstart.md).
+
 Tài liệu cho người nối app Flutter. Nguồn sự thật là code: `src/sockets/auction_socket.js` (kết nối, phòng),
 `src/sockets/index.js` (`disconnectAccount`), `src/sockets/pause_listener.js` (`auction:update` khi tạm dừng / tiếp tục),
 `src/services/auction_engine.js` (`auction:update` khi đặt giá, `auction:ended`), `src/services/notification_service.js`

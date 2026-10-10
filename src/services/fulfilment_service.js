@@ -396,6 +396,6 @@ async function tracking(user, orderId) {
 }
 
 module.exports = {
-  STAGES, STAGE_SQL, lockOrder, paidAmount, listSelling, shipToWarehouse, listForWarehouse,
+  lockOrder, paidAmount, listSelling, shipToWarehouse, listForWarehouse,
   receive, inspect, pack, ship, deliver, confirmDelivery, setShippingAddress, tracking,
 };

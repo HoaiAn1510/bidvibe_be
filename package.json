@@ -10,7 +10,8 @@
     "db:seed": "node scripts/seed_demo.js && node scripts/seed.js",
     "test:be1": "node scripts/test_be1.js",
     "test:be2": "node scripts/test_be2.js",
-    "test": "npm run test:be1 && npm run test:be2"
+    "test": "npm run test:be1 && npm run test:be2",
+    "docs:check": "node scripts/docs_check.js"
   },
   "license": "ISC",
   "dependencies": {

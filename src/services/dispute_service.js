@@ -168,4 +168,4 @@ async function resolve(adminId, disputeId, input = {}) {
   return getOne(disputeId);
 }
 
-module.exports = { open, getOne, listMine, listForAdmin, resolve };
+module.exports = { open, listMine, listForAdmin, resolve };

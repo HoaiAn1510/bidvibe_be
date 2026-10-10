@@ -207,5 +207,5 @@ async function listCategories() {
 }
 
 module.exports = {
-  STATUS_VI, invalidState, create, update, addPhotos, submit, resubmit, listMine, listCategories,
+  invalidState, create, update, addPhotos, submit, resubmit, listMine, listCategories,
 };

@@ -15,10 +15,13 @@ npm run dev
 
 ### Biến môi trường
 
-Xem đầy đủ trong `.env.example`. Các biến quan trọng:
+`.env.example` liệt kê đúng các biến code đọc:
 
 | Biến | Ý nghĩa |
 |---|---|
+| `PORT` | Cổng server. Không đặt thì `3000`; nhóm và app Flutter dùng `5000`. |
+| `CORS_ORIGIN` | Nguồn được phép gọi API (mặc định `*`). |
+| `NODE_ENV` | `production` thì lỗi 5xx chỉ trả "Lỗi hệ thống". |
 | `DATABASE_URL` | Chuỗi kết nối Postgres. Với Supabase dùng chuỗi **Session pooler** (host `*.pooler.supabase.com`, cổng 5432, username dạng `postgres.<mã project>`). **Không** dùng Direct connection: nó chỉ có IPv6 nên nhiều mạng không kết nối được. |
 | `DB_SSL` | `true` khi dùng Supabase. |
 | `JWT_SECRET` | Khoá ký token đăng nhập. Bắt buộc, không có giá trị mặc định. |
@@ -37,6 +40,7 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 | `npm run test:be1` | Kiểm thử end-to-end phần đấu giá/ví/tạm dừng/gian lận trên DB dùng chung (tài khoản `test_be1_*`, tự dọn) |
 | `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_*`, tự dọn) |
 | `npm test` | Chạy cả `test:be1` và `test:be2` |
+| `npm run docs:check` | So route đăng ký trong `src/routes/` với `docs/api.md` (báo route thiếu / thừa). Chạy sau khi thêm hoặc sửa route |
 
 #### Chạy kiểm thử trên database dùng chung
 
@@ -51,16 +55,17 @@ Cả hai bộ test chạy trên Supabase dùng chung nên được viết để 
 ## Cấu trúc thư mục
 
 ```
-migrations/        # file SQL tạo/đổi cấu trúc database (001, 002, ...)
-scripts/           # script chạy tay (migrate.js, ...)
-docs/              # tài liệu kiến trúc và API
+migrations/        # file SQL tạo/đổi cấu trúc database (001 ... 007)
+scripts/           # migrate, seed (seed_demo.js BE1, seed.js BE2), test_be1, test_be2, docs_check
+docs/              # tài liệu (xem mục Tài liệu), docs/archive/ là bản lưu trữ
 src/
 ├── config/        # kết nối DB (db.js), biến môi trường (env.js)
-├── middleware/    # auth, error handler
-├── models/        # truy vấn/ánh xạ dữ liệu theo từng bảng
+├── middleware/    # auth (requireAuth, requireRole), error handler
+├── models/        # truy vấn của BE1 (auction, bid, wallet)
 ├── routes/        # định tuyến API
-├── services/      # logic nghiệp vụ chính
+├── services/      # logic nghiệp vụ chính (BE2 truy vấn trực tiếp trong service)
 ├── sockets/       # xử lý real-time (Socket.io)
+├── utils/         # validate.js: kiểm tra đầu vào dùng chung
 └── app.js         # entry point
 ```
 
@@ -88,7 +93,7 @@ Quyết định thiết kế cần nhớ:
 
 ### Quy tắc làm việc với database
 
-- **Không sửa file migration đã chạy.** Muốn đổi cấu trúc thì thêm file mới (`003_...sql`). Chỉ một người chạy `npm run db:migrate` mỗi lần có file mới, rồi báo người còn lại.
+- **Không sửa file migration đã chạy.** Muốn đổi cấu trúc thì thêm file mới với số kế tiếp (hiện tại là `008_...sql`). Chỉ một người chạy `npm run db:migrate` mỗi lần có file mới, rồi báo người còn lại.
 - **RLS đã bật cho mọi bảng và không có policy nào** (`002_enable_rls.sql`), để chặn truy cập qua API công khai của Supabase. Backend kết nối bằng tài khoản `postgres` nên bỏ qua RLS và vẫn đọc ghi bình thường. Bảng mới thêm sau này cũng phải bật RLS trong chính file migration của nó.
 - **Thao tác đụng tiền hoặc đổi trạng thái nhiều bảng phải nằm trong một giao dịch** (`BEGIN ... COMMIT`) dùng chung một kết nối lấy từ pool. Đặt giá phải khoá dòng phiên bằng `SELECT ... FOR UPDATE` để hai người không đặt trùng.
 - Không tự cộng/trừ số dư. Mọi thay đổi ví đi qua service ví (xem bên dưới) để luôn có dòng trong `wallet_transactions`.
@@ -97,8 +102,10 @@ Quyết định thiết kế cần nhớ:
 
 | Domain | Phụ trách | Phạm vi |
 |---|---|---|
-| Auction Core | BE1 | `auction.*`, `bid.*`, `wallet.*`, `fraud_detection.js`, `sockets/` |
-| Marketplace Operations | BE2 | `auth.*`, `product.*`, `appraisal.*`, `warehouse.*`, `admin.*`, `ai_price_suggestion.js`, `ai_report_service.js` |
+| Auction Core | BE1 | `auction.*`, `bid.*`, `wallet.*`, `order.routes.js`, `fraud_detection.js`, `scheduler.js`, `sockets/` |
+| Marketplace Operations | BE2 | `auth.*`, `listing.*`, `appraisal.*`, `ai.*` / `ai_price_suggestion.js`, `address.*`, `fulfilment.*`, `payout_service.js`, `warehouse.*`, `dispute.*`, `admin.*`, `notification.*`, `chat.*`, `utils/validate.js` |
+
+Danh sách file đầy đủ theo domain: [`docs/architecture.md`](docs/architecture.md#phân-chia-domain-file-thật-trong-src).
 
 Hai domain nối nhau qua các điểm sau, cần tôn trọng:
 
@@ -109,9 +116,18 @@ Hai domain nối nhau qua các điểm sau, cần tôn trọng:
 - **Đăng nhập:** `auth.*` do BE2 phụ trách. Bidder / Seller đăng nhập qua `accounts.password_hash`, Thẩm định / Kho vận / Admin qua `ops_accounts.password_hash` (thêm ở migration `003`); tài khoản ops do Admin tạo qua `POST /api/admin/ops-accounts`.
 - **Tự giải ngân:** job của BE2 (`payout_service.releaseOverduePayouts`) chạy chung vòng `scheduler.js` của BE1, tắt bằng `AUTO_PAYOUT_ENABLED=false`.
 
-Chi tiết quy ước API và kiến trúc: xem [`docs/architecture.md`](docs/architecture.md).
-API: phần BE1 ở [`docs/api_be1.md`](docs/api_be1.md), phần BE2 ở [`docs/api.md`](docs/api.md), sự kiện Socket.io ở [`docs/socket.md`](docs/socket.md). Kết quả kiểm thử BE2: [`docs/test-be2.md`](docs/test-be2.md).
-Luồng nghiệp vụ từ đăng ký đến giải ngân (kèm trạng thái triển khai, sơ đồ, luồng tiền): xem [`docs/mainflow.md`](docs/mainflow.md).
+## Tài liệu
+
+| File | Dành cho | Nội dung |
+|---|---|---|
+| [`docs/api.md`](docs/api.md) | App, backend | Toàn bộ REST API theo nghiệp vụ: quy ước, vai trò, từng endpoint (body, phản hồi mẫu thật, lỗi), bảng enum, bảng mã lỗi. Khớp 100% với route (`npm run docs:check`) |
+| [`docs/fe-quickstart.md`](docs/fe-quickstart.md) | App Flutter | Nối nhanh: chạy backend, địa chỉ gốc theo môi trường, tài khoản demo, màn hình nào gọi endpoint nào, token và lỗi, Socket.io bằng Dart, chạy thử bằng curl |
+| [`docs/socket.md`](docs/socket.md) | App, backend | Sự kiện Socket.io: kết nối, phòng, dữ liệu từng sự kiện |
+| [`docs/mainflow.md`](docs/mainflow.md) | Cả nhóm, giảng viên | Luồng nghiệp vụ từ đăng ký đến giải ngân, sơ đồ, luồng tiền, luồng thời gian, việc còn thiếu |
+| [`docs/architecture.md`](docs/architecture.md) | Backend | Quy ước, phân chia BE1 / BE2 theo file, hàm hai bên gọi nhau, quyết định thiết kế |
+| [`docs/test-be2.md`](docs/test-be2.md) | Backend | Kết quả kiểm thử BE2 (sinh tự động bởi `node scripts/test_be2.js --report docs/test-be2.md`) |
+| [`docs/bidvibe.postman_collection.json`](docs/bidvibe.postman_collection.json), [`docs/bidvibe.postman_environment.json`](docs/bidvibe.postman_environment.json) | App, backend | Bộ request Postman cho 60 route; đăng nhập tự lưu token |
+| [`docs/archive/handoff.md`](docs/archive/handoff.md) | — | Bản bàn giao cũ, chỉ để tra cứu lịch sử |
 
 ## Quy ước Git
 
