@@ -34,9 +34,19 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 | `npm start` | Chạy server (không tự khởi động lại) |
 | `npm run db:migrate` | Chạy các file trong `migrations/` chưa được áp dụng |
 | `npm run db:seed` | Thêm dữ liệu demo (BE1 + BE2), chạy lại nhiều lần không bị trùng. Mật khẩu demo `123456` |
-| `npm run test:be1` | Kiểm thử end-to-end phần đấu giá/ví trên DB thật, tự dọn dữ liệu tạm |
+| `npm run test:be1` | Kiểm thử end-to-end phần đấu giá/ví/tạm dừng/gian lận trên DB dùng chung (tài khoản `test_be1_*`, tự dọn) |
 | `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_*`, tự dọn) |
 | `npm test` | Chạy cả `test:be1` và `test:be2` |
+
+#### Chạy kiểm thử trên database dùng chung
+
+Cả hai bộ test chạy trên Supabase dùng chung nên được viết để **không đụng dữ liệu thật**:
+
+- Mọi dữ liệu test có tiền tố riêng: `test_be1_*` (BE1: email `test_be1_<tên>_<số>@be1test.local`, tin đăng `test_be1_item`) và `test_be2_*` (BE2).
+- Test chỉ ghi/xoá các dòng đi ra từ những tài khoản có tiền tố đó. Cuối mỗi lần chạy (kể cả khi test lỗi) và đầu lần chạy kế tiếp, các dòng này được xoá sạch; dữ liệu seed và dữ liệu của đồng đội không bị sửa hay xoá.
+- Chạy được lúc đồng đội đang chạy server: scheduler của họ có thể đóng phiên test của bạn, test BE1 đã chờ DB về đúng trạng thái. Nếu vẫn lỗi lặt vặt thì chạy lại.
+- Nếu test bị ngắt giữa chừng (Ctrl+C), cứ chạy lại là dọn được phần dở. Kiểm tra còn sót không: `SELECT count(*) FROM accounts WHERE email LIKE 'test\_be1\_%'`.
+- Cần database đã chạy `npm run db:migrate` (test BE1 cần migration `006`).
 
 ## Cấu trúc thư mục
 
