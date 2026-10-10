@@ -66,6 +66,10 @@ async function cleanup() {
   await q(`DELETE FROM accounts WHERE id = ANY($1)`); // cascade: bidders, sellers, notifications
 }
 
+async function cleanupOps() {
+  await pool.query(`DELETE FROM ops_accounts WHERE email LIKE $1`, [EMAIL_LIKE]);
+}
+
 // Một server khác (của đồng đội) cùng trỏ vào DB này có thể đóng phiên test của mình trước
 // khi test gọi. Kết quả cuối cùng là như nhau, nên chờ tối đa vài giây tới khi DB ở đúng trạng thái.
 async function closedAuction(auctionId) {
@@ -80,6 +84,7 @@ async function closedAuction(auctionId) {
 
 async function main() {
   await cleanup(); // dọn rác của lần chạy trước nếu bị ngắt giữa chừng
+  await cleanupOps();
   const seller = await mkAccount('seller', 'Seller');
   const [A, B, C] = [await mkAccount('bidder', 'Alice'), await mkAccount('bidder', 'Bob'), await mkAccount('bidder', 'Carl')];
   const tx = (f) => engine.inTransaction(f);
@@ -338,13 +343,19 @@ async function main() {
     const au = (await pool.query('SELECT current_price::int AS p, bid_count FROM auctions WHERE id = $1', [ar])).rows[0];
     assert.deepStrictEqual(au, { p: 1_100_000, bid_count: 2 });
 
-    // Vòng hai: người dẫn đầu (B) bị từ chối, người còn lại (A) thắng; giá chỉ tăng đúng một bước.
+    // Vòng hai: tuỳ ai được khoá trước mà 1 lượt (người dẫn đầu đi trước nên bị ALREADY_LEADING) hoặc
+    // 2 lượt (người kia đi trước rồi bị vượt lại) thành công. Bất biến: mỗi lượt thành công tăng đúng
+    // một bước, lượt bị từ chối chỉ có thể là ALREADY_LEADING, và không có hai lượt cùng giá.
     const rs2 = await Promise.allSettled([
       engine.placeBid({ bidderId: A, auctionId: ar, increment: 50_000 }),
       engine.placeBid({ bidderId: B, auctionId: ar, increment: 50_000 }),
     ]);
-    assert.strictEqual(rs2.filter((r) => r.status === 'fulfilled').length, 1);
-    assert.strictEqual((await pool.query('SELECT current_price::int AS p FROM auctions WHERE id = $1', [ar])).rows[0].p, 1_150_000);
+    const okCount = rs2.filter((r) => r.status === 'fulfilled').length;
+    assert.ok(okCount >= 1, JSON.stringify(rs2.map((r) => r.reason?.code)));
+    assert.ok(rs2.every((r) => r.status === 'fulfilled' || r.reason.code === 'ALREADY_LEADING'));
+    assert.strictEqual((await pool.query('SELECT current_price::int AS p FROM auctions WHERE id = $1', [ar])).rows[0].p, 1_100_000 + okCount * 50_000);
+    const all = (await pool.query('SELECT amount::int AS a FROM bids WHERE auction_id = $1 ORDER BY id', [ar])).rows.map((r) => r.a);
+    assert.deepStrictEqual(all, all.map((_, i) => 1_050_000 + i * 50_000));
     await rejects(engine.placeBid({ bidderId: A, auctionId: ar, amount: 2_000_000, increment: 50_000 }), 'VALIDATION_ERROR');
   });
   await step('nhiều lần quét gian lận song song: chỉ một cờ pending cho mỗi luật', async () => {
@@ -471,9 +482,158 @@ async function main() {
     }
   });
 
+  console.log('Socket.io: tạm dừng / tiếp tục và ngắt tài khoản bị khoá');
+  {
+    const jwt = require('jsonwebtoken');
+    const env = require('../src/config/env');
+    const { io: ioClient } = require('socket.io-client');
+    const { server } = require('../src/app');
+    const registerSockets = require('../src/sockets');
+    const pauseListener = require('../src/sockets/pause_listener');
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    await pauseListener.start();
+    const url = `http://127.0.0.1:${server.address().port}`;
+    const tok = (id, kind, role) => jwt.sign({ sub: String(id), kind, role }, env.jwtSecret, { expiresIn: '5m' });
+    const sockets = [];
+    // Kết nối; resolve socket khi vào được, reject với mã lỗi của server (UNAUTHORIZED, ACCOUNT_SUSPENDED...).
+    const connect = (token) => new Promise((resolve, reject) => {
+      const s = ioClient(url, { auth: { token }, transports: ['websocket'], reconnection: false, forceNew: true });
+      sockets.push(s);
+      s.once('connect', () => resolve(s));
+      s.once('connect_error', (e) => { s.close(); reject(e); });
+    });
+    // Chờ một sự kiện thoả điều kiện, hết hạn thì trả null.
+    const waitFor = (s, event, pred = () => true, ms = 6000) => new Promise((resolve) => {
+      const timer = setTimeout(() => { s.off(event, h); resolve(null); }, ms);
+      function h(data) { if (pred(data)) { clearTimeout(timer); s.off(event, h); resolve(data ?? true); } }
+      s.on(event, h);
+    });
+    const joinRoom = async (s, auctionId) => { s.emit('auction:join', String(auctionId)); await sleep(300); };
+    const isFor = (id, reason) => (u) => u.auctionId === String(id) && u.reason === reason;
+
+    try {
+      await step('tạm dừng: phòng phiên nhận auction:update reason paused, đồng hồ đứng', async () => {
+        const { auctionId: as } = await mkAuction(seller);
+        const sA = await connect(tok(A, 'account', 'bidder'));
+        await joinRoom(sA, as);
+        const before = await clock(as);
+        const got = waitFor(sA, 'auction:update', isFor(as, 'paused'));
+        const f = await flag(as, 'paused'); // cách BE2 tạm dừng: đổi cờ sang 'paused'
+        const u = await got;
+        assert.ok(u, 'không nhận được auction:update khi tạm dừng');
+        assert.strictEqual(u.paused, true);
+        assert.strictEqual(u.status, 'active');
+        assert.ok(u.pausedAt);
+        assert.strictEqual(new Date(u.endsAt).getTime(), new Date(before.ends_at).getTime());
+        assert.ok(u.remainingSeconds > 3500 && u.remainingSeconds <= 3600, `remainingSeconds ${u.remainingSeconds}`);
+        assert.strictEqual(typeof u.currentPrice, 'number');
+
+        await sleep(1200);
+        const gotResume = waitFor(sA, 'auction:update', isFor(as, 'resumed'));
+        await pool.query(`UPDATE flagged_auctions SET status = 'safe' WHERE id = $1`, [f]);
+        const r = await gotResume;
+        assert.ok(r, 'không nhận được auction:update khi tiếp tục');
+        assert.strictEqual(r.paused, false);
+        assert.strictEqual(r.pausedAt, null);
+        const shift = new Date(r.endsAt) - new Date(before.ends_at);
+        assert.ok(shift >= 1000 && shift < 5000, `giờ kết thúc mới phải lùi đúng thời gian dừng, lùi ${shift}ms`);
+        assert.strictEqual(new Date(r.endsAt).getTime(), new Date((await clock(as)).ends_at).getTime());
+      });
+      await step('auction:update khi đặt giá có reason bid; người ngoài phòng không nhận', async () => {
+        const { auctionId: as } = await mkAuction(seller);
+        const sA = await connect(tok(A, 'account', 'bidder'));
+        const sB = await connect(tok(B, 'account', 'bidder')); // không vào phòng
+        await joinRoom(sA, as);
+        await engine.joinAuction({ bidderId: B, auctionId: as });
+        const got = waitFor(sA, 'auction:update', isFor(as, 'bid'));
+        const outside = waitFor(sB, 'auction:update', (u) => u.auctionId === String(as), 1500);
+        await engine.placeBid({ bidderId: B, auctionId: as, increment: 50_000 });
+        const u = await got;
+        assert.ok(u);
+        assert.deepStrictEqual([u.currentPrice, u.bidCount, u.bid.amount], [1_050_000, 1, 1_050_000]);
+        assert.strictEqual(await outside, null);
+      });
+      await step('tạm dừng bị ROLLBACK thì không phát sự kiện; chấm dứt phiên đang dừng không phát "resumed"', async () => {
+        const { auctionId: as } = await mkAuction(seller);
+        const sA = await connect(tok(A, 'account', 'bidder'));
+        await joinRoom(sA, as);
+        const none = waitFor(sA, 'auction:update', (u) => u.auctionId === String(as), 2000);
+        const c = await pool.connect();
+        try {
+          await c.query('BEGIN');
+          await c.query(`INSERT INTO flagged_auctions (auction_id, severity, confidence, reason, status) VALUES ($1, 'high', 90, $2, 'paused')`, [as, `${PREFIX}rb`]);
+          await c.query('ROLLBACK');
+        } finally { c.release(); }
+        assert.strictEqual(await none, null, 'giao dịch ROLLBACK không được phát auction:update');
+        assert.strictEqual((await clock(as)).paused_at, null);
+
+        const f = await flag(as, 'paused');
+        assert.ok(await waitFor(sA, 'auction:update', isFor(as, 'paused')));
+        const resumed = waitFor(sA, 'auction:update', isFor(as, 'resumed'), 2000);
+        const ended = waitFor(sA, 'auction:ended', (e) => e.auctionId === String(as));
+        const done = await tx(async (cl) => {
+          const d = await engine.cancelAuction(cl, as);
+          await cl.query(`UPDATE flagged_auctions SET status = 'terminated' WHERE id = $1`, [f]);
+          return d;
+        });
+        done.emit();
+        assert.deepStrictEqual(await ended, { auctionId: String(as), hasWinner: false, cancelled: true });
+        assert.strictEqual(await resumed, null);
+      });
+
+      await step('disconnectAccount: báo lý do rồi ngắt mọi kết nối của tài khoản, trả về số kết nối', async () => {
+        const s1 = await connect(tok(C, 'account', 'bidder'));
+        const s2 = await connect(tok(C, 'account', 'bidder'));
+        const other = await connect(tok(B, 'account', 'bidder'));
+        const notices = [waitFor(s1, 'account:disconnected'), waitFor(s2, 'account:disconnected')];
+        const closed = [waitFor(s1, 'disconnect'), waitFor(s2, 'disconnect')];
+        const n = await registerSockets.disconnectAccount(C, { reason: 'Vi phạm điều khoản' });
+        assert.strictEqual(n, 2);
+        for (const p of notices) assert.deepStrictEqual(await p, { code: 'ACCOUNT_SUSPENDED', message: 'Vi phạm điều khoản' });
+        for (const p of closed) assert.strictEqual(await p, 'io server disconnect');
+        assert.strictEqual(other.connected, true, 'tài khoản khác không bị ngắt');
+        assert.strictEqual(await registerSockets.disconnectAccount(C), 0); // không còn online
+        assert.strictEqual(await registerSockets.disconnectAccount(null), 0);
+      });
+      await step('tài khoản bị khoá không kết nối lại được; token sai bị từ chối', async () => {
+        await pool.query(`UPDATE accounts SET status = 'suspended' WHERE id = $1`, [C]);
+        await assert.rejects(connect(tok(C, 'account', 'bidder')), { message: 'ACCOUNT_SUSPENDED' });
+        await pool.query(`UPDATE accounts SET status = 'active' WHERE id = $1`, [C]);
+        const back = await connect(tok(C, 'account', 'bidder'));
+        assert.strictEqual(back.connected, true);
+        await assert.rejects(connect('token-sai'), { message: 'UNAUTHORIZED' });
+        await assert.rejects(connect(tok('999999999', 'account', 'bidder')), { message: 'UNAUTHORIZED' });
+      });
+      await step('disconnectAccount với kind ops chỉ ngắt tài khoản nội bộ, không nhầm với account trùng id', async () => {
+        const email = `${PREFIX}ops_${Date.now()}${DOMAIN}`;
+        const opsId = (await pool.query(
+          `INSERT INTO ops_accounts (name, email, role) VALUES ($1, $2, 'admin') RETURNING id`, [`${PREFIX}ops`, email])).rows[0].id;
+        // ops_accounts.id có thể trùng số với A/B/C: đóng hết socket account để kiểm tra không bị nhiễu.
+        sockets.forEach((s) => s.close());
+        await sleep(300);
+        const sOps = await connect(tok(opsId, 'ops', 'admin'));
+        assert.strictEqual(await registerSockets.disconnectAccount(opsId), 0); // kind mặc định 'account'
+        assert.strictEqual(sOps.connected, true);
+        const notice = waitFor(sOps, 'account:disconnected');
+        assert.strictEqual(await registerSockets.disconnectAccount(opsId, { kind: 'ops' }), 1);
+        assert.deepStrictEqual(await notice, { code: 'ACCOUNT_SUSPENDED', message: 'Tài khoản đã bị tạm khoá' });
+        await pool.query(`UPDATE ops_accounts SET status = 'suspended' WHERE id = $1`, [opsId]);
+        await assert.rejects(connect(tok(opsId, 'ops', 'admin')), { message: 'ACCOUNT_SUSPENDED' });
+      });
+    } finally {
+      sockets.forEach((s) => s.close());
+      await pauseListener.stop();
+      await new Promise((res) => server.close(res));
+    }
+  }
+
   console.log(`\nTất cả ${passed} bước đạt.`);
 }
 
 main()
   .catch((err) => { console.error('\n✗ THẤT BẠI:', err); process.exitCode = 1; })
-  .finally(async () => { await cleanup().catch((e) => console.error('cleanup lỗi:', e.message)); await pool.end(); });
+  .finally(async () => {
+    await cleanup().catch((e) => console.error('cleanup lỗi:', e.message));
+    await cleanupOps().catch((e) => console.error('cleanup ops lỗi:', e.message));
+    await pool.end();
+  });

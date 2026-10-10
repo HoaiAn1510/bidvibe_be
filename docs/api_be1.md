@@ -222,7 +222,11 @@ await require('../models/auction.model').listEndedHistory({ categoryCode: 'shoes
 ```
 
 Tạm dừng / tiếp tục phiên: BE2 chỉ cần đổi `flagged_auctions.status` sang / khỏi `'paused'`; trigger
-`flagged_auctions_sync_pause` (migration `006`) tự đóng băng và cộng bù đồng hồ (`auctions.paused_at`, `ends_at`).
+`flagged_auctions_sync_pause` (migration `006`) tự đóng băng và cộng bù đồng hồ (`auctions.paused_at`, `ends_at`),
+và (migration `007`) báo cho server phát `auction:update` (`reason: 'paused' | 'resumed'`) vào phòng phiên.
+
+Khoá tài khoản: sau khi COMMIT, gọi `require('../sockets').disconnectAccount(id, { kind: 'account' | 'ops', reason })`
+để ngắt các kết nối socket đang mở (trả về `Promise<number>` số kết nối đã ngắt). Chi tiết: [`socket.md`](socket.md) mục 5.
 
 `createNotification` / `emitNotification` thuộc BE2 (`services/notification_service.js`); BE1 gọi chúng cho
 `outbid`, `win`, `refund`, `sold`, `warn`.

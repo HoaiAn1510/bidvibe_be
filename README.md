@@ -66,7 +66,7 @@ src/
 
 ## Cơ sở dữ liệu
 
-Schema gốc nằm trong `migrations/001_init_schema.sql` (23 bảng nghiệp vụ), các migration sau chỉ thêm: `003` mật khẩu tài khoản nội bộ, `004` loại giao dịch ví mất cọc, `005` bảng `addresses` và `orders.shipping_address_id`, `006` (BE1) `auctions.paused_at` + trigger đóng băng đồng hồ khi tạm dừng, unique index chặn cờ gian lận `pending` trùng. Thư mục `migrations/` là nguồn sự thật cho cấu trúc dữ liệu. Sơ đồ quan hệ xem trong Supabase: **Database → Schema Visualizer**.
+Schema gốc nằm trong `migrations/001_init_schema.sql` (23 bảng nghiệp vụ), các migration sau chỉ thêm: `003` mật khẩu tài khoản nội bộ, `004` loại giao dịch ví mất cọc, `005` bảng `addresses` và `orders.shipping_address_id`, `006` (BE1) `auctions.paused_at` + trigger đóng băng đồng hồ khi tạm dừng, unique index chặn cờ gian lận `pending` trùng, `007` (BE1) trigger tạm dừng gửi `pg_notify` để server phát Socket.io. Thư mục `migrations/` là nguồn sự thật cho cấu trúc dữ liệu. Sơ đồ quan hệ xem trong Supabase: **Database → Schema Visualizer**.
 
 | Nhóm | Bảng |
 |---|---|

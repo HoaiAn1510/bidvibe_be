@@ -1,6 +1,6 @@
 # Luồng chính của BidVibe
 
-Tài liệu này mô tả luồng nghiệp vụ từ lúc đăng ký đến lúc giải ngân, **dựa trên code backend và schema đang có** (migration 001–006). Mỗi bước có nhãn trạng thái triển khai:
+Tài liệu này mô tả luồng nghiệp vụ từ lúc đăng ký đến lúc giải ngân, **dựa trên code backend và schema đang có** (migration 001–007). Mỗi bước có nhãn trạng thái triển khai:
 
 - **[Đã có]** route đã đăng ký trong `src/routes/index.js`, có logic xử lý thật và đã chạy qua kiểm thử end-to-end (`npm test`, kết quả ở [`test-be2.md`](test-be2.md)).
 - **[Một phần]** mới làm được một phần.
@@ -170,7 +170,7 @@ Quyết định đã chốt: **Seller chưa có ví**, giải ngân chỉ đổi
 | Phát hiện | `fraud_detection.scanAuction` (BE1) chạy sau mỗi lượt giá, theo 4 luật (hai tài khoản đặt xen kẽ, dồn dập từ 5 lượt trong 60 giây, nhảy giá từ 3 lần, tài khoản mới đặt giá cao). Ghi `flagged_auctions` (`pending`) + `flag_evidence`. Kiểm tra trùng và ghi cờ nằm chung một giao dịch, tuần tự theo phiên (advisory lock); unique index `uq_flagged_auctions_pending_reason` (migration 006) chặn hai cờ `pending` cùng lý do |
 | Admin xem | `GET /api/admin/flags?status=` |
 | Hành động | `POST /api/admin/flags/:id/action` `{ action, reason }` |
-| `pause` | Cờ → `paused`. Phiên không nhận cọc / lượt giá mới, không bị đóng tự động, **đồng hồ đóng băng**: trigger `flagged_auctions_sync_pause` (migration 006, BE1) ghi `auctions.paused_at`. Thông báo Seller |
+| `pause` | Cờ → `paused`. Phiên không nhận cọc / lượt giá mới, không bị đóng tự động, **đồng hồ đóng băng**: trigger `flagged_auctions_sync_pause` (migration 006, BE1) ghi `auctions.paused_at`. Thông báo Seller; người đang xem phiên nhận Socket.io `auction:update` (`reason: 'paused'`, migration 007) |
 | `verify` / `safe` | Cờ → `verify` / `safe`; nếu không còn cờ `paused` nào thì phiên chạy lại và trigger cộng thời gian đã dừng vào `ends_at` (phiên còn đúng thời gian như lúc bị dừng) |
 | `terminate` | Bắt buộc lý do. Gọi `cancelAuction(client, …)` (BE1): phiên → `cancelled`, tin → `cancelled`, hoàn cọc mọi người, thông báo; cờ → `terminated` |
 | Người dùng báo cáo phiên | **[Đã có]** `POST /api/auctions/:id/report` `{ reason, note? }` (bidder, BE1). Mỗi người một lần mỗi phiên (`409 ALREADY_REPORTED`). Phiên có cờ `pending` thì thêm `flag_evidence` vào cờ đó, chưa có thì tạo cờ `low`. Admin xử lý như cờ AI |
@@ -359,9 +359,9 @@ Các mục "Chặn luồng chính" trong lần quét trước đều đã có. C
 | # | Việc | Chủ |
 |---|---|---|
 | 1 | ~~Tạm dừng chưa "đóng băng" đồng hồ~~ — **xong** (migration 006, trigger `sync_auction_pause`) | BE1 |
-| 2 | Socket.io: `auction_socket.js` chỉ xác thực JWT lúc kết nối, chưa chặn / ngắt tài khoản bị khoá như `requireAuth` | BE1 |
+| 2 | Socket.io và tài khoản bị khoá: BE1 **đã xong** (kết nối kiểm tra `status` như `requireAuth`, hàm `disconnectAccount(id, { kind })` ngắt kết nối đang mở — `socket.md` mục 5). **Còn lại BE2**: gọi `disconnectAccount` sau khi khoá trong `setAccountStatus` / `updateOps` | BE2 |
 | 3 | Kiểm thử chạy trên database dùng chung. Đã giảm rủi ro: dữ liệu test có tiền tố `test_be1_` / `test_be2_`, chỉ dọn đúng dòng của mình (README). Vẫn nên có database riêng cho test hoặc CI | BE1, BE2 |
-| 3b | Không có sự kiện socket khi Admin tạm dừng / tiếp tục phiên; app người mua phải tải lại chi tiết phiên (xem `socket.md` mục 6) | BE1 |
+| 3b | ~~Không có sự kiện socket khi tạm dừng / tiếp tục~~ — **xong**: `auction:update` với `reason` `paused` / `resumed` (migration 007, `sockets/pause_listener.js`) | BE1 |
 
 Đã xử lý thêm ở BE1: chống trùng khi nhiều lượt giá đến cùng lúc (cờ gian lận trong giao dịch + unique index; `increment` đọc giá sau khi khoá); chốt tên sự kiện Socket.io ([`socket.md`](socket.md)).
 
