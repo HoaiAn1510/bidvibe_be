@@ -6,7 +6,7 @@ Tài liệu này mô tả luồng nghiệp vụ từ lúc đăng ký đến lúc
 - **[Một phần]** mới làm được một phần.
 - **[Chưa có]** chưa có code.
 
-Định dạng phản hồi của mọi API: `{ success, data, error }`. Mọi route trừ `/api/health` và `/api/auth/*` cần header `Authorization: Bearer <token>`. Chi tiết từng endpoint: BE2 ở [`api.md`](api.md), BE1 ở [`api_be1.md`](api_be1.md).
+Định dạng phản hồi của mọi API: `{ success, data, error }`. Mọi route trừ `/api/health` và `/api/auth/*` cần header `Authorization: Bearer <token>`. Chi tiết từng endpoint: [`api.md`](api.md).
 
 ## 1. Tổng quan
 
@@ -367,7 +367,7 @@ Quét lại sau khi merge PR #13 và #14 vào `develop`. Mọi bước 1–13 c�
 
 | # | Việc | Chủ |
 |---|---|---|
-| 1 | **App Flutter chưa gọi backend.** `bidvibe_fe/lib` chưa có mã gọi HTTP hay Socket.io; app vẫn chạy bằng dữ liệu giả trong `AppStore`. Cần làm phần 4–5 của [`handoff.md`](handoff.md): tách repository, thêm implementation gọi API ([`api.md`](api.md), [`api_be1.md`](api_be1.md)) và Socket.io ([`socket.md`](socket.md)), giữ bản mock cho `flutter test` | Front-end (ngoài BE1 / BE2) |
+| 1 | **App Flutter chưa gọi backend.** `bidvibe_fe/lib` chưa có mã gọi HTTP hay Socket.io; app vẫn chạy bằng dữ liệu giả trong `AppStore`. Cần tách repository, thêm implementation gọi API ([`api.md`](api.md), hướng dẫn nhanh [`fe-quickstart.md`](fe-quickstart.md)) và Socket.io ([`socket.md`](socket.md)), giữ bản mock cho `flutter test` | Front-end (ngoài BE1 / BE2) |
 
 Không còn việc nào chặn luồng chính ở phía backend.
 

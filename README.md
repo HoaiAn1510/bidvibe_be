@@ -110,7 +110,7 @@ Hai domain nối nhau qua các điểm sau, cần tôn trọng:
 - **Tự giải ngân:** job của BE2 (`payout_service.releaseOverduePayouts`) chạy chung vòng `scheduler.js` của BE1, tắt bằng `AUTO_PAYOUT_ENABLED=false`.
 
 Chi tiết quy ước API và kiến trúc: xem [`docs/architecture.md`](docs/architecture.md).
-API: phần BE1 ở [`docs/api_be1.md`](docs/api_be1.md), phần BE2 ở [`docs/api.md`](docs/api.md), sự kiện Socket.io ở [`docs/socket.md`](docs/socket.md). Kết quả kiểm thử BE2: [`docs/test-be2.md`](docs/test-be2.md).
+API: [`docs/api.md`](docs/api.md), sự kiện Socket.io ở [`docs/socket.md`](docs/socket.md). Kết quả kiểm thử BE2: [`docs/test-be2.md`](docs/test-be2.md).
 Luồng nghiệp vụ từ đăng ký đến giải ngân (kèm trạng thái triển khai, sơ đồ, luồng tiền): xem [`docs/mainflow.md`](docs/mainflow.md).
 
 ## Quy ước Git
