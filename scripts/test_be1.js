@@ -223,6 +223,74 @@ async function main() {
     await rejects(engine.placeBid({ bidderId: B, auctionId: a5, amount: 1_050_000 }), 'AUCTION_PAUSED');
   });
 
+  console.log('Tạm dừng đóng băng đồng hồ');
+  // Admin (BE2) tạm dừng bằng cách đổi flagged_auctions.status; trigger ở migration 006 lo phần đồng hồ.
+  const flag = (auctionId, status) => pool.query(
+    `INSERT INTO flagged_auctions (auction_id, severity, confidence, reason, status)
+     VALUES ($1, 'high', 90, $2, $3) RETURNING id`, [auctionId, `${PREFIX}pause_${Math.random()}`, status]).then((r) => r.rows[0].id);
+  const clock = async (auctionId) => (await pool.query(
+    `SELECT ends_at, paused_at, status FROM auctions WHERE id = $1`, [auctionId])).rows[0];
+  const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  await step('tạm dừng rồi tiếp tục: ends_at dịch đúng bằng thời gian đã dừng', async () => {
+    const { auctionId: ap } = await mkAuction(seller);
+    await engine.joinAuction({ bidderId: A, auctionId: ap });
+    await engine.placeBid({ bidderId: A, auctionId: ap, amount: 1_050_000 });
+    await pool.query(`UPDATE auctions SET ends_at = now() + interval '3 seconds', starts_at = now() - interval '1 hour' WHERE id = $1`, [ap]);
+    const before = await clock(ap);
+
+    const t0 = Date.now();
+    const f = await flag(ap, 'paused');
+    const paused = await clock(ap);
+    assert.ok(paused.paused_at, 'paused_at phải được ghi khi tạm dừng');
+    assert.strictEqual(new Date(paused.ends_at).getTime(), new Date(before.ends_at).getTime()); // chưa dịch
+
+    await sleep(4500); // dừng lâu hơn thời gian còn lại (3 giây)
+    const view = await engine.getAuction(ap, A);
+    assert.strictEqual(view.paused, true);
+    assert.ok(view.remainingSeconds >= 2 && view.remainingSeconds <= 3, `còn ${view.remainingSeconds}s, mong ~3s (đứng yên)`);
+    await engine.closeExpiredAuctions();
+    assert.strictEqual((await clock(ap)).status, 'active', 'job đóng phiên không được đóng phiên đang tạm dừng');
+
+    await pool.query(`UPDATE flagged_auctions SET status = 'safe' WHERE id = $1`, [f]);
+    const elapsed = Date.now() - t0;
+    const after = await clock(ap);
+    assert.strictEqual(after.paused_at, null);
+    const shift = new Date(after.ends_at) - new Date(before.ends_at);
+    assert.ok(Math.abs(shift - elapsed) < 1500, `ends_at dịch ${shift}ms, thời gian dừng ~${elapsed}ms`);
+    assert.ok(new Date(after.ends_at) > new Date(), 'tiếp tục xong thì phiên vẫn còn giờ, không đóng ngay');
+    await engine.closeExpiredAuctions();
+    assert.strictEqual((await clock(ap)).status, 'active');
+    const resumed = await engine.getAuction(ap, A);
+    assert.strictEqual(resumed.paused, false);
+    assert.ok(resumed.remainingSeconds >= 1 && resumed.remainingSeconds <= 3, `còn ${resumed.remainingSeconds}s`);
+  });
+  await step('hai cờ tạm dừng: gỡ một cờ thì vẫn dừng, gỡ cờ cuối mới chạy lại', async () => {
+    const { auctionId: ap2 } = await mkAuction(seller);
+    const f1 = await flag(ap2, 'paused');
+    const f2 = await flag(ap2, 'paused');
+    const p1 = (await clock(ap2)).paused_at;
+    await sleep(600);
+    await pool.query(`UPDATE flagged_auctions SET status = 'safe' WHERE id = $1`, [f1]);
+    const mid = await clock(ap2);
+    assert.ok(mid.paused_at, 'còn một cờ paused nên vẫn tạm dừng');
+    assert.strictEqual(new Date(mid.paused_at).getTime(), new Date(p1).getTime());
+    await pool.query(`UPDATE flagged_auctions SET status = 'verify' WHERE id = $1`, [f2]);
+    assert.strictEqual((await clock(ap2)).paused_at, null);
+  });
+  await step('Admin chấm dứt phiên đang tạm dừng: phiên huỷ, không còn tính thời gian dừng', async () => {
+    const { auctionId: ap3 } = await mkAuction(seller);
+    await engine.joinAuction({ bidderId: B, auctionId: ap3 });
+    const f = await flag(ap3, 'paused');
+    await tx(async (c) => {
+      const done = await engine.cancelAuction(c, ap3);
+      await c.query(`UPDATE flagged_auctions SET status = 'terminated' WHERE id = $1`, [f]);
+      return done;
+    });
+    const a = await clock(ap3);
+    assert.strictEqual(a.status, 'cancelled');
+    assert.strictEqual(a.paused_at, null);
+  });
+
   console.log('Phát hiện gian lận');
   await step('luật ping-pong / dồn dập / nhảy giá', async () => {
     const t0 = Date.now();
