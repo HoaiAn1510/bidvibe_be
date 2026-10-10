@@ -9,6 +9,19 @@ const { inTransaction, cancelAuction } = require('./auction_engine');
 const { createNotification, emitNotification } = require('./notification_service');
 const { SALT_ROUNDS } = require('./auth_service');
 const validate = require('../utils/validate');
+const registerSockets = require('../sockets');
+
+const LOCK_REASON = 'Tài khoản đã bị khoá';
+
+// Ngắt socket đang mở của tài khoản vừa bị khoá (hàm của BE1). Chỉ gọi sau khi việc khoá đã
+// lưu xuống DB; lỗi ở đây chỉ ghi log, không làm hỏng phản hồi của API khoá.
+async function disconnectSuspended(accountId, kind) {
+  try {
+    await registerSockets.disconnectAccount(accountId, { kind, reason: LOCK_REASON });
+  } catch (err) {
+    console.error(`[admin] ngắt socket tài khoản ${kind}:${accountId} lỗi:`, err.message);
+  }
+}
 
 const conflict = (message, code = 'INVALID_STATE') => new AppError(message, 409, code);
 const FEE_RATE = 0.05; // khớp auction_engine.js (BE1)
@@ -265,6 +278,8 @@ async function updateOps(adminId, opsId, input = {}) {
     params,
   );
   if (!rows[0]) throw new AppError('Không tìm thấy tài khoản nội bộ', 404, 'NOT_FOUND');
+  // UPDATE trên pool tự commit: tới đây việc khoá đã được lưu.
+  if (rows[0].status === 'suspended') await disconnectSuspended(rows[0].id, 'ops');
   return opsView(rows[0]);
 }
 
@@ -303,6 +318,8 @@ async function setAccountStatus(accountId, input = {}) {
     [accountId, status],
   );
   if (!rows[0]) throw new AppError('Không tìm thấy tài khoản', 404, 'NOT_FOUND');
+  // UPDATE trên pool tự commit: tới đây việc khoá đã được lưu.
+  if (rows[0].status === 'suspended') await disconnectSuspended(rows[0].id, 'account');
   return { id: rows[0].id, fullName: rows[0].full_name, email: rows[0].email, status: rows[0].status };
 }
 

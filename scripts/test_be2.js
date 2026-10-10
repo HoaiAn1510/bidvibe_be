@@ -13,10 +13,46 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcrypt');
-const { server } = require('../src/app');
+const { server, io } = require('../src/app');
 const { pool } = require('../src/config/db');
 const engine = require('../src/services/auction_engine');
 const payout = require('../src/services/payout_service');
+const registerSockets = require('../src/sockets');
+const { io: ioClient } = require('socket.io-client');
+
+// Kết nối Socket.io thật tới server test (không tự kết nối lại để quan sát việc bị ngắt).
+const openSockets = [];
+const sock = {
+  open(token) {
+    const s = ioClient(base, { auth: { token }, transports: ['websocket'], reconnection: false, forceNew: true });
+    openSockets.push(s);
+    return s;
+  },
+  connect(token) {
+    return new Promise((resolve, reject) => {
+      const s = sock.open(token);
+      const t = setTimeout(() => reject(new Error('socket không kết nối được trong 10 giây')), 10_000);
+      s.once('connect', () => { clearTimeout(t); resolve(s); });
+      s.once('connect_error', (e) => { clearTimeout(t); reject(new Error(`connect_error ${e.message}`)); });
+    });
+  },
+  connectError(token) {
+    return new Promise((resolve, reject) => {
+      const s = sock.open(token);
+      const t = setTimeout(() => reject(new Error('mong bị từ chối nhưng không có phản hồi')), 10_000);
+      s.once('connect', () => { clearTimeout(t); s.close(); reject(new Error('tài khoản bị khoá vẫn kết nối được')); });
+      s.once('connect_error', (e) => { clearTimeout(t); s.close(); resolve(e.message); });
+    });
+  },
+  waitDisconnect(s) {
+    return new Promise((resolve, reject) => {
+      let notice = null;
+      const t = setTimeout(() => reject(new Error('socket không bị ngắt trong 10 giây')), 10_000);
+      s.once('account:disconnected', (n) => { notice = n; });
+      s.once('disconnect', (reason) => { clearTimeout(t); resolve({ notice, reason }); });
+    });
+  },
+};
 
 const STAMP = Date.now();
 const PREFIX = `test_be2_${STAMP}`;
@@ -410,12 +446,52 @@ async function main() {
   await api('Báo cáo tuần', 'GET', '/api/admin/report/weekly', { token: T.admin, note: (j) => `${j.data.sales.orders} đơn, GMV ${j.data.sales.gmv}` });
   await api('Danh sách tài khoản (lọc theo từ khoá)', 'GET', `/api/admin/accounts?q=${PREFIX}`, { token: T.admin, note: (j) => `${j.data.accounts.length} tài khoản test` });
   const b2id = (await q1('SELECT id FROM accounts WHERE email = $1', [email('b2')])).id;
+  const s1 = await sock.connect(T.b2);
+  record('Bidder 2 kết nối Socket.io', `connected=${s1.connected}`);
+  const b2Gone = sock.waitDisconnect(s1);
   await api('Khoá Bidder 2', 'PATCH', `/api/admin/accounts/${b2id}`, { token: T.admin, body: { status: 'suspended' }, note: (j) => `status=${j.data.status}` });
+  const g1 = await b2Gone;
+  assert.strictEqual(g1.notice && g1.notice.code, 'ACCOUNT_SUSPENDED');
+  assert.strictEqual(g1.notice.message, 'Tài khoản đã bị khoá');
+  record('Socket của Bidder 2 bị ngắt ngay khi khoá', `account:disconnected ${JSON.stringify(g1.notice)}, disconnect "${g1.reason}"`);
+  assert.strictEqual(await sock.connectError(T.b2), 'ACCOUNT_SUSPENDED');
+  record('Bidder 2 bị khoá không kết nối lại được', 'connect_error ACCOUNT_SUSPENDED');
   await api('Token cũ của tài khoản bị khoá', 'GET', '/api/me', { token: T.b2, expect: 403 });
   await api('Mở khoá Bidder 2', 'PATCH', `/api/admin/accounts/${b2id}`, { token: T.admin, body: { status: 'active' } });
   await api('Token dùng lại được', 'GET', '/api/me', { token: T.b2 });
+  const s2 = await sock.connect(T.b2);
+  record('Mở khoá thì Bidder 2 kết nối lại được', `connected=${s2.connected}`);
+  s2.close();
+
+  const sw = await sock.connect(T.wh);
+  record('Tài khoản Kho kết nối Socket.io', `connected=${sw.connected}`);
+  const whGone = sock.waitDisconnect(sw);
   await api('Khoá tài khoản Kho', 'PATCH', `/api/admin/ops-accounts/${wh.id}`, { token: T.admin, body: { status: 'suspended' }, note: (j) => `status=${j.data.status}` });
+  const g2 = await whGone;
+  assert.strictEqual(g2.notice && g2.notice.code, 'ACCOUNT_SUSPENDED');
+  record('Socket của tài khoản Kho bị ngắt ngay khi khoá', `account:disconnected ${JSON.stringify(g2.notice)}`);
+  assert.strictEqual(await sock.connectError(T.wh), 'ACCOUNT_SUSPENDED');
+  record('Tài khoản Kho bị khoá không kết nối lại được', 'connect_error ACCOUNT_SUSPENDED');
   await api('Kho bị khoá gọi API', 'GET', '/api/warehouse/orders', { token: T.wh, expect: 403 });
+  await api('Mở khoá tài khoản Kho', 'PATCH', `/api/admin/ops-accounts/${wh.id}`, { token: T.admin, body: { status: 'active' } });
+  const sw2 = await sock.connect(T.wh);
+  record('Mở khoá thì tài khoản Kho kết nối lại được', `connected=${sw2.connected}`);
+  sw2.close();
+
+  // disconnectAccount lỗi: việc khoá đã lưu nên API vẫn phải trả 200.
+  const realDisconnect = registerSockets.disconnectAccount;
+  registerSockets.disconnectAccount = async () => { throw new Error('mô phỏng lỗi ngắt socket'); };
+  const origErr = console.error;
+  console.error = () => {};
+  try {
+    await api('Khoá Bidder 2 khi ngắt socket bị lỗi vẫn thành công', 'PATCH', `/api/admin/accounts/${b2id}`,
+      { token: T.admin, body: { status: 'suspended' }, note: (j) => `status=${j.data.status}` });
+  } finally {
+    registerSockets.disconnectAccount = realDisconnect;
+    console.error = origErr;
+  }
+  await api('Mở khoá lại Bidder 2', 'PATCH', `/api/admin/accounts/${b2id}`, { token: T.admin, body: { status: 'active' } });
+  await api('Khoá lại tài khoản Kho', 'PATCH', `/api/admin/ops-accounts/${wh.id}`, { token: T.admin, body: { status: 'suspended' } });
   const adminId = (await q1('SELECT id FROM ops_accounts WHERE email = $1', [email('admin')])).id;
   await api('Admin tự khoá chính mình', 'PATCH', `/api/admin/ops-accounts/${adminId}`, { token: T.admin, body: { status: 'suspended' }, expect: 409 });
   const chat = await api('Chatbot trả lời về đặt cọc', 'POST', '/api/chat/messages',
@@ -497,6 +573,8 @@ main()
   })
   .finally(async () => {
     await cleanup().catch((e) => console.error('cleanup lỗi:', e.message));
+    openSockets.forEach((s) => s.close());
+    io.close();
     server.close();
     await pool.end();
   });
