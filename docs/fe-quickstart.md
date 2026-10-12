@@ -287,4 +287,4 @@ curl -s $BASE/api/orders/$ORDER_ID/tracking -H "Authorization: Bearer $BUYER" | 
 
 Bước 4 phải chờ phiên hết giờ thật (ít nhất 1 giờ, vì `durationHours` tối thiểu là 1). Muốn thử nhanh luồng sau khi thắng, dùng tài khoản demo `minhanh@gmail.com` đã có sẵn đơn hàng ở nhiều giai đoạn (`GET /api/orders/mine`).
 
-Tài khoản tạo ra ở trên có email `test_be2_curl_*`, nằm lại trong database dùng chung cho tới lần chạy `npm run test:be2` kế tiếp (lệnh này tự xoá mọi tài khoản `test_be2_*` và dữ liệu đi kèm).
+Tài khoản tạo ra ở trên có email `test_be2_curl_*`, nằm lại trong database dùng chung. Sau 1 giờ, dọn bằng `npm run test:clean` (xoá tài khoản `test_be2_*` cũ hơn 1 giờ và dữ liệu đi kèm; `npm run test:clean -- --dry-run` để xem trước). `npm run test:be2` không xoá các tài khoản này, vì mỗi lần chạy chỉ dọn dữ liệu của chính nó.

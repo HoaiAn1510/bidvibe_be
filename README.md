@@ -24,6 +24,7 @@ npm run dev
 | `NODE_ENV` | `production` thì lỗi 5xx chỉ trả "Lỗi hệ thống". |
 | `DATABASE_URL` | Chuỗi kết nối Postgres. Với Supabase dùng chuỗi **Session pooler** (host `*.pooler.supabase.com`, cổng 5432, username dạng `postgres.<mã project>`). **Không** dùng Direct connection: nó chỉ có IPv6 nên nhiều mạng không kết nối được. |
 | `DB_SSL` | `true` khi dùng Supabase. |
+| `DB_POOL_MAX` | Tuỳ chọn, số kết nối tối đa của pool (mặc định 10). Session pooler của Supabase chỉ cho 15 kết nối cho cả database; `test:be2` tự dùng 4. |
 | `JWT_SECRET` | Khoá ký token đăng nhập. Bắt buộc, không có giá trị mặc định. |
 | `AUTO_PAYOUT_ENABLED` | `false` để tắt job tự giải ngân sau 72 giờ (mặc định bật). |
 
@@ -38,8 +39,9 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 | `npm run db:migrate` | Chạy các file trong `migrations/` chưa được áp dụng |
 | `npm run db:seed` | Thêm dữ liệu demo (BE1 + BE2), chạy lại nhiều lần không bị trùng. Mật khẩu demo `123456` |
 | `npm run test:be1` | Kiểm thử end-to-end phần đấu giá/ví/tạm dừng/gian lận trên DB dùng chung (tài khoản `test_be1_*`, tự dọn) |
-| `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_*`, tự dọn) |
+| `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_<mã lần chạy>_*`, tự dọn) |
 | `npm test` | Chạy cả `test:be1` và `test:be2` |
+| `npm run test:clean [-- --dry-run]` | Dọn dữ liệu `test_be2_` bỏ sót từ lần chạy bị ngắt (chỉ lần chạy bắt đầu hơn 1 giờ trước; in danh sách trước khi xoá). Chỉ chạy khi cần |
 | `npm run docs:check` | So route đăng ký trong `src/routes/` với `docs/api.md` (báo route thiếu / thừa). Chạy sau khi thêm hoặc sửa route |
 | `npm run db:seed:live [-- --extend]` | Bảo đảm 9 phiên demo đang diễn ra trước buổi demo (xem bên dưới) |
 | `npm run demo:bidbot -- --auction <id>` | 3 tài khoản bot trả giá một phiên để demo giá nhảy real-time (xem bên dưới) |
@@ -48,10 +50,10 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 
 Cả hai bộ test chạy trên Supabase dùng chung nên được viết để **không đụng dữ liệu thật**:
 
-- Mọi dữ liệu test có tiền tố riêng: `test_be1_*` (BE1: email `test_be1_<mã lần chạy>_<tên>_<số>@be1test.local`, tin đăng `test_be1_<mã lần chạy>_item`) và `test_be2_*` (BE2).
-- Test chỉ ghi/xoá các dòng đi ra từ những tài khoản có tiền tố đó; dữ liệu seed và dữ liệu của đồng đội không bị sửa hay xoá. Test BE1: cuối mỗi lần chạy (kể cả khi lỗi) chỉ dọn dữ liệu của **chính lần chạy đó** (theo mã lần chạy), đầu lần chạy chỉ dọn dữ liệu `test_be1_` bỏ dở từ hơn 30 phút trước — nên hai người chạy `test:be1` cùng lúc không xoá dữ liệu của nhau.
-- Chạy được lúc đồng đội đang chạy server: scheduler của họ có thể đóng phiên test của bạn, test BE1 đã chờ DB về đúng trạng thái. Nếu vẫn lỗi lặt vặt thì chạy lại.
-- Nếu test bị ngắt giữa chừng (Ctrl+C), phần dở được dọn ở lần chạy đầu tiên sau 30 phút. Kiểm tra còn sót không: `SELECT count(*) FROM accounts WHERE email LIKE 'test\_be1\_%'`.
+- Mọi dữ liệu test có tiền tố riêng: `test_be1_*` (BE1: email `test_be1_<mã lần chạy>_<tên>_<số>@be1test.local`, tin đăng `test_be1_<mã lần chạy>_item`) và `test_be2_*` (BE2: email `test_be2_<mã lần chạy>_<tên>@example.com`; họ tên, tên gian hàng, tiêu đề tin cũng bắt đầu bằng `test_be2_<mã lần chạy>_`).
+- Test chỉ ghi/xoá các dòng đi ra từ những tài khoản có tiền tố đó; dữ liệu seed và dữ liệu của đồng đội không bị sửa hay xoá. Test BE1: cuối mỗi lần chạy (kể cả khi lỗi) chỉ dọn dữ liệu của **chính lần chạy đó** (theo mã lần chạy), đầu lần chạy chỉ dọn dữ liệu `test_be1_` bỏ dở từ hơn 30 phút trước — nên hai người chạy `test:be1` cùng lúc không xoá dữ liệu của nhau. Test BE2: cuối mỗi lần chạy (kể cả khi lỗi) cũng chỉ dọn dữ liệu của chính lần chạy đó; đầu lần chạy không dọn gì. Mọi thứ test BE2 cần ghi (tài khoản, tin, phiên, đơn, tranh chấp, cờ) đều tạo mới; job tự giải ngân trong test chỉ xét đơn của lần chạy đó. Hai `test:be2`, hoặc `test:be2` cùng `test:be1`, chạy song song được.
+- Chạy được lúc đồng đội đang chạy server: scheduler của họ có thể đóng phiên test của bạn, test BE1 và BE2 đã chờ DB về đúng trạng thái. Nếu vẫn lỗi lặt vặt thì chạy lại.
+- Nếu test bị ngắt giữa chừng (Ctrl+C), phần dở của test BE1 được dọn ở lần chạy `test:be1` đầu tiên sau 30 phút. Kiểm tra còn sót không: `SELECT count(*) FROM accounts WHERE email LIKE 'test\_be1\_%'`. Phần dở của test BE2 không tự dọn: chạy `npm run test:clean` (xem trước bằng `npm run test:clean -- --dry-run`).
 - Cần database đã chạy `npm run db:migrate` (test BE1 cần migration `006`, `007`).
 
 #### Làm mới dữ liệu demo trước buổi demo (`db:seed:live`)
@@ -95,7 +97,7 @@ npm run demo:bidbot -- --auction 871 --only-outbid --stop-before 120   # chỉ v
 
 ```
 migrations/        # file SQL tạo/đổi cấu trúc database (001 ... 008)
-scripts/           # migrate, seed (seed_demo.js BE1, seed.js BE2), test_be1, test_be2, docs_check
+scripts/           # migrate, seed (seed_demo.js BE1, seed.js BE2), test_be1, test_be2 (+ test_be2_clean), docs_check
 docs/              # tài liệu (xem mục Tài liệu), docs/archive/ là bản lưu trữ
 src/
 ├── config/        # kết nối DB (db.js), biến môi trường (env.js)
