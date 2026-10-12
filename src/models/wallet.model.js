@@ -1,8 +1,19 @@
 const { pool } = require('../config/db');
 
+// Nhãn tiếng Việt cho từng loại giao dịch, để app hiển thị thẳng.
+const KIND_LABELS = {
+  topup: 'Nạp tiền vào ví',
+  deposit_hold: 'Giữ cọc tham gia phiên',
+  deposit_release: 'Hoàn cọc',
+  deposit_forfeit: 'Mất cọc (quá hạn thanh toán)',
+  payment: 'Thanh toán đơn thắng',
+  refund: 'Hoàn tiền',
+};
+
 const toTx = (r) => ({
   id: r.id,
   kind: r.kind,
+  kindLabel: KIND_LABELS[r.kind] || r.kind,
   amount: Number(r.amount),
   relatedAuctionId: r.related_auction_id,
   balanceAfter: Number(r.balance_after),
@@ -59,4 +70,9 @@ async function listTransactions(bidderId, { limit = 50, offset = 0 } = {}) {
   return rows.map((r) => ({ ...toTx(r), auctionTitle: r.auction_title }));
 }
 
-module.exports = { getBalances, adjust, insertTx, listTransactions };
+async function countTransactions(bidderId) {
+  const { rows } = await pool.query('SELECT count(*)::int AS n FROM wallet_transactions WHERE bidder_id = $1', [bidderId]);
+  return rows[0].n;
+}
+
+module.exports = { getBalances, adjust, insertTx, listTransactions, countTransactions };

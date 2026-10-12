@@ -13,10 +13,46 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const bcrypt = require('bcrypt');
-const { server } = require('../src/app');
+const { server, io } = require('../src/app');
 const { pool } = require('../src/config/db');
 const engine = require('../src/services/auction_engine');
 const payout = require('../src/services/payout_service');
+const registerSockets = require('../src/sockets');
+const { io: ioClient } = require('socket.io-client');
+
+// Kết nối Socket.io thật tới server test (không tự kết nối lại để quan sát việc bị ngắt).
+const openSockets = [];
+const sock = {
+  open(token) {
+    const s = ioClient(base, { auth: { token }, transports: ['websocket'], reconnection: false, forceNew: true });
+    openSockets.push(s);
+    return s;
+  },
+  connect(token) {
+    return new Promise((resolve, reject) => {
+      const s = sock.open(token);
+      const t = setTimeout(() => reject(new Error('socket không kết nối được trong 10 giây')), 10_000);
+      s.once('connect', () => { clearTimeout(t); resolve(s); });
+      s.once('connect_error', (e) => { clearTimeout(t); reject(new Error(`connect_error ${e.message}`)); });
+    });
+  },
+  connectError(token) {
+    return new Promise((resolve, reject) => {
+      const s = sock.open(token);
+      const t = setTimeout(() => reject(new Error('mong bị từ chối nhưng không có phản hồi')), 10_000);
+      s.once('connect', () => { clearTimeout(t); s.close(); reject(new Error('tài khoản bị khoá vẫn kết nối được')); });
+      s.once('connect_error', (e) => { clearTimeout(t); s.close(); resolve(e.message); });
+    });
+  },
+  waitDisconnect(s) {
+    return new Promise((resolve, reject) => {
+      let notice = null;
+      const t = setTimeout(() => reject(new Error('socket không bị ngắt trong 10 giây')), 10_000);
+      s.once('account:disconnected', (n) => { notice = n; });
+      s.once('disconnect', (reason) => { clearTimeout(t); resolve({ notice, reason }); });
+    });
+  },
+};
 
 const STAMP = Date.now();
 const PREFIX = `test_be2_${STAMP}`;
@@ -410,12 +446,52 @@ async function main() {
   await api('Báo cáo tuần', 'GET', '/api/admin/report/weekly', { token: T.admin, note: (j) => `${j.data.sales.orders} đơn, GMV ${j.data.sales.gmv}` });
   await api('Danh sách tài khoản (lọc theo từ khoá)', 'GET', `/api/admin/accounts?q=${PREFIX}`, { token: T.admin, note: (j) => `${j.data.accounts.length} tài khoản test` });
   const b2id = (await q1('SELECT id FROM accounts WHERE email = $1', [email('b2')])).id;
+  const s1 = await sock.connect(T.b2);
+  record('Bidder 2 kết nối Socket.io', `connected=${s1.connected}`);
+  const b2Gone = sock.waitDisconnect(s1);
   await api('Khoá Bidder 2', 'PATCH', `/api/admin/accounts/${b2id}`, { token: T.admin, body: { status: 'suspended' }, note: (j) => `status=${j.data.status}` });
+  const g1 = await b2Gone;
+  assert.strictEqual(g1.notice && g1.notice.code, 'ACCOUNT_SUSPENDED');
+  assert.strictEqual(g1.notice.message, 'Tài khoản đã bị khoá');
+  record('Socket của Bidder 2 bị ngắt ngay khi khoá', `account:disconnected ${JSON.stringify(g1.notice)}, disconnect "${g1.reason}"`);
+  assert.strictEqual(await sock.connectError(T.b2), 'ACCOUNT_SUSPENDED');
+  record('Bidder 2 bị khoá không kết nối lại được', 'connect_error ACCOUNT_SUSPENDED');
   await api('Token cũ của tài khoản bị khoá', 'GET', '/api/me', { token: T.b2, expect: 403 });
   await api('Mở khoá Bidder 2', 'PATCH', `/api/admin/accounts/${b2id}`, { token: T.admin, body: { status: 'active' } });
   await api('Token dùng lại được', 'GET', '/api/me', { token: T.b2 });
+  const s2 = await sock.connect(T.b2);
+  record('Mở khoá thì Bidder 2 kết nối lại được', `connected=${s2.connected}`);
+  s2.close();
+
+  const sw = await sock.connect(T.wh);
+  record('Tài khoản Kho kết nối Socket.io', `connected=${sw.connected}`);
+  const whGone = sock.waitDisconnect(sw);
   await api('Khoá tài khoản Kho', 'PATCH', `/api/admin/ops-accounts/${wh.id}`, { token: T.admin, body: { status: 'suspended' }, note: (j) => `status=${j.data.status}` });
+  const g2 = await whGone;
+  assert.strictEqual(g2.notice && g2.notice.code, 'ACCOUNT_SUSPENDED');
+  record('Socket của tài khoản Kho bị ngắt ngay khi khoá', `account:disconnected ${JSON.stringify(g2.notice)}`);
+  assert.strictEqual(await sock.connectError(T.wh), 'ACCOUNT_SUSPENDED');
+  record('Tài khoản Kho bị khoá không kết nối lại được', 'connect_error ACCOUNT_SUSPENDED');
   await api('Kho bị khoá gọi API', 'GET', '/api/warehouse/orders', { token: T.wh, expect: 403 });
+  await api('Mở khoá tài khoản Kho', 'PATCH', `/api/admin/ops-accounts/${wh.id}`, { token: T.admin, body: { status: 'active' } });
+  const sw2 = await sock.connect(T.wh);
+  record('Mở khoá thì tài khoản Kho kết nối lại được', `connected=${sw2.connected}`);
+  sw2.close();
+
+  // disconnectAccount lỗi: việc khoá đã lưu nên API vẫn phải trả 200.
+  const realDisconnect = registerSockets.disconnectAccount;
+  registerSockets.disconnectAccount = async () => { throw new Error('mô phỏng lỗi ngắt socket'); };
+  const origErr = console.error;
+  console.error = () => {};
+  try {
+    await api('Khoá Bidder 2 khi ngắt socket bị lỗi vẫn thành công', 'PATCH', `/api/admin/accounts/${b2id}`,
+      { token: T.admin, body: { status: 'suspended' }, note: (j) => `status=${j.data.status}` });
+  } finally {
+    registerSockets.disconnectAccount = realDisconnect;
+    console.error = origErr;
+  }
+  await api('Mở khoá lại Bidder 2', 'PATCH', `/api/admin/accounts/${b2id}`, { token: T.admin, body: { status: 'active' } });
+  await api('Khoá lại tài khoản Kho', 'PATCH', `/api/admin/ops-accounts/${wh.id}`, { token: T.admin, body: { status: 'suspended' } });
   const adminId = (await q1('SELECT id FROM ops_accounts WHERE email = $1', [email('admin')])).id;
   await api('Admin tự khoá chính mình', 'PATCH', `/api/admin/ops-accounts/${adminId}`, { token: T.admin, body: { status: 'suspended' }, expect: 409 });
   const chat = await api('Chatbot trả lời về đặt cọc', 'POST', '/api/chat/messages',
@@ -427,7 +503,57 @@ async function main() {
   await api('Người khác đọc lịch sử trò chuyện', 'GET', `/api/chat/sessions/${chat.sessionId}/messages`, { token: T.b2, expect: 404 });
 
   // ------------------------------------------------------------------
-  begin('11. Kiểm tra tính nhất quán của ví');
+  begin('11. Dữ liệu điều hướng (data) của thông báo');
+  const sellerNotes = await api('Thông báo người bán có data', 'GET', '/api/notifications?limit=100',
+    { token: T.seller, note: (j) => { const n = j.data.notifications.find((x) => x.type === 'listing_approved'); return `listing_approved data=${JSON.stringify(n.data)}`; } });
+  const approved = sellerNotes.notifications.find((x) => x.type === 'listing_approved' && x.data && x.data.listingId === String(L1.id));
+  assert.ok(approved, 'listing_approved phải có data.listingId');
+  assert.strictEqual(approved.data.auctionId, String(A1));
+  const needInfo = sellerNotes.notifications.find((x) => x.type === 'listing_needs_info');
+  assert.deepStrictEqual(needInfo.data, { listingId: String(L1.id) });
+  const bn = await api('Thông báo người mua về đơn có data', 'GET', '/api/notifications?limit=100',
+    { token: T.b1, note: (j) => { const n = j.data.notifications.find((x) => x.type === 'order'); return `order data=${JSON.stringify(n.data)}`; } });
+  const shipped = bn.notifications.find((x) => x.type === 'order' && x.data && x.data.orderId === String(O1));
+  assert.ok(shipped && shipped.data.auctionId === String(A1), 'thông báo order phải có orderId + auctionId');
+  const b2n = await api('Thông báo tranh chấp có disputeId', 'GET', '/api/notifications?limit=100',
+    { token: T.b2, note: (j) => { const n = j.data.notifications.find((x) => x.type === 'refund' && x.data); return `refund data=${JSON.stringify(n.data)}`; } });
+  const refundNote = b2n.notifications.find((x) => x.type === 'refund' && x.data && x.data.disputeId === String(dB.id));
+  assert.ok(refundNote && refundNote.data.orderId === String(B.orderId), 'refund tranh chấp phải có orderId + disputeId');
+
+  // Gọi theo chữ ký cũ (như BE1 đang gọi) và thông báo cũ trước migration 008: data null, không lỗi.
+  const { createNotification, emitNotification, notify } = require('../src/services/notification_service');
+  const b1id = (await q1('SELECT id FROM accounts WHERE email = $1', [email('b1')])).id;
+  const legacy = await createNotification(pool, { accountId: b1id, type: 'outbid', title: 'Kiểu gọi BE1, không có data' });
+  assert.strictEqual(legacy.data, null);
+  await pool.query(`INSERT INTO notifications (account_id, type, title) VALUES ($1, 'warn', 'Thông báo cũ trước migration 008')`, [b1id]);
+  const plainNotes = await api('Thông báo không có data trả data null', 'GET', '/api/notifications?limit=3',
+    { token: T.b1, note: (j) => j.data.notifications.map((x) => `${x.type}:${JSON.stringify(x.data)}`).join(', ') });
+  assert.ok(plainNotes.notifications.slice(0, 2).every((x) => x.data === null));
+  const cleaned = await createNotification(pool, { accountId: b1id, type: 'info', title: 'data rỗng', data: { orderId: null, auctionId: '' } });
+  assert.strictEqual(cleaned.data, null);
+  record('createNotification bỏ khoá rỗng; không còn khoá nào thì lưu NULL', 'data { orderId: null, auctionId: "" } -> null');
+
+  // Socket.io: notification:new gửi kèm data (có hoặc null).
+  const s3 = await sock.connect(T.b1);
+  const nextNote = () => new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('không nhận được notification:new')), 10_000);
+    s3.once('notification:new', (n) => { clearTimeout(t); resolve(n); });
+  });
+  let wait = nextNote();
+  await notify(pool, b1id, 'order', 'Thử socket có data', { orderId: O1, auctionId: A1 });
+  const ev1 = await wait;
+  assert.deepStrictEqual(ev1.data, { orderId: String(O1), auctionId: String(A1) });
+  record('Socket notification:new có data', JSON.stringify(ev1));
+  wait = nextNote();
+  emitNotification(await createNotification(pool, { accountId: b1id, type: 'outbid', title: 'Thử socket kiểu BE1' }));
+  const ev2 = await wait;
+  assert.strictEqual(ev2.data, null);
+  assert.ok(['id', 'type', 'title', 'createdAt', 'data'].every((k) => k in ev2));
+  record('Socket notification:new kiểu gọi BE1: data null, các trường cũ giữ nguyên', JSON.stringify(ev2));
+  s3.close();
+
+  // ------------------------------------------------------------------
+  begin('12. Kiểm tra tính nhất quán của ví');
   const bad = await pool.query(
     `SELECT b.account_id FROM bidders b JOIN accounts a ON a.id = b.account_id
      JOIN LATERAL (SELECT balance_after FROM wallet_transactions w WHERE w.bidder_id = b.account_id ORDER BY id DESC LIMIT 1) t ON true
@@ -436,11 +562,36 @@ async function main() {
   );
   assert.strictEqual(bad.rowCount, 0);
   record('Số dư ví khớp balance_after của giao dịch cuối', 'cả hai Bidder test');
+
+  // ------------------------------------------------------------------
+  begin('13. Kết nối database bị rớt không làm sập tiến trình');
+  assert.ok(pool.listenerCount('error') > 0, 'pool phải có listener cho sự kiện error');
+  let exited = false;
+  const onExit = () => { exited = true; };
+  process.once('exit', onExit);
+  const origError = console.error;
+  const logged = [];
+  console.error = (...args) => logged.push(args.join(' '));
+  try {
+    const fake = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+    pool.emit('error', fake, {}); // không có listener thì EventEmitter ném lỗi ra ngoài
+  } finally {
+    console.error = origError;
+  }
+  assert.ok(logged.some((l) => l.includes('ECONNRESET')), 'lỗi phải được ghi log');
+  assert.ok(!logged.some((l) => /postgres(ql)?:\/\//.test(l)), 'log không được chứa chuỗi kết nối');
+  const alive = await q1('SELECT 1 AS ok');
+  process.removeListener('exit', onExit);
+  assert.ok(!exited && alive.ok === 1);
+  record('Mô phỏng pool.emit(\'error\', ECONNRESET)', `ghi log: "${logged[0]}"; tiến trình còn sống, truy vấn sau đó vẫn chạy`);
+  await api('API vẫn trả lời sau lỗi kết nối', 'GET', '/api/me', { token: T.b1, note: (j) => `role=${j.data.role}` });
 }
 
 function writeReport(ok, error) {
   const out = [
     '# Kết quả kiểm thử BE2',
+    '',
+    `> Cập nhật: ${new Date().toISOString().slice(0, 10)}. File này được sinh tự động, không sửa tay.`,
     '',
     `Chạy lúc ${new Date().toISOString()} bằng \`node scripts/test_be2.js --report docs/test-be2.md\`.`,
     'Gọi API thật qua HTTP (server chạy trong tiến trình, cổng ngẫu nhiên) trên database thật dùng chung.',
@@ -474,6 +625,8 @@ main()
   })
   .finally(async () => {
     await cleanup().catch((e) => console.error('cleanup lỗi:', e.message));
+    openSockets.forEach((s) => s.close());
+    io.close();
     server.close();
     await pool.end();
   });

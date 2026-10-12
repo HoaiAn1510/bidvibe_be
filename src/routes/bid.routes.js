@@ -7,20 +7,18 @@ const { ok, idParam, intField } = require('./_http');
 const router = express.Router();
 router.use(requireAuth, requireRole('bidder'));
 
-// POST /api/bids  { auctionId, amount }   (hoặc { auctionId, increment } = giá hiện tại + increment)
+// POST /api/bids  { auctionId, amount }   (hoặc { auctionId, increment } = giá hiện tại + increment,
+// giá hiện tại được đọc trong giao dịch sau khi khoá phiên)
 router.post('/', async (req, res) => {
   const { auctionId, amount, increment } = req.body || {};
   const id = idParam(auctionId, 'auctionId');
-  let value;
-  if (amount != null) {
-    value = intField(amount, 'amount');
-  } else if (increment != null) {
-    const auction = await engine.getAuction(id, req.user.id);
-    value = auction.currentPrice + intField(increment, 'increment');
-  } else {
-    throw new AppError('Thiếu amount hoặc increment', 400, 'VALIDATION_ERROR');
+  if ((amount == null) === (increment == null)) {
+    throw new AppError('Chỉ truyền một trong hai: amount hoặc increment', 400, 'VALIDATION_ERROR');
   }
-  ok(res, await engine.placeBid({ bidderId: req.user.id, auctionId: id, amount: value }), 201);
+  const bid = amount != null
+    ? { amount: intField(amount, 'amount') }
+    : { increment: intField(increment, 'increment') };
+  ok(res, await engine.placeBid({ bidderId: req.user.id, auctionId: id, ...bid }), 201);
 });
 
 module.exports = router;

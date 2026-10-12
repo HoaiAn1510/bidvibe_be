@@ -170,7 +170,9 @@ async function withNotes(fn) {
   return loadView(pool, orderId, opts);
 }
 
-const notify = (client, accountId, type, title) => createNotification(client, { accountId, type, title });
+const notify = (client, accountId, type, title, data) => createNotification(client, { accountId, type, title, data });
+// data của thông báo về một đơn (migration 008): app mở đúng đơn khi bấm vào.
+const orderData = (o) => ({ orderId: o.id, auctionId: o.auction_id });
 
 // ---------- Seller ----------
 
@@ -201,7 +203,7 @@ async function shipToWarehouse(sellerId, orderId) {
       [orderId, orderCode(orderId)],
     );
     const notes = [await notify(client, o.bidder_id, 'order',
-      `Người bán đã gửi "${o.title}" đến kho BidVibe để kiểm tra.`)];
+      `Người bán đã gửi "${o.title}" đến kho BidVibe để kiểm tra.`, orderData(o))];
     return { notes, orderId };
   });
 }
@@ -249,7 +251,7 @@ async function receive(orderId) {
     if (!r) throw conflict('Người bán chưa báo gửi hàng về kho');
     if (r.received_at) throw conflict('Kho đã nhận hàng của đơn này');
     await client.query('UPDATE warehouse_receipts SET received_at = now() WHERE id = $1', [r.id]);
-    const notes = [await notify(client, o.bidder_id, 'order', `Kho đã nhận "${o.title}" và đang kiểm tra.`)];
+    const notes = [await notify(client, o.bidder_id, 'order', `Kho đã nhận "${o.title}" và đang kiểm tra.`, orderData(o))];
     return { notes, orderId, opts: WH };
   });
 }
@@ -281,8 +283,8 @@ async function inspect(inspectorId, orderId, input = {}) {
         'Kho tạm giữ hàng, khoản ký quỹ được giữ lại cho tới khi Admin phán quyết.',
       ]);
       await client.query(`UPDATE orders SET payout_status = 'disputed' WHERE id = $1`, [orderId]);
-      out.push(await notify(client, o.bidder_id, 'dispute', `Kho phát hiện "${o.title}" không khớp mô tả. Admin sẽ xử lý.`));
-      out.push(await notify(client, o.seller_id, 'dispute', `Kho phát hiện "${o.title}" không khớp mô tả, đơn đang chờ Admin xử lý.`));
+      out.push(await notify(client, o.bidder_id, 'dispute', `Kho phát hiện "${o.title}" không khớp mô tả. Admin sẽ xử lý.`, { ...orderData(o), disputeId: d.rows[0].id }));
+      out.push(await notify(client, o.seller_id, 'dispute', `Kho phát hiện "${o.title}" không khớp mô tả, đơn đang chờ Admin xử lý.`, { ...orderData(o), disputeId: d.rows[0].id }));
     }
     return { notes: out, orderId, opts: WH };
   });
@@ -322,7 +324,7 @@ async function ship(orderId, input = {}) {
     );
     await addEvent(client, s.id, 'shipped', `Bàn giao ${carrier} · mã vận đơn ${trackingCode}`);
     const notes = [await notify(client, o.bidder_id, 'order',
-      `"${o.title}" đang được giao qua ${carrier}, mã vận đơn ${trackingCode}.`)];
+      `"${o.title}" đang được giao qua ${carrier}, mã vận đơn ${trackingCode}.`, orderData(o))];
     return { notes, orderId, opts: WH };
   });
 }
@@ -339,7 +341,7 @@ async function deliver(orderId) {
       [orderId, String(PAYOUT_WINDOW_HOURS)],
     );
     const notes = [await notify(client, o.bidder_id, 'order',
-      `"${o.title}" đã giao thành công. Hãy kiểm tra và xác nhận trong ${PAYOUT_WINDOW_HOURS} giờ.`)];
+      `"${o.title}" đã giao thành công. Hãy kiểm tra và xác nhận trong ${PAYOUT_WINDOW_HOURS} giờ.`, orderData(o))];
     return { notes, orderId, opts: WH };
   });
 }
@@ -396,6 +398,6 @@ async function tracking(user, orderId) {
 }
 
 module.exports = {
-  STAGES, STAGE_SQL, lockOrder, paidAmount, listSelling, shipToWarehouse, listForWarehouse,
+  lockOrder, paidAmount, listSelling, shipToWarehouse, listForWarehouse,
   receive, inspect, pack, ship, deliver, confirmDelivery, setShippingAddress, tracking,
 };

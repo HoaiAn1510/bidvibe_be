@@ -1,12 +1,14 @@
 # Luồng chính của BidVibe
 
-Tài liệu này mô tả luồng nghiệp vụ từ lúc đăng ký đến lúc giải ngân, **dựa trên code backend và schema đang có** (migration 001–005). Mỗi bước có nhãn trạng thái triển khai:
+> Cập nhật: 2026-10-12.
+
+Tài liệu này mô tả luồng nghiệp vụ từ lúc đăng ký đến lúc giải ngân, **dựa trên code backend và schema đang có** (migration 001–008). Mỗi bước có nhãn trạng thái triển khai:
 
 - **[Đã có]** route đã đăng ký trong `src/routes/index.js`, có logic xử lý thật và đã chạy qua kiểm thử end-to-end (`npm test`, kết quả ở [`test-be2.md`](test-be2.md)).
 - **[Một phần]** mới làm được một phần.
 - **[Chưa có]** chưa có code.
 
-Định dạng phản hồi của mọi API: `{ success, data, error }`. Mọi route trừ `/api/health` và `/api/auth/*` cần header `Authorization: Bearer <token>`. Chi tiết từng endpoint: BE2 ở [`api.md`](api.md), BE1 ở [`api_be1.md`](api_be1.md).
+Định dạng phản hồi của mọi API: `{ success, data, error }`. Mọi route trừ `/api/health` và `/api/auth/*` cần header `Authorization: Bearer <token>`. Chi tiết từng endpoint: [`api.md`](api.md).
 
 ## 1. Tổng quan
 
@@ -35,6 +37,7 @@ Một tài khoản `accounts` chỉ là Bidder **hoặc** Seller, không cả ha
 | Kiểm tra đầu vào | Email đúng định dạng, mật khẩu 6–72 ký tự, họ tên không rỗng, vai trò chỉ `bidder` / `seller` |
 | Giao dịch | Có: đăng ký tạo `accounts` + bảng con trong một giao dịch |
 | Kết quả | JWT 7 ngày, payload `{ sub, kind: 'account' \| 'ops', role }`. Mỗi request, `requireAuth` kiểm tra lại `status` trong DB: tài khoản bị khoá trả `403 ACCOUNT_SUSPENDED` dù token còn hạn |
+| Socket.io | Cùng JWT, gửi trong `auth.token` lúc kết nối; server kiểm tra chữ ký **và** `status` trong DB (tài khoản bị khoá → `connect_error` `ACCOUNT_SUSPENDED`). Tự vào phòng `user:{id}` (Bidder / Seller) hoặc `ops:{id}` (tài khoản nội bộ). Chi tiết: [`socket.md`](socket.md) |
 
 ### Bước 2 — Seller đăng tin ký gửi [Đã có]
 
@@ -74,11 +77,11 @@ Một tài khoản `accounts` chỉ là Bidder **hoặc** Seller, không cả ha
 
 **5a. Nạp ví** — `POST /api/wallet/topup` `{ amount }` (1 đến 100.000.000đ, cổng giả lập luôn thành công). Ghi `bidders.wallet_balance` + một dòng `wallet_transactions` loại `topup`. Có giao dịch.
 
-**5b. Xem phiên** — `GET /api/auctions` (lọc `status=live|ended|joined`, `category`, `q`, `sort`) và `GET /api/auctions/:id` (kèm 20 lượt giá gần nhất, tên bị che dạng `A***`).
+**5b. Xem phiên** — `GET /api/auctions` (lọc `status=live|ended|joined`, `category`, `q`, `sort`; phân trang `limit`, `offset`, trả `total`) và `GET /api/auctions/:id` (kèm mọi ảnh `photos`, 20 lượt giá gần nhất, tên bị che dạng `A***`). Mỗi phiên có ảnh bìa `coverUrl`, `seller.name`, giá nhỏ nhất đặt tiếp `minNextBid`, và với người mua: `depositAffordable` (ví đủ cọc chưa). Phiên demo của `seed_demo.js` có 2 ảnh mỗi tin (Wikimedia Commons).
 
 **5c. Đặt cọc** — `POST /api/auctions/:id/join` (chỉ `bidder`). Khoá dòng `auctions`, ghi `auction_deposits` (`status = 'held'`, mỗi người một lần mỗi phiên), chuyển `wallet_balance` → `wallet_held` (giao dịch ví `deposit_hold`). Không đủ tiền → `402 INSUFFICIENT_FUNDS`.
 
-**5d. Trả giá** — `POST /api/bids` `{ auctionId, amount }` hoặc `{ auctionId, increment }`. Khoá dòng `auctions`; phải đã cọc (`DEPOSIT_REQUIRED`), không tự vượt giá mình (`ALREADY_LEADING`), `amount >= current_price + bid_step` (`BID_TOO_LOW`). Ghi `bids`, cập nhật `current_price`, `bid_count`. Đặt trong 30 giây cuối thì `ends_at` = lúc đặt + 30 giây. Thông báo `outbid` cho người bị vượt; sau COMMIT đẩy Socket.io `auction:update` và `notification:new`; `fraud_detection.scanAuction` chạy nền.
+**5d. Trả giá** — `POST /api/bids` `{ auctionId, amount }` hoặc `{ auctionId, increment }` (đúng một trong hai). Khoá dòng `auctions`; với `increment`, giá hiện tại được đọc **sau khi khoá** nên hai người gửi cùng lúc nhận hai mức giá liên tiếp, không trùng; phải đã cọc (`DEPOSIT_REQUIRED`), không tự vượt giá mình (`ALREADY_LEADING`), `amount >= current_price + bid_step` (`BID_TOO_LOW`). Ghi `bids`, cập nhật `current_price`, `bid_count`. Đặt trong 30 giây cuối thì `ends_at` = lúc đặt + 30 giây. Thông báo `outbid` cho người bị vượt; sau COMMIT đẩy Socket.io `auction:update` và `notification:new` (tên sự kiện và dữ liệu: [`socket.md`](socket.md)); `fraud_detection.scanAuction` chạy nền.
 
 ### Bước 6 — Phiên kết thúc, chọn người thắng [Đã có]
 
@@ -88,13 +91,13 @@ Một tài khoản `accounts` chỉ là Bidder **hoặc** Seller, không cả ha
 | Không có lượt giá | `auctions.status` → `ended`, `listings.status` → `ended`, không tạo đơn |
 | Có người thắng | `auctions.status` → `ended`, `winner_id`; `listings.status` → `ended`; tạo `orders` (`payment_status = 'awaiting_payment'`, `payment_deadline = now + 24 giờ`, `payout_status = 'pending'`) |
 | Cọc | Người thắng: `applied_to_payment` (vẫn nằm trong `wallet_held`). Người thua: `released`, hoàn về ví (`deposit_release`) |
-| Thông báo | `win`, `refund`, `sold`; Socket.io `auction:ended` |
+| Thông báo | `win` (kèm mã đơn, hạn thanh toán, nhắc chọn địa chỉ giao hàng), `refund`, `sold`; Socket.io `auction:ended` |
 | Giao dịch | Một giao dịch mỗi phiên, `FOR UPDATE SKIP LOCKED` |
 
 ### Bước 7 — Thanh toán trong 24 giờ, quá hạn mất cọc [Đã có]
 
-- **Xem đơn** — `GET /api/orders/mine`, `GET /api/orders/:id` (BE1). Tổng = giá chốt + phí 5 phần trăm (làm tròn nghìn) + vận chuyển 40.000đ, cọc được trừ.
-- **Thanh toán** — `POST /api/orders/:id/pay` `{ method: 'wallet' | 'qr' | 'card' }`. `payment_status`: `awaiting_payment` → `paid`; cọc rời `wallet_held`, giao dịch ví `payment`. Tiền nằm trong ký quỹ nền tảng (`payout_status = 'pending'`).
+- **Xem đơn** — `GET /api/orders/mine`, `GET /api/orders/:id` (BE1). Tổng = giá chốt + phí 5 phần trăm (làm tròn nghìn) + vận chuyển 40.000đ, cọc được trừ. Đơn kèm ảnh bìa, người bán và địa chỉ giao hàng đã chọn (`shippingAddress`, chưa chọn thì `null`).
+- **Thanh toán** — `POST /api/orders/:id/pay` `{ method: 'wallet' | 'qr' | 'card' }`. `payment_status`: `awaiting_payment` → `paid`; cọc rời `wallet_held`, giao dịch ví `payment`. Tiền nằm trong ký quỹ nền tảng (`payout_status = 'pending'`). Đơn chưa có địa chỉ giao hàng (`orders.shipping_address_id` NULL) thì người mua nhận thêm một thông báo `address_reminder` trong cùng giao dịch (một lần mỗi đơn).
 - **Quá hạn** — scheduler gọi `processPaymentTimeouts()`: `payment_status` → `expired`, `listings.status` → `cancelled`, cọc `forfeited` (giao dịch ví `deposit_forfeit`), thông báo `warn`.
 
 ### Bước 8 — Seller gửi hàng về kho [Đã có]
@@ -167,21 +170,21 @@ Quyết định đã chốt: **Seller chưa có ví**, giải ngân chỉ đổi
 
 | Việc | Hiện trạng |
 |---|---|
-| Phát hiện | `fraud_detection.scanAuction` (BE1) chạy sau mỗi lượt giá, theo 4 luật (hai tài khoản đặt xen kẽ, dồn dập từ 5 lượt trong 60 giây, nhảy giá từ 3 lần, tài khoản mới đặt giá cao). Ghi `flagged_auctions` (`pending`) + `flag_evidence` |
+| Phát hiện | `fraud_detection.scanAuction` (BE1) chạy sau mỗi lượt giá, theo 4 luật (hai tài khoản đặt xen kẽ, dồn dập từ 5 lượt trong 60 giây, nhảy giá từ 3 lần, tài khoản mới đặt giá cao). Ghi `flagged_auctions` (`pending`) + `flag_evidence`. Kiểm tra trùng và ghi cờ nằm chung một giao dịch, tuần tự theo phiên (advisory lock); unique index `uq_flagged_auctions_pending_reason` (migration 006) chặn hai cờ `pending` cùng lý do |
 | Admin xem | `GET /api/admin/flags?status=` |
 | Hành động | `POST /api/admin/flags/:id/action` `{ action, reason }` |
-| `pause` | Cờ → `paused`. Cơ chế BE1 có sẵn: phiên không nhận cọc / lượt giá mới, không bị đóng tự động. Không sửa `ends_at`. Thông báo Seller |
-| `verify` / `safe` | Cờ → `verify` / `safe`; nếu đang `paused` thì phiên chạy lại |
+| `pause` | Cờ → `paused`. Phiên không nhận cọc / lượt giá mới, không bị đóng tự động, **đồng hồ đóng băng**: trigger `flagged_auctions_sync_pause` (migration 006, BE1) ghi `auctions.paused_at`. Thông báo Seller; người đang xem phiên nhận Socket.io `auction:update` (`reason: 'paused'`, migration 007) |
+| `verify` / `safe` | Cờ → `verify` / `safe`; nếu không còn cờ `paused` nào thì phiên chạy lại và trigger cộng thời gian đã dừng vào `ends_at` (phiên còn đúng thời gian như lúc bị dừng) |
 | `terminate` | Bắt buộc lý do. Gọi `cancelAuction(client, …)` (BE1): phiên → `cancelled`, tin → `cancelled`, hoàn cọc mọi người, thông báo; cờ → `terminated` |
-| Người dùng báo cáo phiên | **[Chưa có]** |
+| Người dùng báo cáo phiên | **[Đã có]** `POST /api/auctions/:id/report` `{ reason, note? }` (bidder, BE1). Mỗi người một lần mỗi phiên (`409 ALREADY_REPORTED`). Phiên có cờ `pending` thì thêm `flag_evidence` vào cờ đó, chưa có thì tạo cờ `low`. Admin xử lý như cờ AI |
 
 Cờ đã `terminated` / `safe` không đổi nữa (`409`).
 
 ### Ngoài luồng chính [Đã có]
 
-- **Admin**: `GET /api/admin/dashboard`, `GET /api/admin/report/weekly` (7 ngày, từ dữ liệu thật), quản lý tài khoản ops (`GET/POST/PATCH /api/admin/ops-accounts`, mật khẩu bcrypt) và khoá / mở khoá Bidder, Seller (`GET/PATCH /api/admin/accounts`).
+- **Admin**: `GET /api/admin/dashboard`, `GET /api/admin/report/weekly` (7 ngày, từ dữ liệu thật), quản lý tài khoản ops (`GET/POST/PATCH /api/admin/ops-accounts`, mật khẩu bcrypt) và khoá / mở khoá Bidder, Seller (`GET/PATCH /api/admin/accounts`). Khoá tài khoản (cả hai loại): sau khi `UPDATE` đã lưu, `admin_service` gọi `disconnectAccount(id, { kind, reason: 'Tài khoản đã bị khoá' })` của BE1 — mọi socket đang mở nhận `account:disconnected` rồi bị ngắt và không kết nối lại được cho tới khi mở khoá; REST trả `403 ACCOUNT_SUSPENDED` ngay. Ngắt socket lỗi thì chỉ ghi log, API khoá vẫn trả `200`.
 - **Chatbot**: `POST /api/chat/messages`, `GET /api/chat/sessions/:id/messages`; ghi `chat_sessions`, `chat_messages`; trả lời soạn sẵn theo từ khoá.
-- **Thông báo**: `GET /api/notifications`, `POST /api/notifications/:id/read`.
+- **Thông báo**: `GET /api/notifications`, `POST /api/notifications/:id/read`. Mỗi thông báo có trường `data` (migration `008`, cột `notifications.data` JSONB) chứa id liên quan (`auctionId`, `orderId`, `listingId`, `disputeId`) để app bấm vào là mở đúng phiên / đơn / tin / tranh chấp; Socket.io `notification:new` gửi kèm cùng `data`. Mọi thông báo do BE2 tạo đã có `data`; các loại do BE1 tạo (`outbid`, `win`, `address_reminder`, `refund` hoàn cọc, `sold`, `warn` quá hạn thanh toán) hiện `data = null`, sẽ bổ sung ở lượt sau. Bảng đầy đủ: [`api.md` mục 15](api.md#trường-data--mở-đúng-màn-khi-bấm-thông-báo).
 
 ## 3. Sơ đồ
 
@@ -220,6 +223,9 @@ sequenceDiagram
     API-->>S: payout_status released, notification payout
     J->>API: releaseOverduePayouts (quá 72 giờ tự giải ngân)
     AD->>API: POST /api/admin/disputes/{id}/resolve, /api/admin/flags/{id}/action
+    API-->>B: Socket auction:update reason paused hoặc resumed khi Admin tạm dừng / tiếp tục
+    AD->>API: PATCH /api/admin/accounts/{id} suspended
+    API-->>B: Socket account:disconnected rồi ngắt kết nối
 ```
 
 ### 3b. Trạng thái tin đăng (`listings.status`)
@@ -251,7 +257,7 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-Cờ `paused` trên `flagged_auctions` không đổi `auctions.status`; nó chỉ chặn đặt giá và chặn đóng phiên tự động.
+Cờ `paused` trên `flagged_auctions` không đổi `auctions.status`; nó chặn đặt giá, chặn đóng phiên tự động và đóng băng đồng hồ (`auctions.paused_at`; tiếp tục thì `ends_at` cộng thêm thời gian đã dừng).
 
 ### 3d. Trạng thái đơn hàng (`orders`)
 
@@ -315,12 +321,15 @@ Giới hạn hiện tại:
 |---|---|---|---|
 | Thời lượng phiên | `listings.duration_hours` (1–336 giờ) | `createAuctionForListing` (BE1) | Có |
 | Chống chốt phút chót | Đặt giá khi còn ≤ 30 giây thì `ends_at` = lúc đặt + 30 giây | `SNIPE_WINDOW_MS`, `auction_engine.js` | Có |
-| Quét phiên hết giờ | Mỗi 5 giây | `scheduler.js` → `closeExpiredAuctions` (BE1) | Có |
+| Quét phiên hết giờ | Mỗi 5 giây, bỏ qua phiên đang tạm dừng | `scheduler.js` → `closeExpiredAuctions` (BE1) | Có |
+| Tạm dừng phiên | Đồng hồ đứng yên; tiếp tục thì `ends_at` += thời gian đã dừng | Trigger `sync_auction_pause` (migration 006), `auctions.paused_at` | Có |
 | Hạn thanh toán | Lúc thắng + 24 giờ | `PAYMENT_WINDOW_MS`, `auction_engine.js` | Có |
 | Quét đơn quá hạn thanh toán | Mỗi 5 giây | `scheduler.js` → `processPaymentTimeouts` (BE1) | Có |
 | Hạn tự giải ngân | Lúc giao + 72 giờ (`orders.payout_deadline`) | `PAYOUT_WINDOW_HOURS`, `fulfilment_service.js` | Có |
 | Quét đơn quá hạn giải ngân | Mỗi 5 giây | `scheduler.js` → `payout_service.releaseOverduePayouts` (BE2) | Có, tắt bằng `AUTO_PAYOUT_ENABLED=false` |
 | Hạn token đăng nhập | 7 ngày | `TOKEN_TTL`, `auth_service.js` | Có |
+| Đẩy tạm dừng / tiếp tục | Ngay sau COMMIT, qua `LISTEN auction_pause` (một kết nối Postgres riêng, tự kết nối lại sau 5 giây nếu rớt) | `sockets/pause_listener.js` (BE1), trigger migration 007 | Có |
+| Kết nối DB rảnh bị rớt | Ghi log, không sập tiến trình; chờ kết nối tối đa 20 giây | `pool.on('error')`, `connectionTimeoutMillis`, `config/db.js` | Có |
 
 Scheduler chỉ khởi động khi chạy server trực tiếp (`npm start` / `npm run dev`); chạy script hoặc test thì không có tiến trình nền. Nhiều máy cùng chạy server trên database dùng chung thì khoá `FOR UPDATE SKIP LOCKED` ngăn xử lý trùng.
 
@@ -336,6 +345,7 @@ Scheduler chỉ khởi động khi chạy server trực tiếp (`npm start` / `n
 | 12. Tranh chấp | BE2 (gọi `refund` của BE1) | `dispute_service.js` |
 | 13. Gắn cờ | BE1 phát hiện, BE2 (Admin) xử lý | `fraud_detection.js`, `admin_service.js` |
 | Thông báo, chatbot, Admin | BE2 | `notification_service.js`, `chat_service.js`, `admin_service.js` |
+| Socket.io (xác thực, phòng, sự kiện phiên, ngắt tài khoản bị khoá) | BE1 | `sockets/auction_socket.js`, `sockets/index.js`, `sockets/pause_listener.js` |
 
 Điểm tiếp giáp:
 
@@ -348,24 +358,26 @@ Scheduler chỉ khởi động khi chạy server trực tiếp (`npm start` / `n
 | `auction.model.listEndedHistory({ categoryCode })` | BE1 | `ai_price_suggestion.suggestPrice` |
 | `createNotification`, `emitNotification`, `notify` | BE2 | BE1 (outbid, win, refund, sold, warn) và BE2 |
 | `payout_service.releaseOverduePayouts()` | BE2 | `scheduler.js` của BE1 (3 dòng thêm vào vòng `tick`) |
+| `disconnectAccount(accountId, { kind, reason })` | BE1 | `admin_service.setAccountStatus` / `updateOps` (BE2), sau khi khoá đã lưu |
+| Trigger `sync_auction_pause` (migration 006, 007) | BE1 | Tự chạy khi `admin_service.flagAction` (BE2) đổi `flagged_auctions.status`; BE2 không phải gọi gì |
 
 ## 7. Còn thiếu và việc tiếp theo
 
-Các mục "Chặn luồng chính" trong lần quét trước đều đã có. Còn lại:
+Quét lại sau khi merge PR #13 và #14 vào `develop`, cập nhật phần BE1 ngày 2026-10-12. Mọi bước 1–13 của backend đã có route và logic thật, `npm test` đạt (BE1 49 bước, BE2 190 bước). Chỉ liệt kê các việc mức **Chặn luồng chính** và **Nên có** còn lại.
+
+### Chặn luồng chính
+
+| # | Việc | Chủ |
+|---|---|---|
+| 1 | **App Flutter chưa gọi backend.** `bidvibe_fe/lib` chưa có mã gọi HTTP hay Socket.io; app vẫn chạy bằng dữ liệu giả trong `AppStore`. Cần tách repository, thêm implementation gọi API ([`api.md`](api.md), hướng dẫn nhanh [`fe-quickstart.md`](fe-quickstart.md)) và Socket.io ([`socket.md`](socket.md)), giữ bản mock cho `flutter test` | Front-end (ngoài BE1 / BE2) |
+
+Không còn việc nào chặn luồng chính ở phía backend.
 
 ### Nên có
 
 | # | Việc | Chủ |
 |---|---|---|
-| 1 | Tạm dừng chưa "đóng băng" đồng hồ: bỏ tạm dừng khi đã quá `ends_at` thì phiên đóng ngay ở lượt quét kế tiếp | BE1 |
-| 2 | Socket.io: `auction_socket.js` chỉ xác thực JWT lúc kết nối, chưa chặn tài khoản bị khoá như `requireAuth` | BE1 |
-| 3 | Kiểm thử chạy trên database dùng chung; nên có database riêng cho test hoặc CI | BE1, BE2 |
+| 2 | **Nhắc người mua chọn địa chỉ giao hàng.** Phần BE1 **xong**: thông báo `win` nhắc chọn địa chỉ, thanh toán xong mà đơn chưa có địa chỉ thì gửi `address_reminder` (một lần mỗi đơn). Còn lại (BE2, tuỳ chọn): nhắc thêm khi kho đóng gói mà đơn chưa có địa chỉ, cho kho lọc đơn thiếu địa chỉ | BE2 |
+| 3 | **Seller không quản lý được ảnh / tin nháp:** chưa có API xoá ảnh, xem chi tiết một tin, hay huỷ tin nháp (hiện chỉ có danh sách `GET /api/listings/mine`). Khi bị yêu cầu bổ sung ảnh, Seller chỉ thêm được ảnh (tối đa 10), không bỏ ảnh xấu | BE2 |
+| 4 | **Kiểm thử chạy trên database dùng chung**, chạy tay, không có CI. Dữ liệu test có tiền tố riêng và tự dọn, nhưng trong lúc chạy vẫn có tài khoản / phiên test trên DB thật và job nền của server đang chạy có thể chạm vào | BE1, BE2 |
 
-### Có thì tốt
-
-| # | Việc | Chủ |
-|---|---|---|
-| 4 | Người dùng tự báo cáo phiên đáng ngờ | BE1 / BE2 |
-| 5 | Ví Seller và dòng tiền giải ngân thật; hoàn tiền phần trả qua QR / thẻ về đúng kênh | BE1, BE2 |
-| 6 | Gợi ý giá, chatbot, báo cáo gọi mô hình AI thật | BE2 |
-| 7 | Giới hạn số lần thử đăng nhập | BE2 |

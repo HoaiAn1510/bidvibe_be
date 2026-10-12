@@ -9,6 +9,19 @@ const { inTransaction, cancelAuction } = require('./auction_engine');
 const { createNotification, emitNotification } = require('./notification_service');
 const { SALT_ROUNDS } = require('./auth_service');
 const validate = require('../utils/validate');
+const registerSockets = require('../sockets');
+
+const LOCK_REASON = 'Tài khoản đã bị khoá';
+
+// Ngắt socket đang mở của tài khoản vừa bị khoá (hàm của BE1). Chỉ gọi sau khi việc khoá đã
+// lưu xuống DB; lỗi ở đây chỉ ghi log, không làm hỏng phản hồi của API khoá.
+async function disconnectSuspended(accountId, kind) {
+  try {
+    await registerSockets.disconnectAccount(accountId, { kind, reason: LOCK_REASON });
+  } catch (err) {
+    console.error(`[admin] ngắt socket tài khoản ${kind}:${accountId} lỗi:`, err.message);
+  }
+}
 
 const conflict = (message, code = 'INVALID_STATE') => new AppError(message, 409, code);
 const FEE_RATE = 0.05; // khớp auction_engine.js (BE1)
@@ -121,7 +134,7 @@ async function flagAction(adminId, flagId, input = {}) {
 
   const out = await inTransaction(async (client) => {
     const { rows } = await client.query(
-      `SELECT f.id, f.status, f.auction_id, l.title, l.seller_id
+      `SELECT f.id, f.status, f.auction_id, l.id AS listing_id, l.title, l.seller_id
        FROM flagged_auctions f JOIN auctions a ON a.id = f.auction_id JOIN listings l ON l.id = a.listing_id
        WHERE f.id = $1 FOR UPDATE OF f`,
       [flagId],
@@ -132,6 +145,8 @@ async function flagAction(adminId, flagId, input = {}) {
     if (f.status === next) throw conflict('Cờ đã ở trạng thái này');
 
     const notes = [];
+    // Thông báo gửi người bán: mở phiên / tin của mình (người bán không xem được cờ nên không gửi flagId).
+    const flagData = { auctionId: f.auction_id, listingId: f.listing_id };
     let cancelled = null;
     if (action === 'terminate') {
       // BE1: huỷ phiên + hoàn cọc mọi người tham gia; phiên không còn 'active' thì báo 409.
@@ -141,15 +156,15 @@ async function flagAction(adminId, flagId, input = {}) {
 
     if (action === 'pause') {
       notes.push(await createNotification(client, {
-        accountId: f.seller_id, type: 'warn', title: `Phiên "${f.title}" tạm dừng để kiểm tra.`,
+        accountId: f.seller_id, type: 'warn', title: `Phiên "${f.title}" tạm dừng để kiểm tra.`, data: flagData,
       }));
     } else if (action === 'terminate') {
       notes.push(await createNotification(client, {
-        accountId: f.seller_id, type: 'warn', title: `Phiên "${f.title}" bị Admin chấm dứt: ${reason}`,
+        accountId: f.seller_id, type: 'warn', title: `Phiên "${f.title}" bị Admin chấm dứt: ${reason}`, data: flagData,
       }));
     } else if (f.status === 'paused') {
       notes.push(await createNotification(client, {
-        accountId: f.seller_id, type: 'info', title: `Phiên "${f.title}" tiếp tục sau khi kiểm tra.`,
+        accountId: f.seller_id, type: 'info', title: `Phiên "${f.title}" tiếp tục sau khi kiểm tra.`, data: flagData,
       }));
     }
     return { notes, cancelled };
@@ -265,6 +280,8 @@ async function updateOps(adminId, opsId, input = {}) {
     params,
   );
   if (!rows[0]) throw new AppError('Không tìm thấy tài khoản nội bộ', 404, 'NOT_FOUND');
+  // UPDATE trên pool tự commit: tới đây việc khoá đã được lưu.
+  if (rows[0].status === 'suspended') await disconnectSuspended(rows[0].id, 'ops');
   return opsView(rows[0]);
 }
 
@@ -303,6 +320,8 @@ async function setAccountStatus(accountId, input = {}) {
     [accountId, status],
   );
   if (!rows[0]) throw new AppError('Không tìm thấy tài khoản', 404, 'NOT_FOUND');
+  // UPDATE trên pool tự commit: tới đây việc khoá đã được lưu.
+  if (rows[0].status === 'suspended') await disconnectSuspended(rows[0].id, 'account');
   return { id: rows[0].id, fullName: rows[0].full_name, email: rows[0].email, status: rows[0].status };
 }
 

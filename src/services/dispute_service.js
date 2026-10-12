@@ -12,7 +12,7 @@ const { lockOrder, paidAmount } = require('./fulfilment_service');
 const validate = require('../utils/validate');
 
 const conflict = (message, code) => new AppError(message, 409, code);
-const notify = (client, accountId, type, title) => createNotification(client, { accountId, type, title });
+const notify = (client, accountId, type, title, data) => createNotification(client, { accountId, type, title, data });
 const WHO = { bidder: 'Người mua', seller: 'Người bán', warehouse: 'Kho' };
 
 async function open(user, input = {}) {
@@ -42,7 +42,8 @@ async function open(user, input = {}) {
     ]);
     await client.query(`UPDATE orders SET payout_status = 'disputed' WHERE id = $1`, [o.id]);
     const other = user.role === 'bidder' ? o.seller_id : o.bidder_id;
-    const note = await notify(client, other, 'dispute', `${WHO[user.role]} đã mở tranh chấp cho đơn "${o.title}": ${title}`);
+    const note = await notify(client, other, 'dispute', `${WHO[user.role]} đã mở tranh chấp cho đơn "${o.title}": ${title}`,
+      { orderId: o.id, auctionId: o.auction_id, disputeId });
     return { disputeId, note };
   });
   emitNotification(result.note);
@@ -125,6 +126,7 @@ async function resolve(adminId, disputeId, input = {}) {
     const amount = Number(d.escrow_amount);
     const fmt = `${amount.toLocaleString('vi-VN')}đ`;
     const out = [];
+    const data = { orderId: o.id, auctionId: o.auction_id, disputeId: d.id };
 
     if (resolution === 'refund') {
       await walletService.refund(client, { bidderId: o.bidder_id, amount, auctionId: o.auction_id }); // BE1
@@ -133,8 +135,8 @@ async function resolve(adminId, disputeId, input = {}) {
          WHERE id = (SELECT listing_id FROM auctions WHERE id = $1)`,
         [o.auction_id],
       );
-      out.push(await notify(client, o.bidder_id, 'refund', `Tranh chấp "${d.title}" đã xử lý: hoàn ${fmt} về ví của bạn.`));
-      out.push(await notify(client, o.seller_id, 'dispute', `Tranh chấp "${d.title}" đã xử lý: hoàn tiền cho người mua.`));
+      out.push(await notify(client, o.bidder_id, 'refund', `Tranh chấp "${d.title}" đã xử lý: hoàn ${fmt} về ví của bạn.`, data));
+      out.push(await notify(client, o.seller_id, 'dispute', `Tranh chấp "${d.title}" đã xử lý: hoàn tiền cho người mua.`, data));
     }
 
     await client.query(
@@ -159,8 +161,8 @@ async function resolve(adminId, disputeId, input = {}) {
       }
       out.push(await notify(client, o.seller_id, 'payout', others.rowCount
         ? `Tranh chấp "${d.title}" đã xử lý: giữ nguyên giao dịch. Đơn còn tranh chấp khác nên chưa giải ngân.`
-        : `Tranh chấp "${d.title}" đã xử lý: giữ nguyên giao dịch, đơn được giải ngân.`));
-      out.push(await notify(client, o.bidder_id, 'dispute', `Tranh chấp "${d.title}" đã xử lý: giữ nguyên giao dịch.`));
+        : `Tranh chấp "${d.title}" đã xử lý: giữ nguyên giao dịch, đơn được giải ngân.`, data));
+      out.push(await notify(client, o.bidder_id, 'dispute', `Tranh chấp "${d.title}" đã xử lý: giữ nguyên giao dịch.`, data));
     }
     return out;
   });
@@ -168,4 +170,4 @@ async function resolve(adminId, disputeId, input = {}) {
   return getOne(disputeId);
 }
 
-module.exports = { open, getOne, listMine, listForAdmin, resolve };
+module.exports = { open, listMine, listForAdmin, resolve };

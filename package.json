@@ -10,7 +10,9 @@
     "db:seed": "node scripts/seed_demo.js && node scripts/seed.js",
     "test:be1": "node scripts/test_be1.js",
     "test:be2": "node scripts/test_be2.js",
-    "test": "npm run test:be1 && npm run test:be2"
+    "test": "npm run test:be1 && npm run test:be2",
+    "docs:check": "node scripts/docs_check.js",
+    "demo:bidbot": "node scripts/demo_bidbot.js"
   },
   "license": "ISC",
   "dependencies": {
@@ -23,6 +25,7 @@
     "socket.io": "^4.8.4"
   },
   "devDependencies": {
-    "nodemon": "^3.1.0"
+    "nodemon": "^3.1.0",
+    "socket.io-client": "^4.8.4"
   }
 }

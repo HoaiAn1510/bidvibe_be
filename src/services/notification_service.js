@@ -10,12 +10,24 @@ const { pool } = require('../config/db');
 const { AppError } = require('../middleware/errorHandler');
 const registerSockets = require('../sockets');
 
-async function createNotification(executor, { accountId, type, title }) {
+// `data` (tuỳ chọn, migration 008): id liên quan để app mở đúng màn, ví dụ { orderId, auctionId }.
+// Giá trị đổi về chuỗi như id trong API; khoá rỗng bị bỏ; không có khoá nào thì lưu NULL.
+// Không truyền `data` (cách BE1 đang gọi) thì vẫn chạy như cũ, data = NULL.
+function normalizeData(data) {
+  if (!data || typeof data !== 'object') return null;
+  const out = {};
+  for (const [k, v] of Object.entries(data)) {
+    if (v !== null && v !== undefined && v !== '') out[k] = String(v);
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+async function createNotification(executor, { accountId, type, title, data }) {
   const { rows } = await (executor || pool).query(
-    `INSERT INTO notifications (account_id, type, title)
-     VALUES ($1, $2, $3)
-     RETURNING id, type, title, is_read, created_at`,
-    [accountId, type, title],
+    `INSERT INTO notifications (account_id, type, title, data)
+     VALUES ($1, $2, $3, $4)
+     RETURNING id, type, title, data, is_read, created_at`,
+    [accountId, type, title, normalizeData(data)],
   );
   return { accountId: String(accountId), ...rows[0] };
 }
@@ -30,11 +42,12 @@ function emitNotification(notification) {
     type: notification.type,
     title: notification.title,
     createdAt: notification.created_at,
+    data: notification.data ?? null,
   });
 }
 
-async function notify(client, accountId, type, title) {
-  const notification = await createNotification(client, { accountId, type, title });
+async function notify(client, accountId, type, title, data) {
+  const notification = await createNotification(client, { accountId, type, title, data });
   if (!client || client === pool) emitNotification(notification);
   return notification;
 }
@@ -49,7 +62,7 @@ async function listForAccount(user, { limit, offset }) {
   assertAccountUser(user);
   const [list, unread] = await Promise.all([
     pool.query(
-      `SELECT id, type, title, is_read, created_at FROM notifications
+      `SELECT id, type, title, data, is_read, created_at FROM notifications
        WHERE account_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3`,
       [user.id, limit, offset],
     ),
@@ -65,6 +78,7 @@ async function listForAccount(user, { limit, offset }) {
       title: r.title,
       isRead: r.is_read,
       createdAt: r.created_at,
+      data: r.data,
     })),
     unreadCount: unread.rows[0].n,
   };

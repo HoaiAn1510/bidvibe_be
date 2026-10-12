@@ -1,5 +1,7 @@
 # BidVibe — Bàn giao v2: backend đã nối Postgres thật
 
+> **Bản lưu trữ** (chuyển vào `docs/archive/` ngày 2026-10-10). Không còn cập nhật: mọi mục "Việc cần làm" bên dưới đã xong. Thông tin còn hiệu lực đã nằm ở [`../mainflow.md`](../mainflow.md) (luồng nghiệp vụ, việc còn thiếu), [`../architecture.md`](../architecture.md) (quy ước, quyết định thiết kế), [`../api.md`](../api.md) và README.
+
 Thay cho `bidvibe_handoff.md` (bản v1) — v1 còn dặn "hỏi chọn backend trước khi code",
 nhưng quyết định đó đã chốt: **giữ Node.js + Express 5 + Socket.io có sẵn trong
 `bidvibe_be`, dùng PostgreSQL (host trên Supabase) làm nơi lưu dữ liệu chính.**

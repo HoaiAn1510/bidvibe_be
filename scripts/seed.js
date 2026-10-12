@@ -292,6 +292,7 @@ async function seedSoldItem(client, ctx, item) {
     await createNotification(client, {
       accountId: winnerId, type: 'win',
       title: `Bạn đã thắng phiên · ${item.title}. Thanh toán trong 24 giờ.`,
+      data: { auctionId, orderId },
     });
     return { orderId, totalDue };
   }
@@ -387,7 +388,7 @@ async function seedWarehouse(client, ctx, item, { orderId, winnerId, endedAt }) 
       ]);
     } else {
       await createNotification(client, {
-        accountId: winnerId, type: 'info', title: `Đơn hàng hoàn tất · ${item.title}`,
+        accountId: winnerId, type: 'info', title: `Đơn hàng hoàn tất · ${item.title}`, data: { orderId },
       });
     }
     return;
@@ -409,6 +410,7 @@ async function seedWarehouse(client, ctx, item, { orderId, winnerId, endedAt }) 
     await createNotification(client, {
       accountId: winnerId, type: 'order',
       title: `Đơn hàng đã giao · ${item.title}. Hãy kiểm tra và xác nhận đã nhận hàng.`,
+      data: { orderId },
     });
   }
 }
