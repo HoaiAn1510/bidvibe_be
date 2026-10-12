@@ -205,7 +205,7 @@ Future<void> onNotificationTap(Map<String, dynamic> n, String role) async {
 }
 ```
 
-Hiện các thông báo do phần đấu giá tạo (`outbid`, `win`, `address_reminder`, `refund` hoàn cọc, `sold`, `warn` quá hạn thanh toán) còn `data: null`; với các loại này app tạm mở danh sách tương ứng (ví dụ `win`, `address_reminder` → danh sách đơn của tôi; `outbid` → phiên của tôi `status=joined`).
+Các thông báo do phần đấu giá tạo cũng đã có `data` (`outbid` / `refund` hoàn cọc → `{ auctionId }`; `win` / `sold` → `{ auctionId, orderId }`; `address_reminder` / `warn` quá hạn thanh toán → `{ orderId, auctionId }`). Chỉ thông báo tạo trước migration `008` có `data: null`: với các thông báo này app chỉ đánh dấu đã đọc (hoặc tạm mở danh sách đơn / phiên của tôi).
 
 ## 6. Những điểm cần lưu ý
 

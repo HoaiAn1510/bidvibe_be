@@ -834,7 +834,7 @@ Query `limit`, `offset`. Mới nhất trước.
   { "id": "2353", "type": "listing_needs_info", "title": "Tin đăng \"Máy nghe nhạc cassette 1988\" cần bổ sung: Chụp thêm ảnh số seri",
     "isRead": false, "createdAt": "2026-10-12T02:15:49.635Z", "data": { "listingId": "849" } } ],
   "unreadCount": 2 }
-// 200 (người mua demo: thông báo tạo trước migration 008 / loại chưa truyền data)
+// 200 (người mua demo: thông báo tạo trước migration 008 nên data = null; thông báo warn mới có data { orderId, auctionId })
 { "notifications": [ { "id": "916", "type": "warn",
   "title": "Quá hạn thanh toán · Radio bóng đèn Philips 1960, vỏ gỗ óc chó. Cọc đã bị tịch thu và giao dịch bị huỷ.",
   "isRead": false, "createdAt": "2026-10-10T15:10:48.547Z", "data": null } ], "unreadCount": 4 }
@@ -844,7 +844,7 @@ Giá trị `type`: xem [enum thông báo](#thông-báo-notificationstype). Thôn
 
 #### Trường `data` — mở đúng màn khi bấm thông báo
 
-`data` là object chứa id của đối tượng liên quan, hoặc **`null`** (thông báo tạo trước migration `008`, hoặc loại chưa truyền `data`). App phải chịu được `null` và khoá vắng mặt.
+`data` là object chứa id của đối tượng liên quan, hoặc **`null`** (thông báo tạo trước migration `008`). Mọi loại thông báo hiện tại của BE1 và BE2 đều đã truyền `data`. App phải chịu được `null` và khoá vắng mặt.
 
 | Khoá | Kiểu | Mở bằng |
 |---|---|---|
@@ -868,12 +868,12 @@ Tên khoá cố định; chỉ có khoá liên quan tới loại thông báo đ�
 | `info` | Tự giải ngân sau 72 giờ (báo người mua) | Người mua | `{ orderId, auctionId }` | BE2 |
 | `info` | Phiên chạy lại sau khi tạm dừng | Người bán | `{ auctionId, listingId }` | BE2 |
 | `warn` | Phiên bị tạm dừng / chấm dứt | Người bán | `{ auctionId, listingId }` | BE2 |
-| `outbid` | Bị vượt giá | Người mua | **chưa truyền (`null`)**; sẽ là `{ auctionId }` | BE1 |
-| `win` | Thắng phiên, cần thanh toán | Người mua | **chưa truyền (`null`)**; sẽ là `{ auctionId, orderId }` | BE1 |
-| `address_reminder` | Đã thanh toán, đơn chưa có địa chỉ | Người mua | **chưa truyền (`null`)**; sẽ là `{ orderId, auctionId }` | BE1 |
-| `refund` | Hoàn cọc khi thua phiên / phiên bị huỷ | Người mua | **chưa truyền (`null`)**; sẽ là `{ auctionId }` | BE1 |
-| `sold` | Phiên của mình kết thúc có người thắng | Người bán | **chưa truyền (`null`)**; sẽ là `{ auctionId, orderId }` | BE1 |
-| `warn` | Quá hạn thanh toán, mất cọc | Người mua | **chưa truyền (`null`)**; sẽ là `{ orderId, auctionId }` | BE1 |
+| `outbid` | Bị vượt giá | Người mua | `{ auctionId }` | BE1 |
+| `win` | Thắng phiên, cần thanh toán | Người mua | `{ auctionId, orderId }` | BE1 |
+| `address_reminder` | Đã thanh toán, đơn chưa có địa chỉ | Người mua | `{ orderId, auctionId }` | BE1 |
+| `refund` | Hoàn cọc khi thua phiên / phiên bị huỷ | Người mua | `{ auctionId }` | BE1 |
+| `sold` | Phiên của mình kết thúc có người thắng | Người bán | `{ auctionId, orderId }` | BE1 |
+| `warn` | Quá hạn thanh toán, mất cọc | Người mua | `{ orderId, auctionId }` | BE1 |
 
 Cùng một `type` có thể đến từ nhiều tình huống (ví dụ `refund`, `warn`, `info`, `payout`); app điều hướng theo khoá trong `data`, không theo `type`.
 

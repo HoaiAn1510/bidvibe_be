@@ -153,10 +153,10 @@ socket.on('auction:update', (u) {
 ```json
 { "id": "2354", "type": "listing_approved", "title": "Tin đăng \"Máy nghe nhạc cassette 1988\" đã được duyệt, phiên đấu giá đã mở.",
   "createdAt": "2026-10-12T02:15:50.277Z", "data": { "auctionId": "841", "listingId": "849" } }
-{ "id": "57", "type": "outbid", "title": "Bạn đã bị vượt giá · Giày retro ... · 1.250.000đ", "createdAt": "2026-10-10T08:29:41.200Z", "data": null }
+{ "id": "57", "type": "outbid", "title": "Bạn đã bị vượt giá · Giày retro ... · 1.250.000đ", "createdAt": "2026-10-10T08:29:41.200Z", "data": { "auctionId": "12" } }
 ```
 
-`data` (từ migration `008`): id liên quan để app mở đúng màn khi bấm thông báo (`auctionId`, `orderId`, `listingId`, `disputeId`, giá trị là chuỗi), hoặc `null`. Trùng với trường `data` của `GET /api/notifications`. Bảng khoá theo từng loại: [`api.md` mục 15](api.md#trường-data--mở-đúng-màn-khi-bấm-thông-báo). Các loại do BE1 tạo (`outbid`, `win`, `address_reminder`, `refund` hoàn cọc, `sold`, `warn` quá hạn thanh toán) hiện gửi `data: null`.
+`data` (từ migration `008`): id liên quan để app mở đúng màn khi bấm thông báo (`auctionId`, `orderId`, `listingId`, `disputeId`, giá trị là chuỗi), hoặc `null`. Trùng với trường `data` của `GET /api/notifications`. Bảng khoá theo từng loại: [`api.md` mục 15](api.md#trường-data--mở-đúng-màn-khi-bấm-thông-báo). Các loại do BE1 tạo đã truyền `data`: `outbid` `{ auctionId }`, `win` `{ auctionId, orderId }`, `address_reminder` `{ orderId, auctionId }`, `refund` hoàn cọc `{ auctionId }`, `sold` `{ auctionId, orderId }`, `warn` quá hạn thanh toán `{ orderId, auctionId }`. Chỉ thông báo tạo trước migration `008` mới có `data: null`.
 
 | `type` | Khi nào | Người nhận |
 |---|---|---|
