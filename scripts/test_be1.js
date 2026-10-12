@@ -852,10 +852,43 @@ async function main() {
         await engine.placeBid({ bidderId: L, auctionId: a3, increment: 50_000 });
         await expire(a3);
         await engine.closeAuction(a3);
-        const o = (await pool.query('SELECT id FROM orders WHERE auction_id = $1', [a3])).rows[0];
+        // Scheduler của server khác (npm run dev của đồng đội) có thể đóng phiên / xử lý quá hạn trước
+        // test: hàm của test bỏ qua dòng đang bị khoá (SKIP LOCKED). Chờ tối đa 10 giây, mỗi 300ms
+        // đọc lại, cho tới khi DB về đúng trạng thái; không giả định ai là người xử lý.
+        const waitFor = async (read, what) => {
+          for (const end = Date.now() + 10_000; ; await sleep(300)) {
+            const v = await read();
+            if (v) return v;
+            assert.ok(Date.now() < end, `${what} sau 10 giây`);
+          }
+        };
+        const o = await waitFor(async () => (await pool.query('SELECT id FROM orders WHERE auction_id = $1', [a3])).rows[0],
+          'không có đơn của phiên vừa đóng');
         await pool.query(`UPDATE orders SET payment_deadline = now() - interval '1 minute' WHERE id = $1`, [o.id]);
-        await engine.processPaymentTimeouts();
-        await checkData({ id: L, role: 'bidder', sock: sL, type: 'warn', expect: { orderId: String(o.id), auctionId: String(a3) } });
+        const mine = (await engine.processPaymentTimeouts()).map(String).includes(String(o.id));
+        const expect = { orderId: String(o.id), auctionId: String(a3) };
+        if (mine) {
+          // Test tự xử lý đơn: kiểm đủ API và socket như các loại thông báo khác.
+          await checkData({ id: L, role: 'bidder', sock: sL, type: 'warn', expect });
+        } else {
+          // Server khác xử lý: notification:new phát trên Socket.io của server đó, socket của test không
+          // nhận được; vẫn kiểm đủ khoá, kiểu và giá trị data qua API.
+          const api = await waitFor(() => latestApi(L, 'bidder', 'warn'), 'không có thông báo warn qua API');
+          assert.deepStrictEqual(Object.keys(api.data).sort(), Object.keys(expect).sort(), `warn: khoá ${JSON.stringify(api.data)}`);
+          for (const [k, v] of Object.entries(api.data)) assert.strictEqual(typeof v, 'string', `warn.${k} phải là chuỗi`);
+          assert.deepStrictEqual(api.data, expect);
+        }
+        const warn = await latestApi(L, 'bidder', 'warn');
+        assert.ok(warn.title.startsWith('Quá hạn thanh toán'), `warn: tiêu đề ${warn.title}`);
+        // Trạng thái cuối: đơn quá hạn, tin bị huỷ, cọc bị tịch thu (có giao dịch deposit_forfeit).
+        const st = await waitFor(async () => (await pool.query(
+          `SELECT o.payment_status, l.status AS listing_status, d.status AS deposit_status,
+                  (SELECT count(*)::int FROM wallet_transactions w
+                   WHERE w.bidder_id = o.bidder_id AND w.related_auction_id = o.auction_id AND w.kind = 'deposit_forfeit') AS forfeits
+           FROM orders o JOIN auctions a ON a.id = o.auction_id JOIN listings l ON l.id = a.listing_id
+           LEFT JOIN auction_deposits d ON d.auction_id = o.auction_id AND d.bidder_id = o.bidder_id
+           WHERE o.id = $1 AND o.payment_status = 'expired'`, [o.id])).rows[0], 'đơn chưa chuyển quá hạn');
+        assert.deepStrictEqual(st, { payment_status: 'expired', listing_status: 'cancelled', deposit_status: 'forfeited', forfeits: 1 });
       });
       await step('thông báo cũ data = null vẫn đọc được qua API', async () => {
         await pool.query(`INSERT INTO notifications (account_id, type, title) VALUES ($1, 'outbid', $2)`, [W, `${PREFIX}cũ`]);
