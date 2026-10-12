@@ -24,7 +24,7 @@ npm run dev
 | `NODE_ENV` | `production` thì lỗi 5xx chỉ trả "Lỗi hệ thống". |
 | `DATABASE_URL` | Chuỗi kết nối Postgres. Với Supabase dùng chuỗi **Session pooler** (host `*.pooler.supabase.com`, cổng 5432, username dạng `postgres.<mã project>`). **Không** dùng Direct connection: nó chỉ có IPv6 nên nhiều mạng không kết nối được. |
 | `DB_SSL` | `true` khi dùng Supabase. |
-| `DB_POOL_MAX` | Tuỳ chọn, số kết nối tối đa của pool (mặc định 10). Session pooler của Supabase chỉ cho 15 kết nối cho cả database; `test:be2` tự dùng 4. |
+| `DB_POOL_MAX` | Tuỳ chọn, số kết nối tối đa của pool (bỏ trống thì 10; `.env.example` đặt 4). Session pooler của Supabase chỉ cho **15 kết nối cho cả database**, cộng dồn mọi bản đang chạy: `npm run dev` của từng người, `test:be1`, `test:be2` (hai bộ test tự dùng 4), mỗi tiến trình thêm 1 kết nối riêng cho `LISTEN` của `pause_listener`. Vượt giới hạn thì gặp lỗi `EMAXCONNSESSION`. Không đổi sang transaction pooler (cổng 6543) vì `LISTEN` không chạy qua đó. |
 | `JWT_SECRET` | Khoá ký token đăng nhập. Bắt buộc, không có giá trị mặc định. |
 | `AUTO_PAYOUT_ENABLED` | `false` để tắt job tự giải ngân sau 72 giờ (mặc định bật). |
 

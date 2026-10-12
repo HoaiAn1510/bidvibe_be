@@ -6,6 +6,9 @@
 // CHÍNH lần chạy này; đầu lần chạy chỉ dọn dữ liệu test_be1_ bỏ dở từ hơn 30 phút trước, nên
 // hai người chạy test cùng lúc trên database dùng chung không xoá dữ liệu của nhau.
 // Chạy: npm run test:be1   (hoặc node scripts/test_be1.js)
+// Supabase session pooler giới hạn tổng số kết nối của cả database (15): test dùng ít kết nối để
+// chạy song song với lần chạy khác / test:be2 / server của đồng đội. Đặt trước khi nạp pool.
+process.env.DB_POOL_MAX = process.env.DB_POOL_MAX || '4';
 const assert = require('assert');
 const { pool } = require('../src/config/db');
 const engine = require('../src/services/auction_engine');
