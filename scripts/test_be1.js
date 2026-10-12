@@ -683,10 +683,11 @@ async function main() {
       const b1 = await mkLoginBidder('BotOne', 5_000_000);
       const b2 = await mkLoginBidder('BotTwo', 5_000_000);
       const poor = await mkLoginBidder('BotPoor', 150_000); // đủ cọc 100.000 nhưng không đủ trả đơn nếu thắng
+      const allowedEmails = [b1.email, b2.email, poor.email];
 
       await step('bot đặt cọc rồi trả giá luân phiên qua API, dừng khi đủ --max lượt', async () => {
         const { auctionId: ab } = await mkAuction(seller); // 1.000.000đ, bước 50.000
-        const r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 4, log });
+        const r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 4, log, allowedEmails });
         assert.deepStrictEqual(r, { bids: 4, reason: 'đủ 4 lượt' });
         const rows = (await pool.query('SELECT bidder_id, amount::int AS a FROM bids WHERE auction_id = $1 ORDER BY id', [ab])).rows;
         assert.deepStrictEqual(rows.map((x) => x.a), [1_050_000, 1_100_000, 1_150_000, 1_200_000]);
@@ -697,7 +698,7 @@ async function main() {
       await step('bot không đủ tiền trả đơn nếu thắng thì không cọc, không trả giá; không còn bot hợp lệ thì dừng', async () => {
         const { auctionId: ab } = await mkAuction(seller);
         const before = await wallet(poor.id);
-        const r = await runBidbot({ base, auctionId: ab, accounts: [poor], intervalMs: 50, max: 3, log });
+        const r = await runBidbot({ base, auctionId: ab, accounts: [poor], intervalMs: 50, max: 3, log, allowedEmails });
         assert.strictEqual(r.bids, 0);
         assert.ok(r.reason.startsWith('không bot nào đủ điều kiện'), r.reason);
         assert.deepStrictEqual(await wallet(poor.id), before, 'ví không đổi');
@@ -705,10 +706,10 @@ async function main() {
       await step('bot dừng khi phiên hết giờ và khi nhận tín hiệu dừng (Ctrl+C)', async () => {
         const { auctionId: ab } = await mkAuction(seller);
         await expire(ab);
-        assert.deepStrictEqual(await runBidbot({ base, auctionId: ab, accounts: [b1], intervalMs: 50, max: 3, log }),
+        assert.deepStrictEqual(await runBidbot({ base, auctionId: ab, accounts: [b1], intervalMs: 50, max: 3, log, allowedEmails }),
           { bids: 0, reason: 'phiên đã kết thúc' });
         const { auctionId: ab2 } = await mkAuction(seller);
-        const r = await runBidbot({ base, auctionId: ab2, accounts: [b1, b2], intervalMs: 50, max: 10, log, stopSignal: { stop: true } });
+        const r = await runBidbot({ base, auctionId: ab2, accounts: [b1, b2], intervalMs: 50, max: 10, log, allowedEmails, stopSignal: { stop: true } });
         assert.deepStrictEqual(r, { bids: 0, reason: 'dừng theo yêu cầu (Ctrl+C)' });
       });
       await step('script từ chối chạy khi NODE_ENV=production, báo lỗi khi thiếu --auction', async () => {
@@ -722,6 +723,42 @@ async function main() {
         const noArg = run([], { NODE_ENV: 'development' });
         assert.strictEqual(noArg.status, 1);
         assert.ok(noArg.stderr.includes('--auction'), noArg.stderr);
+        // Chỉ định tài khoản không phải bot (kể cả tài khoản demo của người dùng) -> từ chối trước khi gọi API.
+        const other = run(['--auction', '1', '--bots', 'bot1@bidvibe.demo,minhanh@gmail.com'], { NODE_ENV: 'development' });
+        assert.strictEqual(other.status, 1);
+        assert.ok(other.stderr.includes('minhanh@gmail.com') && other.stderr.includes('Từ chối'), other.stderr);
+      });
+      await step('bot chỉ dùng tài khoản được phép; thiếu / sai tài khoản bot thì từ chối, không ghi gì', async () => {
+        const { auctionId: ab } = await mkAuction(seller);
+        const r1 = await runBidbot({ base, auctionId: ab, accounts: [b1], intervalMs: 50, max: 3, log }); // mặc định: chỉ 3 bot demo
+        assert.strictEqual(r1.bids, 0);
+        assert.ok(r1.reason.startsWith('từ chối: chỉ được dùng tài khoản bot') && r1.reason.includes(b1.email), r1.reason);
+        const r2 = await runBidbot({ base, auctionId: ab, accounts: [{ email: b1.email, password: 'sai' }], intervalMs: 50, max: 3, log, allowedEmails });
+        assert.ok(r2.reason.startsWith('từ chối: không đăng nhập được tài khoản bot'), r2.reason);
+        const n = (await pool.query('SELECT count(*)::int AS n FROM auction_deposits WHERE auction_id = $1', [ab])).rows[0].n;
+        assert.strictEqual(n, 0);
+      });
+      await step('bot không trả giá khi phiên còn dưới --stop-before giây (hạn chế bot thắng)', async () => {
+        const { auctionId: ab } = await mkAuction(seller);
+        await pool.query(`UPDATE auctions SET ends_at = now() + interval '50 seconds' WHERE id = $1`, [ab]);
+        const r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 3, log, allowedEmails, stopBeforeSeconds: 60 });
+        assert.deepStrictEqual(r, { bids: 0, reason: 'phiên còn dưới 60 giây, bot dừng để không thắng phiên' });
+      });
+      await step('--only-outbid: chỉ trả giá khi người khác dẫn đầu, bot dẫn đầu rồi thì chờ', async () => {
+        const { auctionId: ab } = await mkAuction(seller);
+        const stopAfter = (ms) => { const sig = { stop: false }; setTimeout(() => { sig.stop = true; }, ms); return sig; };
+        // Chưa ai đặt giá: bot chờ, không đặt.
+        let r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 5, log, allowedEmails, onlyOutbid: true, stopSignal: stopAfter(400) });
+        assert.strictEqual(r.bids, 0);
+        // Người thật (không phải bot) đặt giá -> bot vượt đúng một lần rồi chờ vì bot đang dẫn đầu.
+        const human = await mkAccount('bidder', 'Human');
+        await tx((c) => walletService.topUp(c, { bidderId: human, amount: 5_000_000 }));
+        await engine.joinAuction({ bidderId: human, auctionId: ab });
+        await engine.placeBid({ bidderId: human, auctionId: ab, increment: 50_000 });
+        r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 5, log, allowedEmails, onlyOutbid: true, stopSignal: stopAfter(800) });
+        assert.deepStrictEqual(r, { bids: 1, reason: 'dừng theo yêu cầu (Ctrl+C)' });
+        const last = (await pool.query('SELECT amount::int AS a FROM bids WHERE auction_id = $1 ORDER BY id DESC LIMIT 1', [ab])).rows[0].a;
+        assert.strictEqual(last, 1_100_000);
       });
     } finally {
       await new Promise((res) => server.close(res));
