@@ -12,6 +12,7 @@
     "test:be1": "node scripts/test_be1.js",
     "test:be2": "node scripts/test_be2.js",
     "test": "npm run test:be1 && npm run test:be2",
+    "test:clean": "node scripts/test_be2_clean.js",
     "docs:check": "node scripts/docs_check.js",
     "demo:bidbot": "node scripts/demo_bidbot.js"
   },
