@@ -70,7 +70,7 @@ npm run demo:bidbot -- --auction 13 --interval 5 --max 10     # terminal 2; Ctrl
 ## Cấu trúc thư mục
 
 ```
-migrations/        # file SQL tạo/đổi cấu trúc database (001 ... 007)
+migrations/        # file SQL tạo/đổi cấu trúc database (001 ... 008)
 scripts/           # migrate, seed (seed_demo.js BE1, seed.js BE2), test_be1, test_be2, docs_check
 docs/              # tài liệu (xem mục Tài liệu), docs/archive/ là bản lưu trữ
 src/
@@ -86,7 +86,7 @@ src/
 
 ## Cơ sở dữ liệu
 
-Schema gốc nằm trong `migrations/001_init_schema.sql` (23 bảng nghiệp vụ), các migration sau chỉ thêm: `003` mật khẩu tài khoản nội bộ, `004` loại giao dịch ví mất cọc, `005` bảng `addresses` và `orders.shipping_address_id`, `006` (BE1) `auctions.paused_at` + trigger đóng băng đồng hồ khi tạm dừng, unique index chặn cờ gian lận `pending` trùng, `007` (BE1) trigger tạm dừng gửi `pg_notify` để server phát Socket.io. Thư mục `migrations/` là nguồn sự thật cho cấu trúc dữ liệu. Sơ đồ quan hệ xem trong Supabase: **Database → Schema Visualizer**.
+Schema gốc nằm trong `migrations/001_init_schema.sql` (23 bảng nghiệp vụ), các migration sau chỉ thêm: `003` mật khẩu tài khoản nội bộ, `004` loại giao dịch ví mất cọc, `005` bảng `addresses` và `orders.shipping_address_id`, `006` (BE1) `auctions.paused_at` + trigger đóng băng đồng hồ khi tạm dừng, unique index chặn cờ gian lận `pending` trùng, `007` (BE1) trigger tạm dừng gửi `pg_notify` để server phát Socket.io, `008` (BE2) cột `notifications.data` (id liên quan để app mở đúng màn khi bấm thông báo). Thư mục `migrations/` là nguồn sự thật cho cấu trúc dữ liệu. Sơ đồ quan hệ xem trong Supabase: **Database → Schema Visualizer**.
 
 | Nhóm | Bảng |
 |---|---|
@@ -108,7 +108,7 @@ Quyết định thiết kế cần nhớ:
 
 ### Quy tắc làm việc với database
 
-- **Không sửa file migration đã chạy.** Muốn đổi cấu trúc thì thêm file mới với số kế tiếp (hiện tại là `008_...sql`). Chỉ một người chạy `npm run db:migrate` mỗi lần có file mới, rồi báo người còn lại.
+- **Không sửa file migration đã chạy.** Muốn đổi cấu trúc thì thêm file mới với số kế tiếp (hiện tại là `009_...sql`). Chỉ một người chạy `npm run db:migrate` mỗi lần có file mới, rồi báo người còn lại.
 - **RLS đã bật cho mọi bảng và không có policy nào** (`002_enable_rls.sql`), để chặn truy cập qua API công khai của Supabase. Backend kết nối bằng tài khoản `postgres` nên bỏ qua RLS và vẫn đọc ghi bình thường. Bảng mới thêm sau này cũng phải bật RLS trong chính file migration của nó.
 - **Thao tác đụng tiền hoặc đổi trạng thái nhiều bảng phải nằm trong một giao dịch** (`BEGIN ... COMMIT`) dùng chung một kết nối lấy từ pool. Đặt giá phải khoá dòng phiên bằng `SELECT ... FOR UPDATE` để hai người không đặt trùng.
 - Không tự cộng/trừ số dư. Mọi thay đổi ví đi qua service ví (xem bên dưới) để luôn có dòng trong `wallet_transactions`.

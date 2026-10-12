@@ -1,6 +1,6 @@
 # Nối app Flutter với backend BidVibe — hướng dẫn nhanh
 
-> Cập nhật: 2026-10-10.
+> Cập nhật: 2026-10-12.
 
 Đọc một lần là nối được. Chi tiết từng endpoint ở [`api.md`](api.md), sự kiện real-time ở [`socket.md`](socket.md).
 
@@ -65,7 +65,7 @@ Ký hiệu: → gọi theo thứ tự; (socket) cần Socket.io.
 | Đơn hàng (người mua) | [`GET /api/orders/mine`](api.md#get-apiordersmine) → [`GET /api/orders/:id`](api.md#get-apiordersid) → [`POST /api/orders/:id/pay`](api.md#post-apiordersidpay) | Đếm ngược tới `paymentDeadline` (24 giờ) |
 | Chọn địa chỉ | [`GET /api/addresses`](api.md#get-apiaddresses) (chưa có thì [`POST /api/addresses`](api.md#post-apiaddresses)) → [`POST /api/orders/:id/shipping-address`](api.md#post-apiordersidshipping-address) | Nên làm ngay sau khi thắng / thanh toán; kho không gửi được đơn chưa có địa chỉ |
 | Theo dõi giao hàng | [`GET /api/orders/:id/tracking`](api.md#get-apiordersidtracking) → [`POST /api/orders/:id/confirm-delivery`](api.md#post-apiordersidconfirm-delivery) | Hiện `stage`, `events`; nút "Đã nhận hàng" khi `stage == delivered`. Có vấn đề → [`POST /api/disputes`](api.md#post-apidisputes) |
-| Thông báo | [`GET /api/notifications`](api.md#get-apinotifications), [`POST /api/notifications/:id/read`](api.md#post-apinotificationsidread) | Badge = `unreadCount`; thông báo mới qua (socket) `notification:new` |
+| Thông báo | [`GET /api/notifications`](api.md#get-apinotifications), [`POST /api/notifications/:id/read`](api.md#post-apinotificationsidread) | Badge = `unreadCount`; thông báo mới qua (socket) `notification:new`. Bấm vào thông báo: mở màn theo `data` ([mục 5b](#5b-bấm-thông-báo-mở-đúng-màn)) |
 | Seller: tạo tin | [`GET /api/categories`](api.md#get-apicategories) → [`POST /api/ai/suggest-price`](api.md#post-apiaisuggest-price) → [`POST /api/listings`](api.md#post-apilistings) → [`POST /api/listings/:id/photos`](api.md#post-apilistingsidphotos) → [`POST /api/listings/:id/submit`](api.md#post-apilistingsidsubmit) | Ảnh: tải lên nơi khác trước, gửi URL |
 | Seller: tin của tôi | [`GET /api/listings/mine`](api.md#get-apilistingsmine) → khi `needs_info`: [`PATCH /api/listings/:id`](api.md#patch-apilistingsid), thêm ảnh, [`POST /api/listings/:id/resubmit`](api.md#post-apilistingsidresubmit) | Lý do ở `lastAppraisal.reason` |
 | Seller: đơn đã bán | [`GET /api/orders/selling`](api.md#get-apiordersselling) → [`POST /api/orders/:id/ship-to-warehouse`](api.md#post-apiordersidship-to-warehouse) → [`GET /api/orders/:id/tracking`](api.md#get-apiordersidtracking) | Báo gửi kho khi `stage == awaiting_seller_shipment` |
@@ -170,6 +170,29 @@ void leaveAuction(IO.Socket socket, String auctionId) {
 ```
 
 Dữ liệu chi tiết của từng sự kiện: [`socket.md`](socket.md).
+
+## 5b. Bấm thông báo mở đúng màn
+
+Mỗi thông báo (cả trong `GET /api/notifications` lẫn sự kiện `notification:new`) có trường `data`: id liên quan dạng chuỗi (`auctionId`, `orderId`, `listingId`, `disputeId`) hoặc `null`. Điều hướng theo khoá trong `data`, không theo `type` (cùng một `type` có thể đến từ nhiều tình huống). Bảng khoá theo từng loại: [`api.md` mục 15](api.md#trường-data--mở-đúng-màn-khi-bấm-thông-báo).
+
+```dart
+// role: 'bidder' | 'seller' lưu lúc đăng nhập. Các hàm open...Screen là của app.
+Future<void> onNotificationTap(Map<String, dynamic> n, String role) async {
+  await api.post('/api/notifications/${n['id']}/read');           // đánh dấu đã đọc
+  final data = (n['data'] as Map?)?.cast<String, dynamic>();
+  if (data == null) return;                                        // thông báo cũ / loại chưa có data
+  if (data['disputeId'] != null) return openMyDisputes(highlight: data['disputeId']);   // GET /api/disputes/mine
+  if (data['orderId'] != null) {
+    return role == 'seller'
+        ? openOrderTracking(data['orderId'])                       // GET /api/orders/:id/tracking
+        : openBuyerOrder(data['orderId']);                         // GET /api/orders/:id (+ /tracking)
+  }
+  if (data['listingId'] != null) return openMyListing(data['listingId']);              // GET /api/listings/mine
+  if (data['auctionId'] != null) return openAuctionDetail(data['auctionId']);          // GET /api/auctions/:id
+}
+```
+
+Hiện các thông báo do phần đấu giá tạo (`outbid`, `win`, `address_reminder`, `refund` hoàn cọc, `sold`, `warn` quá hạn thanh toán) còn `data: null`; với các loại này app tạm mở danh sách tương ứng (ví dụ `win`, `address_reminder` → danh sách đơn của tôi; `outbid` → phiên của tôi `status=joined`).
 
 ## 6. Những điểm cần lưu ý
 

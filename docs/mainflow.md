@@ -2,7 +2,7 @@
 
 > Cập nhật: 2026-10-12.
 
-Tài liệu này mô tả luồng nghiệp vụ từ lúc đăng ký đến lúc giải ngân, **dựa trên code backend và schema đang có** (migration 001–007). Mỗi bước có nhãn trạng thái triển khai:
+Tài liệu này mô tả luồng nghiệp vụ từ lúc đăng ký đến lúc giải ngân, **dựa trên code backend và schema đang có** (migration 001–008). Mỗi bước có nhãn trạng thái triển khai:
 
 - **[Đã có]** route đã đăng ký trong `src/routes/index.js`, có logic xử lý thật và đã chạy qua kiểm thử end-to-end (`npm test`, kết quả ở [`test-be2.md`](test-be2.md)).
 - **[Một phần]** mới làm được một phần.
@@ -184,7 +184,7 @@ Cờ đã `terminated` / `safe` không đổi nữa (`409`).
 
 - **Admin**: `GET /api/admin/dashboard`, `GET /api/admin/report/weekly` (7 ngày, từ dữ liệu thật), quản lý tài khoản ops (`GET/POST/PATCH /api/admin/ops-accounts`, mật khẩu bcrypt) và khoá / mở khoá Bidder, Seller (`GET/PATCH /api/admin/accounts`). Khoá tài khoản (cả hai loại): sau khi `UPDATE` đã lưu, `admin_service` gọi `disconnectAccount(id, { kind, reason: 'Tài khoản đã bị khoá' })` của BE1 — mọi socket đang mở nhận `account:disconnected` rồi bị ngắt và không kết nối lại được cho tới khi mở khoá; REST trả `403 ACCOUNT_SUSPENDED` ngay. Ngắt socket lỗi thì chỉ ghi log, API khoá vẫn trả `200`.
 - **Chatbot**: `POST /api/chat/messages`, `GET /api/chat/sessions/:id/messages`; ghi `chat_sessions`, `chat_messages`; trả lời soạn sẵn theo từ khoá.
-- **Thông báo**: `GET /api/notifications`, `POST /api/notifications/:id/read`.
+- **Thông báo**: `GET /api/notifications`, `POST /api/notifications/:id/read`. Mỗi thông báo có trường `data` (migration `008`, cột `notifications.data` JSONB) chứa id liên quan (`auctionId`, `orderId`, `listingId`, `disputeId`) để app bấm vào là mở đúng phiên / đơn / tin / tranh chấp; Socket.io `notification:new` gửi kèm cùng `data`. Mọi thông báo do BE2 tạo đã có `data`; các loại do BE1 tạo (`outbid`, `win`, `address_reminder`, `refund` hoàn cọc, `sold`, `warn` quá hạn thanh toán) hiện `data = null`, sẽ bổ sung ở lượt sau. Bảng đầy đủ: [`api.md` mục 15](api.md#trường-data--mở-đúng-màn-khi-bấm-thông-báo).
 
 ## 3. Sơ đồ
 
