@@ -41,6 +41,7 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 | `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_*`, tự dọn) |
 | `npm test` | Chạy cả `test:be1` và `test:be2` |
 | `npm run docs:check` | So route đăng ký trong `src/routes/` với `docs/api.md` (báo route thiếu / thừa). Chạy sau khi thêm hoặc sửa route |
+| `npm run demo:bidbot -- --auction <id>` | Giả lập người mua demo trả giá một phiên để demo giá nhảy real-time (xem bên dưới) |
 
 #### Chạy kiểm thử trên database dùng chung
 
@@ -50,7 +51,21 @@ Cả hai bộ test chạy trên Supabase dùng chung nên được viết để 
 - Test chỉ ghi/xoá các dòng đi ra từ những tài khoản có tiền tố đó. Cuối mỗi lần chạy (kể cả khi test lỗi) và đầu lần chạy kế tiếp, các dòng này được xoá sạch; dữ liệu seed và dữ liệu của đồng đội không bị sửa hay xoá.
 - Chạy được lúc đồng đội đang chạy server: scheduler của họ có thể đóng phiên test của bạn, test BE1 đã chờ DB về đúng trạng thái. Nếu vẫn lỗi lặt vặt thì chạy lại.
 - Nếu test bị ngắt giữa chừng (Ctrl+C), cứ chạy lại là dọn được phần dở. Kiểm tra còn sót không: `SELECT count(*) FROM accounts WHERE email LIKE 'test\_be1\_%'`.
-- Cần database đã chạy `npm run db:migrate` (test BE1 cần migration `006`).
+- Cần database đã chạy `npm run db:migrate` (test BE1 cần migration `006`, `007`).
+
+#### Giả lập người đấu giá khi demo (`demo:bidbot`)
+
+Cho 3 người mua demo phụ (`viet.tran@gmail.com`, `chau.le@outlook.com`, `hung.pham@gmail.com`, do `db:seed` tạo) lần lượt trả giá một phiên, để màn hình app (đăng nhập `minhanh@gmail.com`) thấy giá nhảy qua Socket.io:
+
+```bash
+npm run dev                                                   # terminal 1
+npm run demo:bidbot -- --auction 13 --interval 5 --max 10     # terminal 2; Ctrl+C để dừng
+```
+
+- `--interval` giây giữa hai lượt (mặc định 5), `--max` số lượt tối đa (mặc định 10), `--base` địa chỉ server (mặc định `http://localhost:5000`). Id phiên lấy từ `GET /api/auctions?status=live`.
+- Đi qua API thật (đăng nhập, đặt cọc nếu chưa cọc, `POST /api/bids` với `increment` = bước giá), in ra từng bước. Dừng khi đủ `--max` lượt, phiên hết giờ, không bot nào đủ tiền, hoặc Ctrl+C.
+- Chỉ trả giá khi số dư còn đủ trả đơn nếu thắng (giá + phí 5% + vận chuyển − cọc). Từ chối chạy khi `NODE_ENV=production`.
+- Lưu ý dữ liệu dùng chung: lượt giá và tiền cọc của bot là thật trên phiên demo. Bot thắng thì có đơn chờ thanh toán; quá 24 giờ không trả thì mất cọc như người thật.
 
 ## Cấu trúc thư mục
 

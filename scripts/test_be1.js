@@ -638,6 +638,74 @@ async function main() {
     }
   }
 
+  console.log('Script demo:bidbot (giả lập người đấu giá qua API thật)');
+  {
+    const bcrypt = require('bcrypt');
+    const { runBidbot } = require('./demo_bidbot');
+    const { server } = require('../src/app');
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const PW = `${PREFIX}pw`;
+    const hash = await bcrypt.hash(PW, 4);
+    // Tài khoản test đăng nhập được (mật khẩu thật) — bot không đụng tài khoản demo thật trong test.
+    const mkLoginBidder = async (name, money) => {
+      const id = await mkAccount('bidder', name);
+      await pool.query('UPDATE accounts SET password_hash = $2 WHERE id = $1', [id, hash]);
+      if (money) await tx((c) => walletService.topUp(c, { bidderId: id, amount: money }));
+      const email = (await pool.query('SELECT email FROM accounts WHERE id = $1', [id])).rows[0].email;
+      return { id, email, password: PW };
+    };
+    const logs = [];
+    const log = (m) => logs.push(m);
+    try {
+      const b1 = await mkLoginBidder('BotOne', 5_000_000);
+      const b2 = await mkLoginBidder('BotTwo', 5_000_000);
+      const poor = await mkLoginBidder('BotPoor', 150_000); // đủ cọc 100.000 nhưng không đủ trả đơn nếu thắng
+
+      await step('bot đặt cọc rồi trả giá luân phiên qua API, dừng khi đủ --max lượt', async () => {
+        const { auctionId: ab } = await mkAuction(seller); // 1.000.000đ, bước 50.000
+        const r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 4, log });
+        assert.deepStrictEqual(r, { bids: 4, reason: 'đủ 4 lượt' });
+        const rows = (await pool.query('SELECT bidder_id, amount::int AS a FROM bids WHERE auction_id = $1 ORDER BY id', [ab])).rows;
+        assert.deepStrictEqual(rows.map((x) => x.a), [1_050_000, 1_100_000, 1_150_000, 1_200_000]);
+        assert.ok(rows.every((x, i) => i === 0 || String(x.bidder_id) !== String(rows[i - 1].bidder_id)), 'hai bot xen kẽ');
+        const deps = (await pool.query('SELECT count(*)::int AS n FROM auction_deposits WHERE auction_id = $1', [ab])).rows[0].n;
+        assert.strictEqual(deps, 2); // mỗi bot cọc một lần
+      });
+      await step('bot không đủ tiền trả đơn nếu thắng thì không cọc, không trả giá; không còn bot hợp lệ thì dừng', async () => {
+        const { auctionId: ab } = await mkAuction(seller);
+        const before = await wallet(poor.id);
+        const r = await runBidbot({ base, auctionId: ab, accounts: [poor], intervalMs: 50, max: 3, log });
+        assert.strictEqual(r.bids, 0);
+        assert.ok(r.reason.startsWith('không bot nào đủ điều kiện'), r.reason);
+        assert.deepStrictEqual(await wallet(poor.id), before, 'ví không đổi');
+      });
+      await step('bot dừng khi phiên hết giờ và khi nhận tín hiệu dừng (Ctrl+C)', async () => {
+        const { auctionId: ab } = await mkAuction(seller);
+        await expire(ab);
+        assert.deepStrictEqual(await runBidbot({ base, auctionId: ab, accounts: [b1], intervalMs: 50, max: 3, log }),
+          { bids: 0, reason: 'phiên đã kết thúc' });
+        const { auctionId: ab2 } = await mkAuction(seller);
+        const r = await runBidbot({ base, auctionId: ab2, accounts: [b1, b2], intervalMs: 50, max: 10, log, stopSignal: { stop: true } });
+        assert.deepStrictEqual(r, { bids: 0, reason: 'dừng theo yêu cầu (Ctrl+C)' });
+      });
+      await step('script từ chối chạy khi NODE_ENV=production, báo lỗi khi thiếu --auction', async () => {
+        const { spawnSync } = require('child_process');
+        const run = (args, extraEnv) => spawnSync(process.execPath, ['scripts/demo_bidbot.js', ...args], {
+          cwd: require('path').join(__dirname, '..'), env: { ...process.env, ...extraEnv }, encoding: 'utf8',
+        });
+        const prod = run(['--auction', '1'], { NODE_ENV: 'production' });
+        assert.strictEqual(prod.status, 1);
+        assert.ok(prod.stderr.includes('NODE_ENV=production'), prod.stderr);
+        const noArg = run([], { NODE_ENV: 'development' });
+        assert.strictEqual(noArg.status, 1);
+        assert.ok(noArg.stderr.includes('--auction'), noArg.stderr);
+      });
+    } finally {
+      await new Promise((res) => server.close(res));
+    }
+  }
+
   console.log('Socket.io: tạm dừng / tiếp tục và ngắt tài khoản bị khoá');
   {
     const jwt = require('jsonwebtoken');
