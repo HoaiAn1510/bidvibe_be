@@ -13,7 +13,12 @@ router.get('/', async (req, res) => {
 });
 
 router.get('/transactions', async (req, res) => {
-  ok(res, { transactions: await walletModel.listTransactions(req.user.id, pageParams(req.query)) });
+  const page = pageParams(req.query);
+  const [transactions, total] = await Promise.all([
+    walletModel.listTransactions(req.user.id, page),
+    walletModel.countTransactions(req.user.id),
+  ]);
+  ok(res, { transactions, total, ...page });
 });
 
 // Nạp tiền (giả lập cổng thanh toán: luôn thành công). method: 'qr' | 'card'

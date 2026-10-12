@@ -548,6 +548,96 @@ async function main() {
     });
   }
 
+  console.log('API cho các màn hình app (trường thêm mới)');
+  {
+    const jwt = require('jsonwebtoken');
+    const env = require('../src/config/env');
+    const addressService = require('../src/services/address_service');
+    const fulfilment = require('../src/services/fulfilment_service');
+    const { server } = require('../src/app');
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    const base = `http://127.0.0.1:${server.address().port}/api`;
+    const tok = (id, role) => jwt.sign({ sub: String(id), kind: 'account', role }, env.jwtSecret, { expiresIn: '5m' });
+    const get = async (path, token) => {
+      const r = await fetch(base + path, { headers: { Authorization: `Bearer ${token}` } });
+      const body = await r.json();
+      assert.strictEqual(r.status, 200, JSON.stringify(body.error));
+      return body.data;
+    };
+    try {
+      const G = await mkAccount('bidder', 'Gil'); // 50.000đ: không đủ cọc 100.000đ
+      await tx((c) => walletService.topUp(c, { bidderId: G, amount: 50_000 }));
+      const H = await mkAccount('bidder', 'Hal');
+      await tx((c) => walletService.topUp(c, { bidderId: H, amount: 5_000_000 }));
+      const { listingId: lp, auctionId: ap } = await mkAuction(seller);
+      const urls = ['https://example.com/test_be1_a.jpg', 'https://example.com/test_be1_b.jpg'];
+      for (let i = 0; i < 2; i += 1) {
+        await pool.query('INSERT INTO listing_photos (listing_id, url, order_index) VALUES ($1, $2, $3)', [lp, urls[i], i]);
+      }
+
+      await step('GET /api/auctions: total, limit, offset, minNextBid, seller.name, depositAffordable', async () => {
+        const q = encodeURIComponent(PREFIX);
+        const d = await get(`/auctions?q=${q}&limit=2&offset=0&sort=newest`, tok(H, 'bidder'));
+        const n = (await pool.query(
+          `SELECT count(*)::int AS n FROM auctions a JOIN listings l ON l.id = a.listing_id WHERE l.title ILIKE $1`, [`%${PREFIX}%`])).rows[0].n;
+        assert.deepStrictEqual([d.total, d.limit, d.offset], [n, 2, 0]);
+        assert.ok(n > 2 && d.auctions.length === 2, 'trang đầu chỉ 2 phần tử, total là tổng thật');
+        const page2 = await get(`/auctions?q=${q}&limit=2&offset=2&sort=newest`, tok(H, 'bidder'));
+        assert.strictEqual(page2.total, n);
+        assert.ok(!page2.auctions.some((x) => d.auctions.some((y) => y.id === x.id)), 'hai trang không trùng phần tử');
+
+        const it = d.auctions.find((x) => x.id === String(ap));
+        assert.ok(it, 'phiên mới nhất phải ở trang đầu (sort=newest)');
+        assert.strictEqual(it.minNextBid, it.currentPrice + it.bidStep);
+        assert.strictEqual(it.coverUrl, urls[0]);
+        assert.deepStrictEqual([it.seller.storeName, it.seller.name], ['Test shop', 'Test shop']);
+        assert.strictEqual(it.depositAffordable, true);
+        for (const k of ['currentPrice', 'bidStep', 'bidCount', 'endsAt', 'remainingSeconds', 'status']) assert.ok(k in it, k);
+
+        const g = (await get(`/auctions?q=${q}&limit=50`, tok(G, 'bidder'))).auctions.find((x) => x.id === String(ap));
+        assert.strictEqual(g.depositAffordable, false);
+        const s = (await get(`/auctions?q=${q}&limit=50`, tok(seller, 'seller'))).auctions.find((x) => x.id === String(ap));
+        assert.strictEqual(s.depositAffordable, null); // không phải bidder
+      });
+      await step('GET /api/auctions/:id: photos đủ, ảnh bìa đứng đầu, giá tối thiểu tiếp theo', async () => {
+        await engine.joinAuction({ bidderId: H, auctionId: ap });
+        await engine.placeBid({ bidderId: H, auctionId: ap, increment: 50_000 });
+        const d = await get(`/auctions/${ap}`, tok(H, 'bidder'));
+        assert.deepStrictEqual(d.photos.map((p) => [p.url, p.orderIndex]), [[urls[0], 0], [urls[1], 1]]);
+        assert.strictEqual(d.coverUrl, d.photos[0].url);
+        assert.deepStrictEqual([d.joined, d.leading, d.myDeposit, d.minNextBid], [true, true, 100_000, 1_100_000]);
+        assert.deepStrictEqual([d.bids[0].who, d.bids[0].me], ['T***', true]); // tên đã che: "test_be1_Hal" -> "T***"
+      });
+      await step('GET /api/wallet/transactions: kindLabel tiếng Việt, total, phân trang', async () => {
+        const d = await get('/wallet/transactions?limit=1&offset=0', tok(H, 'bidder'));
+        const n = (await pool.query('SELECT count(*)::int AS n FROM wallet_transactions WHERE bidder_id = $1', [H])).rows[0].n;
+        assert.deepStrictEqual([d.total, d.limit, d.offset, d.transactions.length], [n, 1, 0, 1]);
+        assert.deepStrictEqual([d.transactions[0].kind, d.transactions[0].kindLabel], ['deposit_hold', 'Giữ cọc tham gia phiên']);
+        const all = await get('/wallet/transactions', tok(H, 'bidder'));
+        assert.ok(all.transactions.every((t) => typeof t.kindLabel === 'string' && t.kindLabel !== t.kind));
+      });
+      await step('GET /api/orders/mine và /:id: người bán, ảnh bìa, địa chỉ giao hàng', async () => {
+        await expire(ap);
+        await closedAuction(ap);
+        let o = (await get('/orders/mine', tok(H, 'bidder'))).orders.find((x) => x.auctionId === String(ap));
+        assert.ok(o);
+        assert.deepStrictEqual([o.seller.name, o.coverUrl, o.shippingAddress], ['Test shop', urls[0], null]);
+        assert.ok(o.paymentDeadline && o.amountToPay > 0 && o.paymentStatus === 'awaiting_payment');
+        const addr = await addressService.create(H, {
+          recipientName: `${PREFIX}Hal`, phone: '0901234567', addressLine: '2 Đường Test', ward: 'P.1', district: 'Q.1', city: 'TP.HCM',
+        });
+        await fulfilment.setShippingAddress(H, o.id, { addressId: addr.id });
+        o = await get(`/orders/${o.id}`, tok(H, 'bidder'));
+        assert.deepStrictEqual(o.shippingAddress, {
+          id: addr.id, recipientName: `${PREFIX}Hal`, phone: '0901234567', addressLine: '2 Đường Test',
+          ward: 'P.1', district: 'Q.1', city: 'TP.HCM',
+        });
+      });
+    } finally {
+      await new Promise((res) => server.close(res));
+    }
+  }
+
   console.log('Socket.io: tạm dừng / tiếp tục và ngắt tài khoản bị khoá');
   {
     const jwt = require('jsonwebtoken');

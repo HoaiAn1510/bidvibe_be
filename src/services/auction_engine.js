@@ -95,11 +95,18 @@ async function listAuctions(filters) {
   return auctionModel.list(filters);
 }
 
+async function countAuctions(filters) {
+  return auctionModel.count(filters);
+}
+
 async function getAuction(auctionId, viewerId) {
   const auction = await auctionModel.findById(pool, auctionId, viewerId);
   if (!auction) throw new AppError('Không tìm thấy phiên đấu giá', 404, 'NOT_FOUND');
-  const bids = await bidModel.listByAuction(auctionId, { viewerId, limit: 20 });
-  return { ...auction, bids };
+  const [bids, photos] = await Promise.all([
+    bidModel.listByAuction(auctionId, { viewerId, limit: 20 }),
+    auctionModel.listPhotos(pool, auction.listingId),
+  ]);
+  return { ...auction, photos, bids };
 }
 
 // ---------- Tham gia (đặt cọc) ----------
@@ -374,17 +381,34 @@ function orderView(r) {
     paymentDeadline: r.payment_deadline,
     payoutStatus: r.payout_status,
     createdAt: r.created_at,
+    coverUrl: r.cover_url,
+    seller: { id: r.seller_id, storeName: r.store_name, name: r.store_name || r.seller_full_name },
+    // Địa chỉ giao hàng đã chọn (POST /api/orders/:id/shipping-address của BE2), chưa chọn thì null
+    shippingAddress: r.addr_id == null ? null : {
+      id: r.addr_id,
+      recipientName: r.recipient_name,
+      phone: r.phone,
+      addressLine: r.address_line,
+      ward: r.ward,
+      district: r.district,
+      city: r.city,
+    },
   };
 }
 
 const ORDER_SELECT = `
   SELECT o.id, o.auction_id, o.bidder_id, o.final_price, o.payment_status, o.payment_deadline,
-         o.payout_status, o.created_at, l.title,
+         o.payout_status, o.created_at, l.title, l.seller_id, s.store_name, sa.full_name AS seller_full_name,
          (SELECT d.amount FROM auction_deposits d
-          WHERE d.auction_id = o.auction_id AND d.bidder_id = o.bidder_id) AS deposit_amount
+          WHERE d.auction_id = o.auction_id AND d.bidder_id = o.bidder_id) AS deposit_amount,
+         (SELECT p.url FROM listing_photos p WHERE p.listing_id = l.id ORDER BY p.order_index, p.id LIMIT 1) AS cover_url,
+         ad.id AS addr_id, ad.recipient_name, ad.phone, ad.address_line, ad.ward, ad.district, ad.city
   FROM orders o
   JOIN auctions a ON a.id = o.auction_id
   JOIN listings l ON l.id = a.listing_id
+  JOIN sellers s ON s.account_id = l.seller_id
+  JOIN accounts sa ON sa.id = l.seller_id
+  LEFT JOIN addresses ad ON ad.id = o.shipping_address_id
 `;
 
 async function listOrdersForBidder(bidderId) {
@@ -506,6 +530,7 @@ module.exports = {
   inTransaction,
   createAuctionForListing,
   listAuctions,
+  countAuctions,
   getAuction,
   joinAuction,
   placeBid,

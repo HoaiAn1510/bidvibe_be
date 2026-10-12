@@ -14,15 +14,13 @@ const viewerOf = (req) => (req.user.kind === 'account' ? req.user.id : null);
 // GET /api/auctions?category=shoes&status=live|ended|joined&q=&sort=ending|newest|price_asc|price_desc|popular
 router.get('/', async (req, res) => {
   const { category, status, q, sort } = req.query;
-  const auctions = await engine.listAuctions({
-    viewerId: viewerOf(req),
-    category,
-    status,
-    q,
-    sort,
-    ...pageParams(req.query),
-  });
-  ok(res, { auctions });
+  const page = pageParams(req.query);
+  const filters = { viewerId: viewerOf(req), category, status, q };
+  const [auctions, total] = await Promise.all([
+    engine.listAuctions({ ...filters, sort, ...page }),
+    engine.countAuctions(filters),
+  ]);
+  ok(res, { auctions, total, ...page });
 });
 
 router.get('/:id', async (req, res) => {
