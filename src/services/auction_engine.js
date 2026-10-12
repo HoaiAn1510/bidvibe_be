@@ -525,7 +525,6 @@ async function processPaymentTimeouts() {
 }
 
 module.exports = {
-  DEFAULT_BID_STEP,
   depositFor,
   inTransaction,
   createAuctionForListing,
