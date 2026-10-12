@@ -7,6 +7,7 @@ const pool = new Pool({
   ssl: env.dbSsl ? { rejectUnauthorized: false } : false,
   // Mặc định pg chờ kết nối vô hạn: mạng rớt thì request treo mãi. 20 giây đủ rộng cho mạng chập chờn.
   connectionTimeoutMillis: 20_000,
+  max: env.dbPoolMax,
 });
 
 // Client đang rảnh trong pool bị rớt (ECONNRESET, lỗi TLS, Supabase đóng kết nối) thì pg phát 'error'
