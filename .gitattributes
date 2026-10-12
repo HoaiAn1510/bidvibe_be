@@ -1,0 +1,11 @@
+# Lưu mọi file văn bản với LF trong repo và khi checkout (Windows lẫn macOS/Linux).
+* text=auto eol=lf
+
+# Ảnh và file nhị phân: không đổi ký tự xuống dòng, không diff.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.ico binary
+*.pdf binary
