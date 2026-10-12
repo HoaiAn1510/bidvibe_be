@@ -730,7 +730,72 @@ async function main() {
   }
   record('Xoá các ảnh test vừa tải lên Storage', realStorage ? 'đã xoá đúng các object của lần chạy' : 'Storage giả lập: đã xoá');
 
-  begin('13. Kiểm tra tính nhất quán của ví');
+  // ------------------------------------------------------------------
+  begin('13. Hồ sơ, đổi mật khẩu, đọc hết thông báo, xoá ảnh tin đăng');
+  const meSeller = await api('GET /me của Seller có storeName', 'GET', '/api/me', { token: T.seller, note: (j) => `storeName=${j.data.storeName}` });
+  assert.strictEqual(meSeller.storeName, named('Shop'));
+  const meB1 = await api('GET /me của Bidder không có storeName', 'GET', '/api/me', { token: T.b1, note: (j) => `storeName có: ${'storeName' in j.data}` });
+  assert.ok(!('storeName' in meB1));
+  const edited2 = await api('Seller sửa họ tên, số điện thoại, tên gian hàng', 'PATCH', '/api/me', {
+    token: T.seller, body: { fullName: named('Người bán (đã sửa)'), phone: '0903 222 333', shopName: named('Shop mới') },
+    note: (j) => `fullName=${j.data.fullName}, phone=${j.data.phone}, storeName=${j.data.storeName}`,
+  });
+  assert.deepStrictEqual([edited2.fullName, edited2.phone, edited2.storeName], [named('Người bán (đã sửa)'), '0903 222 333', named('Shop mới')]);
+  assert.deepStrictEqual(Object.keys(edited2).sort(), Object.keys(meSeller).sort(), 'PATCH /me trả cùng dạng GET /me');
+  const withAvatar = await api('Bidder đặt ảnh đại diện bằng URL vừa tải', 'PATCH', '/api/me',
+    { token: T.b1, body: { avatarUrl: T.avatarUrl }, note: (j) => `avatarUrl ${j.data.avatarUrl ? 'đã đặt' : 'trống'}` });
+  assert.strictEqual(withAvatar.avatarUrl, T.avatarUrl);
+  const noAvatar = await api('Bidder xoá ảnh đại diện (null)', 'PATCH', '/api/me', { token: T.b1, body: { avatarUrl: null } });
+  assert.strictEqual(noAvatar.avatarUrl, null);
+  await api('Số điện thoại sai', 'PATCH', '/api/me', { token: T.b1, body: { phone: 'abc' }, expect: 400, code: 'VALIDATION_ERROR' });
+  await api('avatarUrl không phải URL', 'PATCH', '/api/me', { token: T.b1, body: { avatarUrl: 'khong-phai-url' }, expect: 400, code: 'VALIDATION_ERROR' });
+  await api('Bidder gửi shopName', 'PATCH', '/api/me', { token: T.b1, body: { shopName: 'X' }, expect: 400, code: 'VALIDATION_ERROR' });
+  await api('Không có trường nào', 'PATCH', '/api/me', { token: T.b1, body: {}, expect: 400, code: 'VALIDATION_ERROR' });
+  await api('Tài khoản nội bộ sửa hồ sơ', 'PATCH', '/api/me', { token: T.admin, body: { fullName: 'X' }, expect: 403 });
+
+  await api('Đổi mật khẩu: sai mật khẩu hiện tại', 'POST', '/api/me/password',
+    { token: T.seller, body: { currentPassword: 'sai-mat-khau', newPassword: 'matkhaumoi1' }, expect: 400, code: 'WRONG_PASSWORD' });
+  await api('Đổi mật khẩu: mật khẩu mới quá ngắn', 'POST', '/api/me/password',
+    { token: T.seller, body: { currentPassword: PASSWORD, newPassword: '123' }, expect: 400, code: 'VALIDATION_ERROR' });
+  await api('Seller đổi mật khẩu', 'POST', '/api/me/password', { token: T.seller, body: { currentPassword: PASSWORD, newPassword: 'matkhaumoi1' } });
+  await api('Đăng nhập bằng mật khẩu cũ', 'POST', '/api/auth/login', { body: { email: email('seller'), password: PASSWORD }, expect: 401 });
+  await api('Đăng nhập bằng mật khẩu mới', 'POST', '/api/auth/login', { body: { email: email('seller'), password: 'matkhaumoi1' } });
+  await api('Tài khoản nội bộ đổi mật khẩu', 'POST', '/api/me/password', { token: T.ap, body: { currentPassword: PASSWORD, newPassword: 'matkhaumoi1' } });
+  await api('Thẩm định đăng nhập bằng mật khẩu mới', 'POST', '/api/auth/ops/login', { body: { email: email('appraiser'), password: 'matkhaumoi1' } });
+
+  const unread = await q1('SELECT count(*)::int AS n FROM notifications n JOIN accounts a ON a.id = n.account_id WHERE a.email = $1 AND NOT n.is_read', [email('b1')]);
+  assert.ok(unread.n > 0, 'Bidder 1 phải có thông báo chưa đọc');
+  const ra = await api('Đánh dấu đã đọc tất cả', 'POST', '/api/notifications/read-all', { token: T.b1, note: (j) => `updated=${j.data.updated}` });
+  assert.strictEqual(ra.updated, unread.n);
+  const allRead = await api('Mọi thông báo đã đọc', 'GET', '/api/notifications?limit=100',
+    { token: T.b1, note: (j) => `${j.data.notifications.filter((n) => !n.isRead).length} chưa đọc` });
+  assert.ok(allRead.notifications.every((n) => n.isRead));
+  const ra2 = await api('Gọi lại khi không còn thông báo chưa đọc', 'POST', '/api/notifications/read-all', { token: T.b1, note: (j) => `updated=${j.data.updated}` });
+  assert.strictEqual(ra2.updated, 0);
+  await api('Tài khoản nội bộ gọi read-all', 'POST', '/api/notifications/read-all', { token: T.admin, expect: 403 });
+
+  const L2 = await api('Tạo tin nháp để thử xoá ảnh', 'POST', '/api/listings',
+    { token: T.seller, expect: 201, body: { title: named('Đèn bàn (xoá ảnh)'), categoryCode: 'antique', startingPrice: 1_000_000, durationHours: 24 } });
+  const withPhotos = await api('Thêm 3 ảnh', 'POST', `/api/listings/${L2.id}/photos`, {
+    token: T.seller, expect: 201, body: { urls: [...T.uploaded, 'https://picsum.photos/seed/be2d/800/600'] },
+    note: (j) => `photos[].id: ${j.data.photos.map((p) => `${JSON.stringify(p.id)}`).join(', ')}`,
+  });
+  assert.ok(withPhotos.photos.every((p) => typeof p.id === 'string'), 'photos[].id phải là chuỗi');
+  const [p1, p2, p3] = withPhotos.photos;
+  const left = await api('Xoá ảnh thứ hai', 'DELETE', `/api/listings/${L2.id}/photos/${p2.id}`,
+    { token: T.seller, note: (j) => `còn ${j.data.photos.map((p) => p.id).join(', ')}` });
+  assert.deepStrictEqual(left.photos.map((p) => p.id), [p1.id, p3.id]);
+  await api('Xoá lại ảnh đã xoá', 'DELETE', `/api/listings/${L2.id}/photos/${p2.id}`, { token: T.seller, expect: 404 });
+  const otherPhoto = await q1('SELECT id FROM listing_photos WHERE listing_id = $1 LIMIT 1', [L1.id]);
+  await api('Xoá ảnh của tin khác qua đường dẫn tin này', 'DELETE', `/api/listings/${L2.id}/photos/${otherPhoto.id}`, { token: T.seller, expect: 404 });
+  await api('Bidder xoá ảnh tin đăng', 'DELETE', `/api/listings/${L2.id}/photos/${p1.id}`, { token: T.b1, expect: 403 });
+  await api('photoId không hợp lệ', 'DELETE', `/api/listings/${L2.id}/photos/abc`, { token: T.seller, expect: 400 });
+  await api('Gửi thẩm định', 'POST', `/api/listings/${L2.id}/submit`, { token: T.seller });
+  await api('Xoá ảnh khi tin đang chờ thẩm định', 'DELETE', `/api/listings/${L2.id}/photos/${p1.id}`,
+    { token: T.seller, expect: 409, code: 'INVALID_STATE' });
+
+  // ------------------------------------------------------------------
+  begin('14. Kiểm tra tính nhất quán của ví');
   const ledger = await pool.query(
     `SELECT b.account_id, t.balance_after = b.wallet_balance AS ok FROM bidders b JOIN accounts a ON a.id = b.account_id
      JOIN LATERAL (SELECT balance_after FROM wallet_transactions w WHERE w.bidder_id = b.account_id ORDER BY id DESC LIMIT 1) t ON true
@@ -742,7 +807,7 @@ async function main() {
   record('Số dư ví khớp balance_after của giao dịch cuối', 'cả hai Bidder test');
 
   // ------------------------------------------------------------------
-  begin('14. Kết nối database bị rớt không làm sập tiến trình');
+  begin('15. Kết nối database bị rớt không làm sập tiến trình');
   assert.ok(pool.listenerCount('error') > 0, 'pool phải có listener cho sự kiện error');
   let exited = false;
   const onExit = () => { exited = true; };

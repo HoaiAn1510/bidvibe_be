@@ -3,6 +3,7 @@ const { AppError } = require('../middleware/errorHandler');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MIN_PASSWORD = 6;
+const PHONE_RE = /^\+?[0-9\s.()-]{8,20}$/;
 
 const invalid = (message) => new AppError(message, 400, 'VALIDATION_ERROR');
 
@@ -55,4 +56,15 @@ function url(value, label = 'URL ảnh') {
   return v;
 }
 
-module.exports = { invalid, text, email, password, oneOf, int, url };
+// Số điện thoại Việt Nam / quốc tế: 9–15 chữ số, cho phép +, khoảng trắng, dấu chấm, gạch, ngoặc.
+function phone(value, { required = true } = {}) {
+  const v = text(value, 'Số điện thoại', { max: 20, required });
+  if (v === null) return null;
+  const digits = v.replace(/\D/g, '');
+  if (!PHONE_RE.test(v) || digits.length < 9 || digits.length > 15) {
+    throw invalid('Số điện thoại không hợp lệ');
+  }
+  return v;
+}
+
+module.exports = { invalid, text, email, password, oneOf, int, url, phone };

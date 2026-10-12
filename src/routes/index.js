@@ -20,6 +20,15 @@ router.get('/me', requireAuth, async (req, res, next) => {
   }
 });
 
+// BE2 thêm: sửa hồ sơ, đổi mật khẩu (không đổi hành vi GET /me ở trên, ngoài storeName của Seller).
+router.patch('/me', requireAuth, async (req, res) => {
+  res.json({ success: true, data: await authService.updateMe(req.user, req.body || {}), error: null });
+});
+
+router.post('/me/password', requireAuth, async (req, res) => {
+  res.json({ success: true, data: await authService.changePassword(req.user, req.body || {}), error: null });
+});
+
 router.use('/notifications', require('./notification.routes'));
 router.use('/uploads', require('./upload.routes'));
 

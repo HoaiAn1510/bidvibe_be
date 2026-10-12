@@ -96,6 +96,16 @@ async function markRead(user, notificationId) {
   return { id: rows[0].id, isRead: rows[0].is_read };
 }
 
+// Đánh dấu mọi thông báo chưa đọc của tài khoản là đã đọc; trả số dòng đã đổi.
+async function markAllRead(user) {
+  assertAccountUser(user);
+  const { rowCount } = await pool.query(
+    'UPDATE notifications SET is_read = true WHERE account_id = $1 AND is_read = false',
+    [user.id],
+  );
+  return { updated: rowCount };
+}
+
 module.exports = {
-  createNotification, emitNotification, notify, listForAccount, markRead,
+  createNotification, emitNotification, notify, listForAccount, markRead, markAllRead,
 };
