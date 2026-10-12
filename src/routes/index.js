@@ -21,6 +21,7 @@ router.get('/me', requireAuth, async (req, res, next) => {
 });
 
 router.use('/notifications', require('./notification.routes'));
+router.use('/uploads', require('./upload.routes'));
 
 // ---- BE2: Marketplace Operations ----
 router.get('/categories', requireAuth, async (req, res) => {
