@@ -24,6 +24,7 @@ const bcrypt = require('bcrypt');
 const { pool } = require('../src/config/db');
 const walletService = require('../src/services/wallet_service');
 const { depositFor, inTransaction } = require('../src/services/auction_engine');
+const { ensureBotAccounts } = require('./demo_bots');
 
 const PASSWORD = '123456';
 const H = 3600_000;
@@ -137,6 +138,9 @@ async function main() {
       if (created) await walletService.topUp(client, { bidderId: id, amount: 20_000_000 });
       bidders.push(id);
     }
+    // Tài khoản riêng cho bot đấu giá demo (bot1..3@bidvibe.demo), xem scripts/demo_bots.js
+    const bots = await ensureBotAccounts(client);
+    if (bots) console.log(`  + ${bots} tài khoản bot đấu giá`);
     const sellers = [];
     for (const [name, email, shop, rating] of SELLERS) {
       sellers.push((await ensureAccount(client, [name, email, null], 'seller', { shop, rating })).id);

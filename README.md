@@ -41,31 +41,55 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 | `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_*`, tự dọn) |
 | `npm test` | Chạy cả `test:be1` và `test:be2` |
 | `npm run docs:check` | So route đăng ký trong `src/routes/` với `docs/api.md` (báo route thiếu / thừa). Chạy sau khi thêm hoặc sửa route |
-| `npm run demo:bidbot -- --auction <id>` | Giả lập người mua demo trả giá một phiên để demo giá nhảy real-time (xem bên dưới) |
+| `npm run db:seed:live [-- --extend]` | Bảo đảm 9 phiên demo đang diễn ra trước buổi demo (xem bên dưới) |
+| `npm run demo:bidbot -- --auction <id>` | 3 tài khoản bot trả giá một phiên để demo giá nhảy real-time (xem bên dưới) |
 
 #### Chạy kiểm thử trên database dùng chung
 
 Cả hai bộ test chạy trên Supabase dùng chung nên được viết để **không đụng dữ liệu thật**:
 
-- Mọi dữ liệu test có tiền tố riêng: `test_be1_*` (BE1: email `test_be1_<tên>_<số>@be1test.local`, tin đăng `test_be1_item`) và `test_be2_*` (BE2).
-- Test chỉ ghi/xoá các dòng đi ra từ những tài khoản có tiền tố đó. Cuối mỗi lần chạy (kể cả khi test lỗi) và đầu lần chạy kế tiếp, các dòng này được xoá sạch; dữ liệu seed và dữ liệu của đồng đội không bị sửa hay xoá.
+- Mọi dữ liệu test có tiền tố riêng: `test_be1_*` (BE1: email `test_be1_<mã lần chạy>_<tên>_<số>@be1test.local`, tin đăng `test_be1_<mã lần chạy>_item`) và `test_be2_*` (BE2).
+- Test chỉ ghi/xoá các dòng đi ra từ những tài khoản có tiền tố đó; dữ liệu seed và dữ liệu của đồng đội không bị sửa hay xoá. Test BE1: cuối mỗi lần chạy (kể cả khi lỗi) chỉ dọn dữ liệu của **chính lần chạy đó** (theo mã lần chạy), đầu lần chạy chỉ dọn dữ liệu `test_be1_` bỏ dở từ hơn 30 phút trước — nên hai người chạy `test:be1` cùng lúc không xoá dữ liệu của nhau.
 - Chạy được lúc đồng đội đang chạy server: scheduler của họ có thể đóng phiên test của bạn, test BE1 đã chờ DB về đúng trạng thái. Nếu vẫn lỗi lặt vặt thì chạy lại.
-- Nếu test bị ngắt giữa chừng (Ctrl+C), cứ chạy lại là dọn được phần dở. Kiểm tra còn sót không: `SELECT count(*) FROM accounts WHERE email LIKE 'test\_be1\_%'`.
+- Nếu test bị ngắt giữa chừng (Ctrl+C), phần dở được dọn ở lần chạy đầu tiên sau 30 phút. Kiểm tra còn sót không: `SELECT count(*) FROM accounts WHERE email LIKE 'test\_be1\_%'`.
 - Cần database đã chạy `npm run db:migrate` (test BE1 cần migration `006`, `007`).
+
+#### Làm mới dữ liệu demo trước buổi demo (`db:seed:live`)
+
+```bash
+npm run db:seed                      # lần đầu: tài khoản demo, Seller, Thẩm định viên, 3 bot
+npm run db:seed:live                 # bảo đảm 9 phiên demo đang diễn ra (tạo bù phiên thiếu)
+npm run db:seed:live -- --extend     # ... và đẩy giờ kết thúc các phiên demo đang chạy ra đủ thời lượng
+```
+
+- Bộ mẫu 9 phiên (`scripts/seed_live.js`): đủ 3 danh mục, giá khởi điểm và bước giá khác nhau, kết thúc sau ~3 phút (thử chống chốt phút chót), 2 / 4 / 6 / 10 / 20 giờ, 28 / 36 / 48 giờ. Mỗi tin 2 ảnh (Wikimedia Commons), người bán là Seller demo.
+- Phiên đi đúng đường như phiên thật: tin chờ thẩm định → Thẩm định viên demo duyệt → `createAuctionForListing`.
+- Chạy lại nhiều lần không tạo trùng: mỗi mẫu tối đa một phiên đang chạy, chỉ tạo bù mẫu đang thiếu (ví dụ phiên ~3 phút đã hết giờ). Không sửa / xoá phiên đã kết thúc, đơn, cọc hay giao dịch. Từ chối chạy khi `NODE_ENV=production`.
 
 #### Giả lập người đấu giá khi demo (`demo:bidbot`)
 
-Cho 3 người mua demo phụ (`viet.tran@gmail.com`, `chau.le@outlook.com`, `hung.pham@gmail.com`, do `db:seed` tạo) lần lượt trả giá một phiên, để màn hình app (đăng nhập `minhanh@gmail.com`) thấy giá nhảy qua Socket.io:
+Cho 3 tài khoản **bot riêng** (`bot1@bidvibe.demo`, `bot2@bidvibe.demo`, `bot3@bidvibe.demo`, mật khẩu `123456`, ví nạp sẵn 50.000.000đ, tạo bởi `db:seed` / `db:seed:live`) lần lượt trả giá một phiên, để màn hình app thấy giá nhảy qua Socket.io:
 
 ```bash
-npm run dev                                                   # terminal 1
-npm run demo:bidbot -- --auction 13 --interval 5 --max 10     # terminal 2; Ctrl+C để dừng
+npm run dev                                                            # terminal 1
+npm run demo:bidbot -- --auction 871 --interval 5 --max 10             # terminal 2; Ctrl+C để dừng
+npm run demo:bidbot -- --auction 871 --only-outbid --stop-before 120   # chỉ vượt giá khi người khác dẫn đầu
 ```
 
-- `--interval` giây giữa hai lượt (mặc định 5), `--max` số lượt tối đa (mặc định 10), `--base` địa chỉ server (mặc định `http://localhost:5000`). Id phiên lấy từ `GET /api/auctions?status=live`.
-- Đi qua API thật (đăng nhập, đặt cọc nếu chưa cọc, `POST /api/bids` với `increment` = bước giá), in ra từng bước. Dừng khi đủ `--max` lượt, phiên hết giờ, không bot nào đủ tiền, hoặc Ctrl+C.
-- Chỉ trả giá khi số dư còn đủ trả đơn nếu thắng (giá + phí 5% + vận chuyển − cọc). Từ chối chạy khi `NODE_ENV=production`.
-- Lưu ý dữ liệu dùng chung: lượt giá và tiền cọc của bot là thật trên phiên demo. Bot thắng thì có đơn chờ thanh toán; quá 24 giờ không trả thì mất cọc như người thật.
+| Tuỳ chọn | Mặc định | Ý nghĩa |
+|---|---|---|
+| `--auction <id>` | bắt buộc | Id phiên, lấy từ `GET /api/auctions?status=live` |
+| `--interval <giây>` | 5 | Khoảng cách giữa hai lượt |
+| `--max <n>` | 10 | Số lượt tối đa |
+| `--stop-before <giây>` | 60 | Không trả giá khi phiên còn ít hơn chừng này giây (hạn chế bot thắng) |
+| `--only-outbid` | tắt | Chỉ trả giá khi **người khác** (không phải bot) đang dẫn đầu |
+| `--bots a,b` | cả 3 bot | Chọn bớt bot; chỉ nhận email bot, email khác → từ chối |
+| `--base <url>` | `http://localhost:5000` | Địa chỉ server |
+
+- **Chỉ dùng 3 tài khoản bot**, không bao giờ dùng tài khoản demo của người dùng; thiếu tài khoản bot thì từ chối (chạy `npm run db:seed:live` để tạo).
+- Đi qua API thật (đăng nhập, đặt cọc nếu chưa cọc, `POST /api/bids` với `increment` = bước giá), in ra từng bước. Dừng khi đủ `--max` lượt, phiên hết giờ hoặc còn dưới `--stop-before` giây, không bot nào đủ tiền, hoặc Ctrl+C. Từ chối chạy khi `NODE_ENV=production`.
+- Chỉ trả giá khi số dư còn đủ trả đơn nếu thắng (giá + phí 5% + vận chuyển − cọc), nên không vượt số dư.
+- **Bot vẫn có thể thắng** nếu đang dẫn đầu lúc phiên kết thúc (ví dụ không ai vượt lại): bot có đơn chờ thanh toán, quá 24 giờ thì mất cọc (chỉ ví bot bị trừ). Dùng `--only-outbid` để bot chỉ "đẩy giá" khi người thật đang dẫn đầu.
 
 ## Cấu trúc thư mục
 

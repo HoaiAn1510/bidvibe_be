@@ -33,12 +33,13 @@ Lưu ý khi chạy trên thiết bị:
 
 ## 2. Tài khoản demo
 
-Tạo bằng `npm run db:seed` (chạy lại nhiều lần không bị trùng; cũng gia hạn các phiên demo đang diễn ra). **Mật khẩu mọi tài khoản: `123456`.**
+Tạo bằng `npm run db:seed` (chạy lại nhiều lần không bị trùng; cũng gia hạn các phiên demo đang diễn ra). **Mật khẩu mọi tài khoản: `123456`.** Trước buổi demo xem thêm [Làm mới dữ liệu demo](#làm-mới-dữ-liệu-demo-trước-buổi-demo).
 
 | Vai trò | Email | Đăng nhập bằng | Ghi chú |
 |---|---|---|---|
 | bidder | `minhanh@gmail.com` | `POST /api/auth/login` | Tài khoản demo chính, có đơn hàng và thông báo |
 | bidder | `viet.tran@gmail.com`, `chau.le@outlook.com`, `hung.pham@gmail.com` | `POST /api/auth/login` | Ví được nạp 20.000.000đ khi seed lần đầu |
+| bidder (bot) | `bot1@bidvibe.demo`, `bot2@bidvibe.demo`, `bot3@bidvibe.demo` | `POST /api/auth/login` | **Chỉ cho bot đấu giá** (`npm run demo:bidbot`), ví 50.000.000đ. Đừng đăng nhập app bằng các tài khoản này |
 | seller | `long@sneakersg.vn` (Sneaker Sài Gòn) | `POST /api/auth/login` | Có phiên đang diễn ra và đơn đã bán |
 | seller | `ha@phocoxua.vn`, `bao@retroaudio.vn`, `hai@retrocamera.vn`, `hoa@caonguyenxua.vn` | `POST /api/auth/login` | |
 | appraiser | `ngoc.le@bidvibe.vn`, `khoa.tran@bidvibe.vn`, `huy.do@bidvibe.vn` | `POST /api/auth/ops/login` | Hàng chờ thẩm định có sẵn tin |
@@ -47,6 +48,18 @@ Tạo bằng `npm run db:seed` (chạy lại nhiều lần không bị trùng; c
 | admin | `admin@bidvibe.vn`, `trang.dang@bidvibe.vn`, `tuan.vo@bidvibe.vn` | `POST /api/auth/ops/login` | Có cờ gian lận và tranh chấp đang mở |
 
 Database dùng chung cả nhóm: thao tác trên tài khoản demo (đặt giá, thanh toán...) sẽ đổi dữ liệu người khác cũng thấy. Muốn thử thoải mái thì tự đăng ký tài khoản mới.
+
+### Làm mới dữ liệu demo trước buổi demo
+
+Phiên demo hết giờ dần theo thời gian thật. Khoảng 10 phút trước buổi demo, ở thư mục backend:
+
+```bash
+npm run db:seed:live -- --extend     # bảo đảm 9 phiên đang diễn ra, đẩy giờ kết thúc ra đủ thời lượng
+npm run dev
+```
+
+- Danh sách phiên trong app (`GET /api/auctions?status=live`) sẽ có 9 phiên demo đủ 3 danh mục, đều có ảnh bìa (`coverUrl`) và 2 ảnh trong chi tiết. Một phiên kết thúc sau **khoảng 3 phút** để thử chống chốt phút chót (đặt giá trong 30 giây cuối thì phiên được gia hạn); muốn có lại phiên này thì chạy `npm run db:seed:live` lần nữa.
+- Muốn thấy giá nhảy theo thời gian thực trên app (đăng nhập `minhanh@gmail.com`), mở thêm một terminal: `npm run demo:bidbot -- --auction <id> --only-outbid` (id lấy từ danh sách phiên). Bot chỉ dùng 3 tài khoản `bot*@bidvibe.demo`; chi tiết tuỳ chọn ở README.
 
 ## 3. Màn hình nào gọi endpoint nào
 
