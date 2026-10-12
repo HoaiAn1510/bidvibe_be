@@ -47,10 +47,10 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 
 Cả hai bộ test chạy trên Supabase dùng chung nên được viết để **không đụng dữ liệu thật**:
 
-- Mọi dữ liệu test có tiền tố riêng: `test_be1_*` (BE1: email `test_be1_<tên>_<số>@be1test.local`, tin đăng `test_be1_item`) và `test_be2_*` (BE2).
-- Test chỉ ghi/xoá các dòng đi ra từ những tài khoản có tiền tố đó. Cuối mỗi lần chạy (kể cả khi test lỗi) và đầu lần chạy kế tiếp, các dòng này được xoá sạch; dữ liệu seed và dữ liệu của đồng đội không bị sửa hay xoá.
+- Mọi dữ liệu test có tiền tố riêng: `test_be1_*` (BE1: email `test_be1_<mã lần chạy>_<tên>_<số>@be1test.local`, tin đăng `test_be1_<mã lần chạy>_item`) và `test_be2_*` (BE2).
+- Test chỉ ghi/xoá các dòng đi ra từ những tài khoản có tiền tố đó; dữ liệu seed và dữ liệu của đồng đội không bị sửa hay xoá. Test BE1: cuối mỗi lần chạy (kể cả khi lỗi) chỉ dọn dữ liệu của **chính lần chạy đó** (theo mã lần chạy), đầu lần chạy chỉ dọn dữ liệu `test_be1_` bỏ dở từ hơn 30 phút trước — nên hai người chạy `test:be1` cùng lúc không xoá dữ liệu của nhau.
 - Chạy được lúc đồng đội đang chạy server: scheduler của họ có thể đóng phiên test của bạn, test BE1 đã chờ DB về đúng trạng thái. Nếu vẫn lỗi lặt vặt thì chạy lại.
-- Nếu test bị ngắt giữa chừng (Ctrl+C), cứ chạy lại là dọn được phần dở. Kiểm tra còn sót không: `SELECT count(*) FROM accounts WHERE email LIKE 'test\_be1\_%'`.
+- Nếu test bị ngắt giữa chừng (Ctrl+C), phần dở được dọn ở lần chạy đầu tiên sau 30 phút. Kiểm tra còn sót không: `SELECT count(*) FROM accounts WHERE email LIKE 'test\_be1\_%'`.
 - Cần database đã chạy `npm run db:migrate` (test BE1 cần migration `006`, `007`).
 
 #### Giả lập người đấu giá khi demo (`demo:bidbot`)
