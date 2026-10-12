@@ -35,4 +35,4 @@ function stop() {
   timer = null;
 }
 
-module.exports = { start, stop, tick };
+module.exports = { start, stop };

@@ -1,6 +1,6 @@
 # Luồng chính của BidVibe
 
-> Cập nhật: 2026-10-10.
+> Cập nhật: 2026-10-12.
 
 Tài liệu này mô tả luồng nghiệp vụ từ lúc đăng ký đến lúc giải ngân, **dựa trên code backend và schema đang có** (migration 001–007). Mỗi bước có nhãn trạng thái triển khai:
 
@@ -77,7 +77,7 @@ Một tài khoản `accounts` chỉ là Bidder **hoặc** Seller, không cả ha
 
 **5a. Nạp ví** — `POST /api/wallet/topup` `{ amount }` (1 đến 100.000.000đ, cổng giả lập luôn thành công). Ghi `bidders.wallet_balance` + một dòng `wallet_transactions` loại `topup`. Có giao dịch.
 
-**5b. Xem phiên** — `GET /api/auctions` (lọc `status=live|ended|joined`, `category`, `q`, `sort`) và `GET /api/auctions/:id` (kèm 20 lượt giá gần nhất, tên bị che dạng `A***`).
+**5b. Xem phiên** — `GET /api/auctions` (lọc `status=live|ended|joined`, `category`, `q`, `sort`; phân trang `limit`, `offset`, trả `total`) và `GET /api/auctions/:id` (kèm mọi ảnh `photos`, 20 lượt giá gần nhất, tên bị che dạng `A***`). Mỗi phiên có ảnh bìa `coverUrl`, `seller.name`, giá nhỏ nhất đặt tiếp `minNextBid`, và với người mua: `depositAffordable` (ví đủ cọc chưa). Phiên demo của `seed_demo.js` có 2 ảnh mỗi tin (Wikimedia Commons).
 
 **5c. Đặt cọc** — `POST /api/auctions/:id/join` (chỉ `bidder`). Khoá dòng `auctions`, ghi `auction_deposits` (`status = 'held'`, mỗi người một lần mỗi phiên), chuyển `wallet_balance` → `wallet_held` (giao dịch ví `deposit_hold`). Không đủ tiền → `402 INSUFFICIENT_FUNDS`.
 
@@ -91,13 +91,13 @@ Một tài khoản `accounts` chỉ là Bidder **hoặc** Seller, không cả ha
 | Không có lượt giá | `auctions.status` → `ended`, `listings.status` → `ended`, không tạo đơn |
 | Có người thắng | `auctions.status` → `ended`, `winner_id`; `listings.status` → `ended`; tạo `orders` (`payment_status = 'awaiting_payment'`, `payment_deadline = now + 24 giờ`, `payout_status = 'pending'`) |
 | Cọc | Người thắng: `applied_to_payment` (vẫn nằm trong `wallet_held`). Người thua: `released`, hoàn về ví (`deposit_release`) |
-| Thông báo | `win`, `refund`, `sold`; Socket.io `auction:ended` |
+| Thông báo | `win` (kèm mã đơn, hạn thanh toán, nhắc chọn địa chỉ giao hàng), `refund`, `sold`; Socket.io `auction:ended` |
 | Giao dịch | Một giao dịch mỗi phiên, `FOR UPDATE SKIP LOCKED` |
 
 ### Bước 7 — Thanh toán trong 24 giờ, quá hạn mất cọc [Đã có]
 
-- **Xem đơn** — `GET /api/orders/mine`, `GET /api/orders/:id` (BE1). Tổng = giá chốt + phí 5 phần trăm (làm tròn nghìn) + vận chuyển 40.000đ, cọc được trừ.
-- **Thanh toán** — `POST /api/orders/:id/pay` `{ method: 'wallet' | 'qr' | 'card' }`. `payment_status`: `awaiting_payment` → `paid`; cọc rời `wallet_held`, giao dịch ví `payment`. Tiền nằm trong ký quỹ nền tảng (`payout_status = 'pending'`).
+- **Xem đơn** — `GET /api/orders/mine`, `GET /api/orders/:id` (BE1). Tổng = giá chốt + phí 5 phần trăm (làm tròn nghìn) + vận chuyển 40.000đ, cọc được trừ. Đơn kèm ảnh bìa, người bán và địa chỉ giao hàng đã chọn (`shippingAddress`, chưa chọn thì `null`).
+- **Thanh toán** — `POST /api/orders/:id/pay` `{ method: 'wallet' | 'qr' | 'card' }`. `payment_status`: `awaiting_payment` → `paid`; cọc rời `wallet_held`, giao dịch ví `payment`. Tiền nằm trong ký quỹ nền tảng (`payout_status = 'pending'`). Đơn chưa có địa chỉ giao hàng (`orders.shipping_address_id` NULL) thì người mua nhận thêm một thông báo `address_reminder` trong cùng giao dịch (một lần mỗi đơn).
 - **Quá hạn** — scheduler gọi `processPaymentTimeouts()`: `payment_status` → `expired`, `listings.status` → `cancelled`, cọc `forfeited` (giao dịch ví `deposit_forfeit`), thông báo `warn`.
 
 ### Bước 8 — Seller gửi hàng về kho [Đã có]
@@ -363,7 +363,7 @@ Scheduler chỉ khởi động khi chạy server trực tiếp (`npm start` / `n
 
 ## 7. Còn thiếu và việc tiếp theo
 
-Quét lại sau khi merge PR #13 và #14 vào `develop`. Mọi bước 1–13 của backend đã có route và logic thật, `npm test` đạt (BE1 37 bước, BE2 190 bước). Chỉ liệt kê các việc mức **Chặn luồng chính** và **Nên có** còn lại.
+Quét lại sau khi merge PR #13 và #14 vào `develop`, cập nhật phần BE1 ngày 2026-10-12. Mọi bước 1–13 của backend đã có route và logic thật, `npm test` đạt (BE1 49 bước, BE2 190 bước). Chỉ liệt kê các việc mức **Chặn luồng chính** và **Nên có** còn lại.
 
 ### Chặn luồng chính
 
@@ -377,7 +377,7 @@ Không còn việc nào chặn luồng chính ở phía backend.
 
 | # | Việc | Chủ |
 |---|---|---|
-| 2 | **Nhắc người mua chọn địa chỉ giao hàng.** Không có thông báo nào nhắc, nên đơn chưa có địa chỉ sẽ dừng ở `packed` (kho bị `409 ORDER_NO_ADDRESS`). Nên thông báo khi thắng phiên / khi kho đóng gói mà đơn chưa có địa chỉ, và cho kho lọc đơn thiếu địa chỉ | BE2 (nhắc lúc thắng phiên cần BE1 đồng ý) |
+| 2 | **Nhắc người mua chọn địa chỉ giao hàng.** Phần BE1 **xong**: thông báo `win` nhắc chọn địa chỉ, thanh toán xong mà đơn chưa có địa chỉ thì gửi `address_reminder` (một lần mỗi đơn). Còn lại (BE2, tuỳ chọn): nhắc thêm khi kho đóng gói mà đơn chưa có địa chỉ, cho kho lọc đơn thiếu địa chỉ | BE2 |
 | 3 | **Seller không quản lý được ảnh / tin nháp:** chưa có API xoá ảnh, xem chi tiết một tin, hay huỷ tin nháp (hiện chỉ có danh sách `GET /api/listings/mine`). Khi bị yêu cầu bổ sung ảnh, Seller chỉ thêm được ảnh (tối đa 10), không bỏ ảnh xấu | BE2 |
 | 4 | **Kiểm thử chạy trên database dùng chung**, chạy tay, không có CI. Dữ liệu test có tiền tố riêng và tự dọn, nhưng trong lúc chạy vẫn có tài khoản / phiên test trên DB thật và job nền của server đang chạy có thể chạm vào | BE1, BE2 |
 

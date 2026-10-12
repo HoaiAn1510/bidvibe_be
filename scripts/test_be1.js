@@ -482,6 +482,230 @@ async function main() {
     }
   });
 
+  console.log('Nhắc người thắng thanh toán và chọn địa chỉ giao hàng');
+  {
+    const addressService = require('../src/services/address_service');
+    const fulfilment = require('../src/services/fulfilment_service');
+    const D = await mkAccount('bidder', 'Dan');
+    const E = await mkAccount('bidder', 'Eve');
+    for (const id of [D, E]) await tx((c) => walletService.topUp(c, { bidderId: id, amount: 10_000_000 }));
+    const notes = async (accountId, type) => (await pool.query(
+      'SELECT title FROM notifications WHERE account_id = $1 AND type = $2 ORDER BY id', [accountId, type])).rows.map((r) => r.title);
+    // Phiên kết thúc với `winner` thắng; trả về đơn của người thắng.
+    const wonOrder = async (winner) => {
+      const { auctionId: aw } = await mkAuction(seller);
+      await engine.joinAuction({ bidderId: winner, auctionId: aw });
+      await engine.placeBid({ bidderId: winner, auctionId: aw, increment: 50_000 });
+      await expire(aw);
+      await closedAuction(aw);
+      return (await pool.query('SELECT id, payment_deadline FROM orders WHERE auction_id = $1', [aw])).rows[0];
+    };
+
+    await step('thắng phiên: thông báo win nhắc thanh toán trong 24 giờ và chọn địa chỉ, kèm mã đơn', async () => {
+      const before = (await notes(D, 'win')).length;
+      const o = await wonOrder(D);
+      const wins = await notes(D, 'win');
+      assert.strictEqual(wins.length, before + 1);
+      const t = wins[wins.length - 1];
+      assert.ok(t.includes(`Đơn #${o.id}`), t);
+      assert.ok(/thanh toán trước \d{2}:\d{2} \d{2}\/\d{2} \(24 giờ\)/.test(t), t);
+      assert.ok(t.includes('chọn địa chỉ giao hàng'), t);
+      // Hạn trong thông báo khớp payment_deadline của đơn (giờ Việt Nam).
+      const vn = new Date(new Date(o.payment_deadline).getTime() + 7 * 3600_000); // UTC+7, không có giờ mùa hè
+      const hhmm = `${String(vn.getUTCHours()).padStart(2, '0')}:${String(vn.getUTCMinutes()).padStart(2, '0')} ${String(vn.getUTCDate()).padStart(2, '0')}/${String(vn.getUTCMonth() + 1).padStart(2, '0')}`;
+      assert.ok(t.includes(hhmm), `${t} / ${hhmm}`);
+    });
+    await step('thanh toán xong mà đơn chưa có địa chỉ: một thông báo address_reminder', async () => {
+      const o = await wonOrder(D);
+      const before = await notes(D, 'address_reminder');
+      const r = await engine.payOrder({ bidderId: D, orderId: o.id, method: 'wallet' });
+      assert.deepStrictEqual(Object.keys(r).sort(), ['balanceAfter', 'orderId', 'paymentStatus', 'totalDue']); // phản hồi không đổi
+      const after = await notes(D, 'address_reminder');
+      assert.strictEqual(after.length, before.length + 1);
+      assert.ok(after[after.length - 1].startsWith(`Đơn #${o.id} `), after[after.length - 1]);
+      await rejects(engine.payOrder({ bidderId: D, orderId: o.id }), 'ALREADY_PAID');
+      assert.strictEqual((await notes(D, 'address_reminder')).length, after.length, 'trả lại lần hai không được nhắc thêm');
+    });
+    await step('thanh toán song song cùng một đơn: một lượt thành công, đúng một lần nhắc', async () => {
+      const o = await wonOrder(E);
+      const before = (await notes(E, 'address_reminder')).length;
+      const rs = await Promise.allSettled([1, 2, 3].map(() => engine.payOrder({ bidderId: E, orderId: o.id, method: 'wallet' })));
+      assert.strictEqual(rs.filter((x) => x.status === 'fulfilled').length, 1);
+      assert.ok(rs.filter((x) => x.status === 'rejected').every((x) => x.reason.code === 'ALREADY_PAID'));
+      const mine = (await notes(E, 'address_reminder')).filter((t) => t.startsWith(`Đơn #${o.id} `));
+      assert.strictEqual((await notes(E, 'address_reminder')).length, before + 1);
+      assert.strictEqual(mine.length, 1);
+    });
+    await step('đơn đã chọn địa chỉ trước khi thanh toán: không nhắc', async () => {
+      const addr = await addressService.create(E, {
+        recipientName: `${PREFIX}Eve`, phone: '0901234567', addressLine: '1 Đường Test', city: 'TP.HCM',
+      });
+      const o = await wonOrder(E);
+      await fulfilment.setShippingAddress(E, o.id, { addressId: addr.id }); // API của BE2, chỉ gọi
+      const before = (await notes(E, 'address_reminder')).length;
+      await engine.payOrder({ bidderId: E, orderId: o.id, method: 'wallet' });
+      assert.strictEqual((await notes(E, 'address_reminder')).length, before);
+    });
+  }
+
+  console.log('API cho các màn hình app (trường thêm mới)');
+  {
+    const jwt = require('jsonwebtoken');
+    const env = require('../src/config/env');
+    const addressService = require('../src/services/address_service');
+    const fulfilment = require('../src/services/fulfilment_service');
+    const { server } = require('../src/app');
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    const base = `http://127.0.0.1:${server.address().port}/api`;
+    const tok = (id, role) => jwt.sign({ sub: String(id), kind: 'account', role }, env.jwtSecret, { expiresIn: '5m' });
+    const get = async (path, token) => {
+      const r = await fetch(base + path, { headers: { Authorization: `Bearer ${token}` } });
+      const body = await r.json();
+      assert.strictEqual(r.status, 200, JSON.stringify(body.error));
+      return body.data;
+    };
+    try {
+      const G = await mkAccount('bidder', 'Gil'); // 50.000đ: không đủ cọc 100.000đ
+      await tx((c) => walletService.topUp(c, { bidderId: G, amount: 50_000 }));
+      const H = await mkAccount('bidder', 'Hal');
+      await tx((c) => walletService.topUp(c, { bidderId: H, amount: 5_000_000 }));
+      const { listingId: lp, auctionId: ap } = await mkAuction(seller);
+      const urls = ['https://example.com/test_be1_a.jpg', 'https://example.com/test_be1_b.jpg'];
+      for (let i = 0; i < 2; i += 1) {
+        await pool.query('INSERT INTO listing_photos (listing_id, url, order_index) VALUES ($1, $2, $3)', [lp, urls[i], i]);
+      }
+
+      await step('GET /api/auctions: total, limit, offset, minNextBid, seller.name, depositAffordable', async () => {
+        const q = encodeURIComponent(PREFIX);
+        const d = await get(`/auctions?q=${q}&limit=2&offset=0&sort=newest`, tok(H, 'bidder'));
+        const n = (await pool.query(
+          `SELECT count(*)::int AS n FROM auctions a JOIN listings l ON l.id = a.listing_id WHERE l.title ILIKE $1`, [`%${PREFIX}%`])).rows[0].n;
+        assert.deepStrictEqual([d.total, d.limit, d.offset], [n, 2, 0]);
+        assert.ok(n > 2 && d.auctions.length === 2, 'trang đầu chỉ 2 phần tử, total là tổng thật');
+        const page2 = await get(`/auctions?q=${q}&limit=2&offset=2&sort=newest`, tok(H, 'bidder'));
+        assert.strictEqual(page2.total, n);
+        assert.ok(!page2.auctions.some((x) => d.auctions.some((y) => y.id === x.id)), 'hai trang không trùng phần tử');
+
+        const it = d.auctions.find((x) => x.id === String(ap));
+        assert.ok(it, 'phiên mới nhất phải ở trang đầu (sort=newest)');
+        assert.strictEqual(it.minNextBid, it.currentPrice + it.bidStep);
+        assert.strictEqual(it.coverUrl, urls[0]);
+        assert.deepStrictEqual([it.seller.storeName, it.seller.name], ['Test shop', 'Test shop']);
+        assert.strictEqual(it.depositAffordable, true);
+        for (const k of ['currentPrice', 'bidStep', 'bidCount', 'endsAt', 'remainingSeconds', 'status']) assert.ok(k in it, k);
+
+        const g = (await get(`/auctions?q=${q}&limit=50`, tok(G, 'bidder'))).auctions.find((x) => x.id === String(ap));
+        assert.strictEqual(g.depositAffordable, false);
+        const s = (await get(`/auctions?q=${q}&limit=50`, tok(seller, 'seller'))).auctions.find((x) => x.id === String(ap));
+        assert.strictEqual(s.depositAffordable, null); // không phải bidder
+      });
+      await step('GET /api/auctions/:id: photos đủ, ảnh bìa đứng đầu, giá tối thiểu tiếp theo', async () => {
+        await engine.joinAuction({ bidderId: H, auctionId: ap });
+        await engine.placeBid({ bidderId: H, auctionId: ap, increment: 50_000 });
+        const d = await get(`/auctions/${ap}`, tok(H, 'bidder'));
+        assert.deepStrictEqual(d.photos.map((p) => [p.url, p.orderIndex]), [[urls[0], 0], [urls[1], 1]]);
+        assert.strictEqual(d.coverUrl, d.photos[0].url);
+        assert.deepStrictEqual([d.joined, d.leading, d.myDeposit, d.minNextBid], [true, true, 100_000, 1_100_000]);
+        assert.deepStrictEqual([d.bids[0].who, d.bids[0].me], ['T***', true]); // tên đã che: "test_be1_Hal" -> "T***"
+      });
+      await step('GET /api/wallet/transactions: kindLabel tiếng Việt, total, phân trang', async () => {
+        const d = await get('/wallet/transactions?limit=1&offset=0', tok(H, 'bidder'));
+        const n = (await pool.query('SELECT count(*)::int AS n FROM wallet_transactions WHERE bidder_id = $1', [H])).rows[0].n;
+        assert.deepStrictEqual([d.total, d.limit, d.offset, d.transactions.length], [n, 1, 0, 1]);
+        assert.deepStrictEqual([d.transactions[0].kind, d.transactions[0].kindLabel], ['deposit_hold', 'Giữ cọc tham gia phiên']);
+        const all = await get('/wallet/transactions', tok(H, 'bidder'));
+        assert.ok(all.transactions.every((t) => typeof t.kindLabel === 'string' && t.kindLabel !== t.kind));
+      });
+      await step('GET /api/orders/mine và /:id: người bán, ảnh bìa, địa chỉ giao hàng', async () => {
+        await expire(ap);
+        await closedAuction(ap);
+        let o = (await get('/orders/mine', tok(H, 'bidder'))).orders.find((x) => x.auctionId === String(ap));
+        assert.ok(o);
+        assert.deepStrictEqual([o.seller.name, o.coverUrl, o.shippingAddress], ['Test shop', urls[0], null]);
+        assert.ok(o.paymentDeadline && o.amountToPay > 0 && o.paymentStatus === 'awaiting_payment');
+        const addr = await addressService.create(H, {
+          recipientName: `${PREFIX}Hal`, phone: '0901234567', addressLine: '2 Đường Test', ward: 'P.1', district: 'Q.1', city: 'TP.HCM',
+        });
+        await fulfilment.setShippingAddress(H, o.id, { addressId: addr.id });
+        o = await get(`/orders/${o.id}`, tok(H, 'bidder'));
+        assert.deepStrictEqual(o.shippingAddress, {
+          id: addr.id, recipientName: `${PREFIX}Hal`, phone: '0901234567', addressLine: '2 Đường Test',
+          ward: 'P.1', district: 'Q.1', city: 'TP.HCM',
+        });
+      });
+    } finally {
+      await new Promise((res) => server.close(res));
+    }
+  }
+
+  console.log('Script demo:bidbot (giả lập người đấu giá qua API thật)');
+  {
+    const bcrypt = require('bcrypt');
+    const { runBidbot } = require('./demo_bidbot');
+    const { server } = require('../src/app');
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const PW = `${PREFIX}pw`;
+    const hash = await bcrypt.hash(PW, 4);
+    // Tài khoản test đăng nhập được (mật khẩu thật) — bot không đụng tài khoản demo thật trong test.
+    const mkLoginBidder = async (name, money) => {
+      const id = await mkAccount('bidder', name);
+      await pool.query('UPDATE accounts SET password_hash = $2 WHERE id = $1', [id, hash]);
+      if (money) await tx((c) => walletService.topUp(c, { bidderId: id, amount: money }));
+      const email = (await pool.query('SELECT email FROM accounts WHERE id = $1', [id])).rows[0].email;
+      return { id, email, password: PW };
+    };
+    const logs = [];
+    const log = (m) => logs.push(m);
+    try {
+      const b1 = await mkLoginBidder('BotOne', 5_000_000);
+      const b2 = await mkLoginBidder('BotTwo', 5_000_000);
+      const poor = await mkLoginBidder('BotPoor', 150_000); // đủ cọc 100.000 nhưng không đủ trả đơn nếu thắng
+
+      await step('bot đặt cọc rồi trả giá luân phiên qua API, dừng khi đủ --max lượt', async () => {
+        const { auctionId: ab } = await mkAuction(seller); // 1.000.000đ, bước 50.000
+        const r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 4, log });
+        assert.deepStrictEqual(r, { bids: 4, reason: 'đủ 4 lượt' });
+        const rows = (await pool.query('SELECT bidder_id, amount::int AS a FROM bids WHERE auction_id = $1 ORDER BY id', [ab])).rows;
+        assert.deepStrictEqual(rows.map((x) => x.a), [1_050_000, 1_100_000, 1_150_000, 1_200_000]);
+        assert.ok(rows.every((x, i) => i === 0 || String(x.bidder_id) !== String(rows[i - 1].bidder_id)), 'hai bot xen kẽ');
+        const deps = (await pool.query('SELECT count(*)::int AS n FROM auction_deposits WHERE auction_id = $1', [ab])).rows[0].n;
+        assert.strictEqual(deps, 2); // mỗi bot cọc một lần
+      });
+      await step('bot không đủ tiền trả đơn nếu thắng thì không cọc, không trả giá; không còn bot hợp lệ thì dừng', async () => {
+        const { auctionId: ab } = await mkAuction(seller);
+        const before = await wallet(poor.id);
+        const r = await runBidbot({ base, auctionId: ab, accounts: [poor], intervalMs: 50, max: 3, log });
+        assert.strictEqual(r.bids, 0);
+        assert.ok(r.reason.startsWith('không bot nào đủ điều kiện'), r.reason);
+        assert.deepStrictEqual(await wallet(poor.id), before, 'ví không đổi');
+      });
+      await step('bot dừng khi phiên hết giờ và khi nhận tín hiệu dừng (Ctrl+C)', async () => {
+        const { auctionId: ab } = await mkAuction(seller);
+        await expire(ab);
+        assert.deepStrictEqual(await runBidbot({ base, auctionId: ab, accounts: [b1], intervalMs: 50, max: 3, log }),
+          { bids: 0, reason: 'phiên đã kết thúc' });
+        const { auctionId: ab2 } = await mkAuction(seller);
+        const r = await runBidbot({ base, auctionId: ab2, accounts: [b1, b2], intervalMs: 50, max: 10, log, stopSignal: { stop: true } });
+        assert.deepStrictEqual(r, { bids: 0, reason: 'dừng theo yêu cầu (Ctrl+C)' });
+      });
+      await step('script từ chối chạy khi NODE_ENV=production, báo lỗi khi thiếu --auction', async () => {
+        const { spawnSync } = require('child_process');
+        const run = (args, extraEnv) => spawnSync(process.execPath, ['scripts/demo_bidbot.js', ...args], {
+          cwd: require('path').join(__dirname, '..'), env: { ...process.env, ...extraEnv }, encoding: 'utf8',
+        });
+        const prod = run(['--auction', '1'], { NODE_ENV: 'production' });
+        assert.strictEqual(prod.status, 1);
+        assert.ok(prod.stderr.includes('NODE_ENV=production'), prod.stderr);
+        const noArg = run([], { NODE_ENV: 'development' });
+        assert.strictEqual(noArg.status, 1);
+        assert.ok(noArg.stderr.includes('--auction'), noArg.stderr);
+      });
+    } finally {
+      await new Promise((res) => server.close(res));
+    }
+  }
+
   console.log('Socket.io: tạm dừng / tiếp tục và ngắt tài khoản bị khoá');
   {
     const jwt = require('jsonwebtoken');

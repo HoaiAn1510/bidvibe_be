@@ -1,6 +1,6 @@
 # API BidVibe
 
-> Cập nhật: 2026-10-10. Ví dụ phản hồi lấy từ các lần gọi thật vào server `npm run dev` (dữ liệu demo + tài khoản tạm, đã che token và rút gọn mảng).
+> Cập nhật: 2026-10-12. Ví dụ phản hồi lấy từ các lần gọi thật vào server `npm run dev` (dữ liệu demo + tài khoản tạm, đã che token và rút gọn mảng).
 
 Một file duy nhất cho toàn bộ REST API của backend. Sự kiện real-time xem [`socket.md`](socket.md). Hướng dẫn nối nhanh cho app Flutter xem [`fe-quickstart.md`](fe-quickstart.md).
 
@@ -57,7 +57,7 @@ Một file duy nhất cho toàn bộ REST API của backend. Sự kiện real-ti
 - Tiền là **số nguyên VND** (`1250000`), không có phần thập phân.
 - Thời gian là chuỗi ISO 8601, UTC (`"2026-10-10T15:29:32.100Z"`; một số trường lồng trong JSON trả dạng `"...+00:00"`, vẫn là ISO 8601).
 
-**Phân trang**: các danh sách nhận `?limit=` (1–100, mặc định 50) và `?offset=` (mặc định 0). Không trả tổng số bản ghi.
+**Phân trang**: các danh sách nhận `?limit=` (1–100, mặc định 50) và `?offset=` (mặc định 0). Chỉ [`GET /api/auctions`](#get-apiauctions) và [`GET /api/wallet/transactions`](#get-apiwallettransactions) trả thêm tổng số bản ghi (`total`) và `limit`, `offset` đã áp dụng; các danh sách khác không trả tổng số.
 
 **Body**: JSON, header `Content-Type: application/json`. Body không phải JSON hợp lệ → `400 INVALID_JSON`.
 
@@ -355,19 +355,22 @@ Mọi vai trò. Query (đều tuỳ chọn):
 | `category` | `shoes`, `elec`, `antique` |
 | `q` | tìm theo tiêu đề |
 | `sort` | `ending` (mặc định), `newest`, `price_asc`, `price_desc`, `popular` |
-| `limit`, `offset` | phân trang |
+| `limit`, `offset` | phân trang (mặc định 50, tối đa 100); phản hồi có `total` = tổng số phiên khớp bộ lọc |
 
 ```json
 // 200
 { "auctions": [ {
   "id": "10", "listingId": "10", "title": "Bình gốm men rạn thời Nguyễn, cao 32cm", "category": "antique",
-  "description": "Men rạn tự nhiên, ...", "condition": "Nguyên vẹn, không sứt mẻ", "coverUrl": null,
-  "seller": { "id": "15", "storeName": "Phố Cổ Collectibles", "rating": 4.9 },
-  "startPrice": 4000000, "currentPrice": 4500000, "bidStep": 50000, "depositRequired": 400000, "bidCount": 4,
+  "description": "Men rạn tự nhiên, ...", "condition": "Nguyên vẹn, không sứt mẻ",
+  "coverUrl": "https://thumb.wikimedia.org/wikipedia/commons/thumb/9/97/Wine_vase...DSC05323.JPG",
+  "seller": { "id": "15", "storeName": "Phố Cổ Collectibles", "name": "Phố Cổ Collectibles", "rating": 4.9 },
+  "startPrice": 4000000, "currentPrice": 4500000, "bidStep": 50000, "minNextBid": 4550000,
+  "depositRequired": 400000, "depositAffordable": true, "bidCount": 4,
   "startsAt": "2026-10-05T14:52:47.955Z", "endsAt": "2026-10-10T19:21:59.508Z",
   "status": "active", "isLive": true, "paused": false, "pausedAt": null, "remainingSeconds": 13970,
   "terminated": false, "winnerId": null,
-  "joined": false, "myDepositStatus": null, "myDeposit": 0, "myBid": 0, "leading": false, "won": false } ] }
+  "joined": false, "myDepositStatus": null, "myDeposit": 0, "myBid": 0, "leading": false, "won": false } ],
+  "total": 6, "limit": 50, "offset": 0 }
 ```
 
 | Trường | Ý nghĩa |
@@ -376,16 +379,25 @@ Mọi vai trò. Query (đều tuỳ chọn):
 | `isLive` | Đang nhận cọc và lượt giá (`active`, chưa hết giờ, không tạm dừng) |
 | `paused`, `pausedAt` | Admin tạm dừng để kiểm tra. Đồng hồ **đứng yên** khi dừng; khi tiếp tục `endsAt` được cộng thêm đúng thời gian đã dừng |
 | `remainingSeconds` | Giây còn lại do server tính (đứng yên khi `paused`). Dùng giá trị này để đếm ngược, không tự tính `endsAt - now` khi đang dừng |
+| `total`, `limit`, `offset` | Tổng số phiên khớp bộ lọc (không tính phân trang) và phân trang đã áp dụng. Còn trang sau khi `offset + auctions.length < total` |
+| `coverUrl` | Ảnh bìa = ảnh đầu tiên của tin (`order_index` nhỏ nhất); `null` nếu tin chưa có ảnh |
+| `seller.name` | Tên hiển thị người bán: `storeName`, nếu người bán chưa đặt tên shop thì là họ tên |
+| `minNextBid` | Giá nhỏ nhất được đặt tiếp theo = `currentPrice + bidStep` (thấp hơn → `400 BID_TOO_LOW`) |
 | `depositRequired` | Tiền cọc = 10 phần trăm giá khởi điểm, làm tròn nghìn |
+| `depositAffordable` | Số dư ví (`balance`) của người xem có đủ `depositRequired` không. Chỉ có với tài khoản `bidder`; vai trò khác là `null` |
 | `joined`, `myDepositStatus`, `myDeposit`, `myBid`, `leading`, `won` | Riêng của người đang xem (tài khoản `ops` luôn rỗng) |
 
 ### `GET /api/auctions/:id`
 
-Mọi vai trò. Cùng cấu trúc như một phần tử ở trên, thêm `bids`: 20 lượt giá gần nhất (mới nhất trước), tên người đặt đã che.
+Mọi vai trò. Cùng cấu trúc như một phần tử ở trên, thêm `photos` (mọi ảnh của tin, ảnh bìa đứng đầu) và `bids`: 20 lượt giá gần nhất (mới nhất trước), tên người đặt đã che (chỉ chữ cái đầu của tên, ví dụ `V***`).
 
 ```json
+"photos": [ { "id": "101", "url": "https://thumb.wikimedia.org/.../960px-Wine_vase...DSC05323.JPG", "orderIndex": 0 },
+            { "id": "102", "url": "https://thumb.wikimedia.org/.../960px-Ornamental_jar...DSC05320.JPG", "orderIndex": 1 } ],
 "bids": [ { "id": "23", "who": "V***", "amount": 4500000, "at": "2026-10-07T14:32:47.955Z", "me": false } ]
 ```
+
+Màn chi tiết dùng: `photos`, `description`, `seller`, `bids`; cọc của mình: `joined`, `myDepositStatus`, `myDeposit`, `depositRequired`, `depositAffordable`; dẫn đầu: `leading`; giá nhỏ nhất đặt tiếp: `minNextBid`.
 
 Lỗi: `404 NOT_FOUND`. Cập nhật giá trực tiếp: nghe Socket.io `auction:update` ([`socket.md`](socket.md)).
 
@@ -462,15 +474,17 @@ Chỉ `bidder`.
 
 ### `GET /api/wallet/transactions`
 
-Query `limit`, `offset`. Mới nhất trước.
+Query `limit`, `offset`. Mới nhất trước. `total` = tổng số giao dịch của ví.
 
 ```json
 // 200
-{ "transactions": [ { "id": "605", "kind": "deposit_forfeit", "amount": 200000, "relatedAuctionId": "20",
-  "balanceAfter": 19530000, "createdAt": "2026-10-10T15:10:48.547Z", "auctionTitle": "Radio bóng đèn Philips 1960, vỏ gỗ óc chó" } ] }
+{ "transactions": [ { "id": "605", "kind": "deposit_forfeit", "kindLabel": "Mất cọc (quá hạn thanh toán)", "amount": 200000,
+  "relatedAuctionId": "20", "balanceAfter": 19530000, "createdAt": "2026-10-10T15:10:48.547Z",
+  "auctionTitle": "Radio bóng đèn Philips 1960, vỏ gỗ óc chó" } ],
+  "total": 14, "limit": 50, "offset": 0 }
 ```
 
-`amount` luôn dương, chiều tiền do `kind` quyết định (xem [enum giao dịch ví](#giao-dịch-ví-wallet_transactionskind)). `balanceAfter` là `balance` sau giao dịch.
+`kindLabel` là nhãn tiếng Việt để hiển thị thẳng (xem [enum giao dịch ví](#giao-dịch-ví-wallet_transactionskind)). `amount` luôn dương, chiều tiền do `kind` quyết định (xem [enum giao dịch ví](#giao-dịch-ví-wallet_transactionskind)). `balanceAfter` là `balance` sau giao dịch.
 
 ### `POST /api/wallet/topup`
 
@@ -478,7 +492,7 @@ Body `{ "amount": integer }` (1 – 100.000.000). Cổng thanh toán giả lập
 
 ```json
 // 201
-{ "transaction": { "id": "734", "kind": "topup", "amount": 5000000, "relatedAuctionId": null, "balanceAfter": 5000000,
+{ "transaction": { "id": "734", "kind": "topup", "kindLabel": "Nạp tiền vào ví", "amount": 5000000, "relatedAuctionId": null, "balanceAfter": 5000000,
   "createdAt": "2026-10-10T15:29:21.762Z" }, "balance": 5000000, "held": 0, "available": 5000000 }
 ```
 
@@ -504,10 +518,14 @@ Chỉ `bidder`, đơn của mình (khác → `404 NOT_FOUND`).
   "finalPrice": 1200000, "fee": 60000, "shippingFee": 40000, "totalDue": 1300000,
   "depositApplied": 100000, "amountToPay": 1200000,
   "paymentStatus": "awaiting_payment", "paymentDeadline": "2026-10-11T15:29:32.100Z",
-  "payoutStatus": "pending", "createdAt": "2026-10-10T15:29:32.100Z" }
+  "payoutStatus": "pending", "createdAt": "2026-10-10T15:29:32.100Z",
+  "coverUrl": "https://thumb.wikimedia.org/.../960px-Leica_m6.jpg",
+  "seller": { "id": "18", "storeName": "Retro Camera HN", "name": "Retro Camera HN" },
+  "shippingAddress": { "id": "47", "recipientName": "Nguyễn Minh Anh", "phone": "0903 112 233", "addressLine": "45 Võ Văn Tần",
+    "ward": "Phường 6", "district": "Quận 3", "city": "TP.HCM" } }
 ```
 
-`fee` = 5 phần trăm giá chốt (làm tròn nghìn); `totalDue` = `finalPrice + fee + shippingFee`; `amountToPay` = `totalDue - depositApplied`.
+`fee` = 5 phần trăm giá chốt (làm tròn nghìn); `totalDue` = `finalPrice + fee + shippingFee`; `amountToPay` = `totalDue - depositApplied`. `coverUrl` là ảnh bìa của tin; `seller.name` như ở danh sách phiên. `shippingAddress` là địa chỉ đã chọn qua [`POST /api/orders/:id/shipping-address`](#post-apiordersidshipping-address), chưa chọn thì `null` (kho sẽ chặn gửi hàng, người mua nhận thông báo `address_reminder` sau khi thanh toán).
 
 ### `POST /api/orders/:id/pay`
 
@@ -988,14 +1006,16 @@ Không lưu trong DB, server suy ra cho các endpoint đơn sau bán và kho.
 
 #### Giao dịch ví (`wallet_transactions.kind`)
 
-| Giá trị | Hiển thị gợi ý | `balance` | `held` |
+Mỗi giao dịch có sẵn `kindLabel` (cột thứ hai) do server trả về.
+
+| Giá trị | `kindLabel` | `balance` | `held` |
 |---|---|---|---|
-| `topup` | Nạp tiền | + | |
-| `deposit_hold` | Giữ cọc | − | + |
+| `topup` | Nạp tiền vào ví | + | |
+| `deposit_hold` | Giữ cọc tham gia phiên | − | + |
 | `deposit_release` | Hoàn cọc | + | − |
-| `deposit_forfeit` | Mất cọc | | − |
-| `payment` | Thanh toán đơn | − phần còn lại (chỉ khi trả bằng ví) | − cọc |
-| `refund` | Hoàn tiền tranh chấp | + | |
+| `deposit_forfeit` | Mất cọc (quá hạn thanh toán) | | − |
+| `payment` | Thanh toán đơn thắng | − phần còn lại (chỉ khi trả bằng ví) | − cọc |
+| `refund` | Hoàn tiền | + | |
 
 #### Thẩm định (`appraisals.decision`)
 
@@ -1008,7 +1028,8 @@ Không phải enum trong DB; các giá trị code đang dùng:
 | `type` | Khi nào | Người nhận |
 |---|---|---|
 | `outbid` | Bị người khác vượt giá | Người mua |
-| `win` | Thắng phiên, cần thanh toán trong 24 giờ | Người mua |
+| `win` | Thắng phiên. Nội dung có mã đơn (`Đơn #<id>`), hạn thanh toán (giờ Việt Nam, 24 giờ) và nhắc chọn địa chỉ giao hàng | Người mua |
+| `address_reminder` | Đã thanh toán nhưng đơn chưa có địa chỉ giao hàng (kho sẽ chặn `409 ORDER_NO_ADDRESS`). Gửi **một lần** mỗi đơn, ngay khi thanh toán. Nội dung bắt đầu bằng `Đơn #<id>` | Người mua |
 | `refund` | Hoàn cọc / hoàn tiền tranh chấp | Người mua |
 | `sold` | Phiên của mình kết thúc có người thắng | Người bán |
 | `warn` | Quá hạn thanh toán; phiên bị tạm dừng / chấm dứt | Người mua / người bán |

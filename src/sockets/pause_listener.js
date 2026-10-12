@@ -84,4 +84,4 @@ async function stop() {
   if (c) await c.end().catch(() => {});
 }
 
-module.exports = { start, stop, buildPauseUpdate, CHANNEL };
+module.exports = { start, stop };

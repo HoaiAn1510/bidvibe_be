@@ -187,4 +187,4 @@ async function reportAuction({ reporterId, auctionId, reason, note = null }) {
   });
 }
 
-module.exports = { analyze, scanAuction, raiseFlag, lockFlags, reportAuction };
+module.exports = { analyze, scanAuction, reportAuction };

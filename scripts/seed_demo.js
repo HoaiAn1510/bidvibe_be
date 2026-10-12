@@ -3,6 +3,23 @@
 // Chạy lại được nhiều lần: tài khoản/tin đăng đã có thì bỏ qua, phiên còn 'active' được
 // gia hạn lại đúng thời lượng ban đầu — dùng khi demo bị hết giờ.
 //   node scripts/seed_demo.js
+//
+// Ảnh phiên demo (listing_photos): Wikimedia Commons, giấy phép tự do, cho phép dùng trực tiếp
+// (hotlink) qua thumb.wikimedia.org. Ảnh đầu tiên (order_index 0) là ảnh bìa (coverUrl).
+// Chạy lại seed sẽ bổ sung ảnh còn thiếu cho tin demo đã có, không tạo trùng, không xoá gì.
+//   Giày "Chicago"   Nike Air Jordan I.jpg — Osyffar, CC0
+//                    Air Jordan 2 "Chicago".jpg — HI 622, CC BY-SA 4.0
+//   Máy ảnh          Leica m6.jpg — Elya, CC BY-SA 3.0
+//                    Leica M6.jpg — Noqqe, CC0
+//   Bình gốm         Wine vase, crackled glaze ceramic - Nguyen dynasty ... DSC05323.JPG — Daderot, CC0
+//                    Ornamental jar, crackled glaze ceramic - Nguyen dynasty ... DSC05320.JPG — Daderot, CC0
+//   Tai nghe         2023 Słuchawki Sennheiser HD 540.jpg — Jacek Halicki, CC BY-SA 4.0
+//                    Sennheiser hd-25 headphones.jpg — Bizzarle, CC BY-SA 4.0
+//   Giày chạy bộ     Asics Gel-Cumulus 22.jpg — Petar Milošević, CC BY-SA 4.0
+//                    Brooks Adrenaline GTS 18.jpg — JSFarman, CC BY-SA 4.0
+//   Đồng hồ          Vintage Seiko DX Automatic Wrist Watch ... (11272606543).jpg — Joe Haupt, CC BY-SA 2.0
+//                    Vintage Seiko Automatic 17 Jewels Wrist Watch ... (11036409014).jpg — Joe Haupt, CC BY-SA 2.0
+// Trang gốc của mỗi ảnh: https://commons.wikimedia.org/wiki/File:<tên file>
 const bcrypt = require('bcrypt');
 const { pool } = require('../src/config/db');
 const walletService = require('../src/services/wallet_service');
@@ -50,6 +67,50 @@ const AUCTIONS = [
     desc: 'Vỏ thép có vài vết xước nhỏ đúng tuổi. Máy lên cót tay, trữ cót tốt.',
     start: 3_000_000, hours: 70, bids: [3_050_000, 3_150_000] },
 ];
+
+// Ảnh theo tiêu đề tin; phần tử đầu là ảnh bìa. Nguồn và giấy phép: xem đầu file.
+const WM = 'https://thumb.wikimedia.org/wikipedia/commons/thumb';
+const PHOTOS = {
+  'Giày retro cao cổ "Chicago" 1985 — size 42': [
+    `${WM}/2/2a/Nike_Air_Jordan_I.jpg/960px-Nike_Air_Jordan_I.jpg`,
+    `${WM}/d/d4/Air_Jordan_2_%22Chicago%22.jpg/960px-Air_Jordan_2_%22Chicago%22.jpg`,
+  ],
+  'Máy ảnh film rangefinder 1984, kèm ống kính 35mm': [
+    `${WM}/c/ce/Leica_m6.jpg/960px-Leica_m6.jpg`,
+    `${WM}/e/e4/Leica_M6.jpg/960px-Leica_M6.jpg`,
+  ],
+  'Bình gốm men rạn thời Nguyễn, cao 32cm': [
+    `${WM}/9/97/Wine_vase%2C_crackled_glaze_ceramic_-_Nguyen_dynasty%2C_19th_century_AD_-_Vietnam_National_Museum_of_Fine_Arts_-_Hanoi%2C_Vietnam_-_DSC05323.JPG/960px-Wine_vase%2C_crackled_glaze_ceramic_-_Nguyen_dynasty%2C_19th_century_AD_-_Vietnam_National_Museum_of_Fine_Arts_-_Hanoi%2C_Vietnam_-_DSC05323.JPG`,
+    `${WM}/1/19/Ornamental_jar%2C_crackled_glaze_ceramic_-_Nguyen_dynasty%2C_19th_century_AD_-_Vietnam_National_Museum_of_Fine_Arts_-_Hanoi%2C_Vietnam_-_DSC05320.JPG/960px-Ornamental_jar%2C_crackled_glaze_ceramic_-_Nguyen_dynasty%2C_19th_century_AD_-_Vietnam_National_Museum_of_Fine_Arts_-_Hanoi%2C_Vietnam_-_DSC05320.JPG`,
+  ],
+  'Tai nghe hi-fi Đức thập niên 90, còn hộp': [
+    `${WM}/9/9e/2023_S%C5%82uchawki_Sennheiser_HD_540.jpg/960px-2023_S%C5%82uchawki_Sennheiser_HD_540.jpg`,
+    `${WM}/a/a2/Sennheiser_hd-25_headphones.jpg/960px-Sennheiser_hd-25_headphones.jpg`,
+  ],
+  'Giày chạy bộ bản giới hạn, size 43': [
+    `${WM}/8/8b/Asics_Gel-Cumulus_22.jpg/960px-Asics_Gel-Cumulus_22.jpg`,
+    `${WM}/b/b2/Brooks_Adrenaline_GTS_18.jpg/960px-Brooks_Adrenaline_GTS_18.jpg`,
+  ],
+  'Đồng hồ cơ Nhật Bản 1972, dây da nguyên bản': [
+    `${WM}/5/58/Vintage_Seiko_DX_Automatic_Wrist_Watch%2C_25_Jewels%2C_Made_in_Japan_%2811272606543%29.jpg/960px-Vintage_Seiko_DX_Automatic_Wrist_Watch%2C_25_Jewels%2C_Made_in_Japan_%2811272606543%29.jpg`,
+    `${WM}/5/5a/Vintage_Seiko_Automatic_17_Jewels_Wrist_Watch%2C_Made_in_Japan_%2811036409014%29.jpg/960px-Vintage_Seiko_Automatic_17_Jewels_Wrist_Watch%2C_Made_in_Japan_%2811036409014%29.jpg`,
+  ],
+};
+
+// Thêm ảnh còn thiếu cho một tin (so theo URL), giữ nguyên ảnh đã có. Trả về số ảnh vừa thêm.
+async function ensurePhotos(client, listingId, urls = []) {
+  let added = 0;
+  for (let i = 0; i < urls.length; i += 1) {
+    const r = await client.query(
+      `INSERT INTO listing_photos (listing_id, url, order_index)
+       SELECT $1, $2, $3
+       WHERE NOT EXISTS (SELECT 1 FROM listing_photos WHERE listing_id = $1 AND url = $2)`,
+      [listingId, urls[i], i],
+    );
+    added += r.rowCount;
+  }
+  return added;
+}
 
 async function ensureAccount(client, [fullName, email, phone], role, extra) {
   const found = await client.query('SELECT id FROM accounts WHERE lower(email) = $1', [email]);
@@ -100,7 +161,9 @@ async function main() {
         [sellerId, a.title],
       );
       if (existing.rows[0]) {
-        const { auction_id: auctionId, status } = existing.rows[0];
+        const { listing_id: listingId, auction_id: auctionId, status } = existing.rows[0];
+        const added = await ensurePhotos(client, listingId, PHOTOS[a.title]);
+        if (added) console.log(`  + ${added} ảnh: ${a.title}`);
         if (auctionId && status === 'active') {
           await client.query(`UPDATE auctions SET ends_at = now() + ($2 || ' hours')::interval WHERE id = $1`, [auctionId, String(a.hours)]);
           console.log(`  ↻ gia hạn: ${a.title}`);
@@ -113,6 +176,7 @@ async function main() {
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'live') RETURNING id`,
         [sellerId, cats[a.cat], a.title, a.desc, a.cond, a.start, a.hours + 48],
       );
+      await ensurePhotos(client, listing.rows[0].id, PHOTOS[a.title]);
       const deposit = depositFor(a.start);
       const last = a.bids.length ? a.bids[a.bids.length - 1] : a.start;
       const au = await client.query(
