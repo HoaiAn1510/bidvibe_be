@@ -765,6 +765,109 @@ async function main() {
     }
   }
 
+  console.log('Thông báo của BE1 có data (GET /api/notifications và Socket.io notification:new)');
+  {
+    const jwt = require('jsonwebtoken');
+    const env = require('../src/config/env');
+    const { io: ioClient } = require('socket.io-client');
+    const { server } = require('../src/app');
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    const url = `http://127.0.0.1:${server.address().port}`;
+    const tok = (id, role) => jwt.sign({ sub: String(id), kind: 'account', role }, env.jwtSecret, { expiresIn: '5m' });
+    const sockets = [];
+    // Kết nối socket cho một tài khoản và gom mọi notification:new nhận được.
+    const listen = (id, role) => new Promise((resolve, reject) => {
+      const s = ioClient(url, { auth: { token: tok(id, role) }, transports: ['websocket'], reconnection: false, forceNew: true });
+      sockets.push(s);
+      s.got = [];
+      s.on('notification:new', (n) => s.got.push(n));
+      s.once('connect', () => resolve(s));
+      s.once('connect_error', reject);
+    });
+    const latestApi = async (id, role, type) => {
+      const r = await fetch(`${url}/api/notifications?limit=50`, { headers: { Authorization: `Bearer ${tok(id, role)}` } });
+      const body = await r.json();
+      assert.strictEqual(r.status, 200, JSON.stringify(body.error));
+      return body.data.notifications.find((n) => n.type === type);
+    };
+    // data đúng tập khoá, mọi giá trị là chuỗi, khớp giá trị mong đợi; API và socket giống nhau.
+    const checkData = async ({ id, role, sock, type, expect }) => {
+      const api = await latestApi(id, role, type);
+      assert.ok(api, `không có thông báo ${type} qua API`);
+      assert.deepStrictEqual(Object.keys(api.data).sort(), Object.keys(expect).sort(), `${type}: khoá ${JSON.stringify(api.data)}`);
+      for (const [k, v] of Object.entries(api.data)) assert.strictEqual(typeof v, 'string', `${type}.${k} phải là chuỗi`);
+      assert.deepStrictEqual(api.data, expect);
+      await sleep(300);
+      const ev = [...sock.got].reverse().find((n) => n.type === type);
+      assert.ok(ev, `không nhận được notification:new ${type}`);
+      assert.deepStrictEqual(ev.data, expect, `${type}: socket ${JSON.stringify(ev.data)}`);
+      assert.strictEqual(String(ev.id), String(api.id));
+    };
+
+    try {
+      const W = await mkAccount('bidder', 'Win');
+      const L = await mkAccount('bidder', 'Lose');
+      const S = await mkAccount('seller', 'Sel');
+      for (const id of [W, L]) await tx((c) => walletService.topUp(c, { bidderId: id, amount: 5_000_000 }));
+      const [sW, sL, sS] = [await listen(W, 'bidder'), await listen(L, 'bidder'), await listen(S, 'seller')];
+
+      await step('đặt giá → đóng phiên → thanh toán: outbid, win, refund (thua), sold, address_reminder có data đúng khoá', async () => {
+        const { auctionId: a1 } = await mkAuction(S);
+        for (const id of [W, L]) await engine.joinAuction({ bidderId: id, auctionId: a1 });
+        await engine.placeBid({ bidderId: L, auctionId: a1, increment: 50_000 });
+        await engine.placeBid({ bidderId: W, auctionId: a1, increment: 50_000 });
+        await checkData({ id: L, role: 'bidder', sock: sL, type: 'outbid', expect: { auctionId: String(a1) } });
+
+        await expire(a1);
+        await engine.closeAuction(a1); // gọi ngay sau khi hết giờ để thông báo phát từ server của test này
+        const o = (await pool.query('SELECT id FROM orders WHERE auction_id = $1', [a1])).rows[0];
+        assert.ok(o, 'phải có đơn');
+        const both = { auctionId: String(a1), orderId: String(o.id) };
+        await checkData({ id: W, role: 'bidder', sock: sW, type: 'win', expect: both });
+        await checkData({ id: L, role: 'bidder', sock: sL, type: 'refund', expect: { auctionId: String(a1) } });
+        await checkData({ id: S, role: 'seller', sock: sS, type: 'sold', expect: both });
+
+        await engine.payOrder({ bidderId: W, orderId: o.id, method: 'wallet' });
+        await checkData({ id: W, role: 'bidder', sock: sW, type: 'address_reminder', expect: { orderId: String(o.id), auctionId: String(a1) } });
+      });
+      await step('mỗi loại win / sold / address_reminder chỉ ghi đúng một thông báo cho luồng trên', async () => {
+        const types = (await pool.query(
+          `SELECT type, count(*)::int AS n FROM notifications WHERE account_id = ANY($1) AND type IN ('win','sold','address_reminder')
+           GROUP BY type ORDER BY type`, [[W, S]])).rows;
+        assert.deepStrictEqual(types, [{ type: 'address_reminder', n: 1 }, { type: 'sold', n: 1 }, { type: 'win', n: 1 }]);
+      });
+      await step('refund khi huỷ phiên (cancelAuction) có data { auctionId }', async () => {
+        const { auctionId: a2 } = await mkAuction(S);
+        await engine.joinAuction({ bidderId: L, auctionId: a2 });
+        const done = await tx((c) => engine.cancelAuction(c, a2, { reason: 'test' }));
+        done.emit();
+        await checkData({ id: L, role: 'bidder', sock: sL, type: 'refund', expect: { auctionId: String(a2) } });
+      });
+      await step('warn quá hạn thanh toán (processPaymentTimeouts) có data { orderId, auctionId }', async () => {
+        const { auctionId: a3 } = await mkAuction(S);
+        await engine.joinAuction({ bidderId: L, auctionId: a3 });
+        await engine.placeBid({ bidderId: L, auctionId: a3, increment: 50_000 });
+        await expire(a3);
+        await engine.closeAuction(a3);
+        const o = (await pool.query('SELECT id FROM orders WHERE auction_id = $1', [a3])).rows[0];
+        await pool.query(`UPDATE orders SET payment_deadline = now() - interval '1 minute' WHERE id = $1`, [o.id]);
+        await engine.processPaymentTimeouts();
+        await checkData({ id: L, role: 'bidder', sock: sL, type: 'warn', expect: { orderId: String(o.id), auctionId: String(a3) } });
+      });
+      await step('thông báo cũ data = null vẫn đọc được qua API', async () => {
+        await pool.query(`INSERT INTO notifications (account_id, type, title) VALUES ($1, 'outbid', $2)`, [W, `${PREFIX}cũ`]);
+        const r = await fetch(`${url}/api/notifications?limit=50`, { headers: { Authorization: `Bearer ${tok(W, 'bidder')}` } });
+        const body = await r.json();
+        assert.strictEqual(r.status, 200);
+        const old = body.data.notifications.find((n) => n.title === `${PREFIX}cũ`);
+        assert.strictEqual(old.data, null);
+      });
+    } finally {
+      sockets.forEach((s) => s.close());
+      await new Promise((res) => server.close(res));
+    }
+  }
+
   console.log('Socket.io: tạm dừng / tiếp tục và ngắt tài khoản bị khoá');
   {
     const jwt = require('jsonwebtoken');

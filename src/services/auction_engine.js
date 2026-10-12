@@ -202,6 +202,7 @@ async function placeBid({ bidderId, auctionId, amount: requested, increment }) {
         accountId: latest.bidder_id,
         type: 'outbid',
         title: `Bạn đã bị vượt giá · ${a.title} · ${fmt(amount)}`,
+        data: { auctionId: String(auctionId) },
       });
     }
 
@@ -290,6 +291,7 @@ async function closeAuction(auctionId) {
           title: winTitle({
             title: a.title, finalPrice, orderId: order.rows[0].id, paymentDeadline: order.rows[0].payment_deadline,
           }),
+          data: { auctionId: String(auctionId), orderId: String(order.rows[0].id) },
         }));
       } else {
         await client.query(`UPDATE auction_deposits SET status = 'released' WHERE id = $1`, [d.id]);
@@ -298,6 +300,7 @@ async function closeAuction(auctionId) {
           accountId: d.bidder_id,
           type: 'refund',
           title: `Đã hoàn cọc ${fmt(amount)} · ${a.title} (bạn không thắng phiên)`,
+          data: { auctionId: String(auctionId) },
         }));
       }
     }
@@ -305,6 +308,7 @@ async function closeAuction(auctionId) {
       accountId: a.seller_id,
       type: 'sold',
       title: `Phiên "${a.title}" đã kết thúc với giá ${fmt(finalPrice)}`,
+      data: { auctionId: String(auctionId), orderId: String(order.rows[0].id) },
     }));
     return { auctionId, hasWinner: true, orderId: order.rows[0].id, notes };
   });
@@ -352,6 +356,7 @@ async function cancelAuction(client, auctionId, { reason = 'Phiên bị huỷ b�
       accountId: d.bidder_id,
       type: 'refund',
       title: `Phiên "${a.title}" đã bị huỷ (${reason}). Cọc ${fmt(d.amount)} đã hoàn về ví.`,
+      data: { auctionId: String(auctionId) },
     }));
   }
   return { notes, emit: () => {
@@ -469,7 +474,10 @@ async function payOrder({ bidderId, orderId, method = 'wallet' }) {
     // (khoá FOR UPDATE + kiểm tra 'paid' ở trên) nên thông báo này không bao giờ bị gửi trùng.
     const reminder = o.shipping_address_id == null
       ? await createNotification(client, {
-        accountId: bidderId, type: 'address_reminder', title: addressReminderTitle({ title: o.title, orderId: o.id }),
+        accountId: bidderId,
+        type: 'address_reminder',
+        title: addressReminderTitle({ title: o.title, orderId: o.id }),
+        data: { orderId: String(o.id), auctionId: String(o.auction_id) },
       })
       : null;
     return { result: { orderId: o.id, paymentStatus: 'paid', totalDue, balanceAfter: tx.balanceAfter }, reminder };
@@ -514,6 +522,7 @@ async function processPaymentTimeouts() {
           accountId: o.bidder_id,
           type: 'warn',
           title: `Quá hạn thanh toán · ${o.title}. Cọc đã bị tịch thu và giao dịch bị huỷ.`,
+          data: { orderId: String(o.id), auctionId: String(o.auction_id) },
         });
       });
       if (note !== undefined) { emitNotification(note); expired.push(id); }
