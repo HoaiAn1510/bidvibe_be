@@ -9,25 +9,28 @@ const { createNotification, emitNotification } = require('./notification_service
 // Trả về các thông báo để nơi gọi emitNotification() sau COMMIT.
 async function releasePayout(client, order, { auto }) {
   await client.query(`UPDATE orders SET payout_status = 'released' WHERE id = $1`, [order.id]);
+  const data = { orderId: order.id, auctionId: order.auction_id };
   const notes = [await createNotification(client, {
     accountId: order.seller_id,
     type: 'payout',
     title: auto
       ? `Đã tự động giải ngân đơn "${order.title}" (quá 72 giờ sau khi giao, người mua không phản hồi).`
       : `Người mua đã xác nhận nhận hàng, đơn "${order.title}" đã được giải ngân.`,
+    data,
   })];
   if (auto) {
     notes.push(await createNotification(client, {
       accountId: order.bidder_id,
       type: 'info',
       title: `Đơn "${order.title}" đã hoàn tất: quá 72 giờ sau khi giao, hệ thống tự xác nhận.`,
+      data,
     }));
   }
   return notes;
 }
 
 const ORDER_FOR_PAYOUT = `
-  SELECT o.id, o.bidder_id, o.seller_id, o.payout_status, o.payout_deadline, o.delivered_confirmed_at,
+  SELECT o.id, o.auction_id, o.bidder_id, o.seller_id, o.payout_status, o.payout_deadline, o.delivered_confirmed_at,
          l.title
   FROM orders o JOIN auctions a ON a.id = o.auction_id JOIN listings l ON l.id = a.listing_id
 `;
