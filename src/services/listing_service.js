@@ -38,7 +38,7 @@ const LISTING_SELECT = `
          l.starting_price, l.duration_hours, l.status, l.created_at,
          c.code AS category,
          a.id AS auction_id, a.status AS auction_status, a.current_price, a.ends_at,
-         (SELECT json_agg(json_build_object('id', p.id, 'url', p.url, 'orderIndex', p.order_index)
+         (SELECT json_agg(json_build_object('id', p.id::text, 'url', p.url, 'orderIndex', p.order_index)
                           ORDER BY p.order_index, p.id)
             FROM listing_photos p WHERE p.listing_id = l.id) AS photos,
          (SELECT json_build_object('decision', ap.decision, 'reason', ap.reason, 'decidedAt', ap.decided_at)
@@ -182,6 +182,17 @@ async function moveToAppraisal(sellerId, listingId, fromStatus, action) {
   });
 }
 
+// Xoá một ảnh của tin (chỉ khi tin còn sửa được). Trả danh sách ảnh còn lại.
+async function removePhoto(sellerId, listingId, photoId) {
+  return inTransaction(async (client) => {
+    const l = await findOwned(client, sellerId, listingId, { lock: true });
+    if (!EDITABLE.includes(l.status)) throw invalidState(l.status, 'xoá ảnh');
+    const del = await client.query('DELETE FROM listing_photos WHERE id = $1 AND listing_id = $2', [photoId, listingId]);
+    if (!del.rowCount) throw new AppError('Không tìm thấy ảnh', 404, 'NOT_FOUND');
+    return { photos: (await getView(client, listingId)).photos };
+  });
+}
+
 const submit = (sellerId, listingId) => moveToAppraisal(sellerId, listingId, 'draft', 'gửi thẩm định');
 const resubmit = (sellerId, listingId) => moveToAppraisal(sellerId, listingId, 'needs_info', 'nộp lại');
 
@@ -207,5 +218,5 @@ async function listCategories() {
 }
 
 module.exports = {
-  invalidState, create, update, addPhotos, submit, resubmit, listMine, listCategories,
+  invalidState, create, update, addPhotos, removePhoto, submit, resubmit, listMine, listCategories,
 };

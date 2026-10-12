@@ -173,7 +173,66 @@ async function getMe(user) {
   );
   const account = result.rows[0];
   if (!account) throw new AppError('Không tìm thấy tài khoản', 404, 'NOT_FOUND');
-  return { ...toAccountView(account), role: user.role, kind: 'account' };
+  const me = { ...toAccountView(account), role: user.role, kind: 'account' };
+  if (user.role === 'seller') {
+    const s = await pool.query('SELECT store_name FROM sellers WHERE account_id = $1', [user.id]);
+    me.storeName = s.rows[0] ? s.rows[0].store_name : null;
+  }
+  return me;
 }
 
-module.exports = { SALT_ROUNDS, register, login, loginOps, getMe };
+// PATCH /api/me (BE2 thêm): sửa hồ sơ của tài khoản người dùng. Chỉ đổi trường có gửi lên;
+// phone / avatarUrl gửi null để xoá. Seller sửa được tên gian hàng (shopName -> sellers.store_name).
+async function updateMe(user, input = {}) {
+  if (user.kind !== 'account') {
+    throw new AppError('Tài khoản nội bộ không sửa hồ sơ qua API này', 403, 'FORBIDDEN');
+  }
+  const sets = [];
+  const params = [user.id];
+  const set = (column, value) => { params.push(value); sets.push(`${column} = $${params.length}`); };
+  if (input.fullName !== undefined) set('full_name', validate.text(input.fullName, 'Họ tên', { max: 100 }));
+  if (input.phone !== undefined) set('phone', validate.phone(input.phone, { required: false }));
+  if (input.avatarUrl !== undefined) {
+    set('avatar_url', input.avatarUrl === null || input.avatarUrl === '' ? null : validate.url(input.avatarUrl, 'Ảnh đại diện'));
+  }
+  let storeName;
+  if (input.shopName !== undefined) {
+    if (user.role !== 'seller') throw validate.invalid('Chỉ Seller có tên gian hàng');
+    storeName = validate.text(input.shopName, 'Tên gian hàng', { max: 100 });
+  }
+  if (!sets.length && storeName === undefined) throw validate.invalid('Không có trường nào để cập nhật');
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (sets.length) await client.query(`UPDATE accounts SET ${sets.join(', ')} WHERE id = $1`, params);
+    if (storeName !== undefined) {
+      await client.query('UPDATE sellers SET store_name = $2 WHERE account_id = $1', [user.id, storeName]);
+    }
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+  return getMe(user);
+}
+
+// POST /api/me/password (BE2 thêm): đổi mật khẩu, cho cả tài khoản người dùng và nội bộ.
+async function changePassword(user, input = {}) {
+  if (typeof input.currentPassword !== 'string' || !input.currentPassword) {
+    throw validate.invalid('Mật khẩu hiện tại không được để trống');
+  }
+  const newPassword = validate.password(input.newPassword);
+  const table = user.kind === 'ops' ? 'ops_accounts' : 'accounts';
+  const { rows } = await pool.query(`SELECT password_hash FROM ${table} WHERE id = $1`, [user.id]);
+  if (!rows[0]) throw new AppError('Không tìm thấy tài khoản', 404, 'NOT_FOUND');
+  const matches = rows[0].password_hash && await bcrypt.compare(input.currentPassword, rows[0].password_hash);
+  if (!matches) throw new AppError('Mật khẩu hiện tại không đúng', 400, 'WRONG_PASSWORD');
+  const hash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+  await pool.query(`UPDATE ${table} SET password_hash = $2 WHERE id = $1`, [user.id, hash]);
+  return { changed: true };
+}
+
+module.exports = { SALT_ROUNDS, register, login, loginOps, getMe, updateMe, changePassword };

@@ -31,7 +31,7 @@ Một tài khoản `accounts` chỉ là Bidder **hoặc** Seller, không cả ha
 | | |
 |---|---|
 | Ai | Bidder, Seller (đăng ký + đăng nhập); Appraiser / Warehouse / Admin (chỉ đăng nhập, tài khoản do Admin tạo qua `POST /api/admin/ops-accounts`) |
-| Endpoint | `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/ops/login`, `GET /api/me` |
+| Endpoint | `POST /api/auth/register`, `POST /api/auth/login`, `POST /api/auth/ops/login`, `GET /api/me`; hồ sơ: `PATCH /api/me` (họ tên, số điện thoại, ảnh đại diện; Seller thêm tên gian hàng), `POST /api/me/password` |
 | Code | `routes/auth.routes.js`, `services/auth_service.js`, `middleware/auth.js`, `utils/validate.js` |
 | Bảng | Ghi `accounts` (`email`, `password_hash` băm bcrypt) + một dòng `bidders` hoặc `sellers`. Đăng nhập đọc `accounts` / `ops_accounts` (`password_hash`, `status`) |
 | Kiểm tra đầu vào | Email đúng định dạng, mật khẩu 6–72 ký tự, họ tên không rỗng, vai trò chỉ `bidder` / `seller` |
@@ -44,12 +44,13 @@ Một tài khoản `accounts` chỉ là Bidder **hoặc** Seller, không cả ha
 | | |
 |---|---|
 | Ai | Seller |
-| Endpoint | `POST /api/listings`, `PATCH /api/listings/:id`, `POST /api/listings/:id/photos`, `POST /api/listings/:id/submit`, `GET /api/listings/mine`, `GET /api/categories`, `POST /api/ai/suggest-price` |
-| Code | `services/listing_service.js`, `services/ai_price_suggestion.js` |
+| Endpoint | `POST /api/listings`, `PATCH /api/listings/:id`, `POST /api/uploads/images`, `POST /api/listings/:id/photos`, `DELETE /api/listings/:id/photos/:photoId`, `POST /api/listings/:id/submit`, `GET /api/listings/mine`, `GET /api/categories`, `POST /api/ai/suggest-price` |
+| Code | `services/listing_service.js`, `services/upload_service.js`, `services/ai_price_suggestion.js` |
 | Bảng | Ghi `listings` (`seller_id`, `category_id`, `title`, `starting_price`, `duration_hours`, `ai_suggested_price`, `status`), `listing_photos` (`url`, `order_index`, tối đa 10 ảnh) |
-| Trạng thái | Tạo: `draft`. Gửi thẩm định: `draft` → `pending_appraisal` (cần ít nhất 1 ảnh). Chỉ sửa / thêm ảnh khi `draft` hoặc `needs_info`, sai thì `409 INVALID_STATE` |
-| Giao dịch | Sửa, thêm ảnh, gửi thẩm định đều khoá dòng `listings` (`FOR UPDATE`) trong một giao dịch |
-| Ghi chú | Ảnh chỉ lưu URL. Gợi ý giá dùng lịch sử phiên cùng danh mục (`listEndedHistory` của BE1), thiếu dữ liệu thì dùng khung giá soạn sẵn; chưa gọi mô hình AI |
+| Thêm ảnh | Ảnh trong điện thoại: `POST /api/uploads/images` (multipart, trường `files`, 1–8 ảnh JPEG / PNG / WEBP, mỗi ảnh ≤ 5 MB, nhận diện bằng magic bytes) tải lên Supabase Storage (bucket public `STORAGE_BUCKET`), trả `urls`; app gửi `urls` vào `POST /api/listings/:id/photos`. URL `http(s)` có sẵn gửi thẳng. Xoá ảnh: `DELETE /api/listings/:id/photos/:photoId`. Chưa cấu hình Storage thì tải ảnh trả `503 UPLOAD_NOT_CONFIGURED`, thêm ảnh bằng URL vẫn chạy |
+| Trạng thái | Tạo: `draft`. Gửi thẩm định: `draft` → `pending_appraisal` (cần ít nhất 1 ảnh). Chỉ sửa / thêm / xoá ảnh khi `draft` hoặc `needs_info`, sai thì `409 INVALID_STATE` |
+| Giao dịch | Sửa, thêm / xoá ảnh, gửi thẩm định đều khoá dòng `listings` (`FOR UPDATE`) trong một giao dịch |
+| Ghi chú | Bảng `listing_photos` chỉ lưu URL; file ảnh nằm ở Storage. Gợi ý giá dùng lịch sử phiên cùng danh mục (`listEndedHistory` của BE1), thiếu dữ liệu thì dùng khung giá soạn sẵn; chưa gọi mô hình AI |
 
 ### Bước 3 — Thẩm định: duyệt, từ chối, yêu cầu bổ sung [Đã có]
 
@@ -184,7 +185,7 @@ Cờ đã `terminated` / `safe` không đổi nữa (`409`).
 
 - **Admin**: `GET /api/admin/dashboard`, `GET /api/admin/report/weekly` (7 ngày, từ dữ liệu thật), quản lý tài khoản ops (`GET/POST/PATCH /api/admin/ops-accounts`, mật khẩu bcrypt) và khoá / mở khoá Bidder, Seller (`GET/PATCH /api/admin/accounts`). Khoá tài khoản (cả hai loại): sau khi `UPDATE` đã lưu, `admin_service` gọi `disconnectAccount(id, { kind, reason: 'Tài khoản đã bị khoá' })` của BE1 — mọi socket đang mở nhận `account:disconnected` rồi bị ngắt và không kết nối lại được cho tới khi mở khoá; REST trả `403 ACCOUNT_SUSPENDED` ngay. Ngắt socket lỗi thì chỉ ghi log, API khoá vẫn trả `200`.
 - **Chatbot**: `POST /api/chat/messages`, `GET /api/chat/sessions/:id/messages`; ghi `chat_sessions`, `chat_messages`; trả lời soạn sẵn theo từ khoá.
-- **Thông báo**: `GET /api/notifications`, `POST /api/notifications/:id/read`. Mỗi thông báo có trường `data` (migration `008`, cột `notifications.data` JSONB) chứa id liên quan (`auctionId`, `orderId`, `listingId`, `disputeId`) để app bấm vào là mở đúng phiên / đơn / tin / tranh chấp; Socket.io `notification:new` gửi kèm cùng `data`. Mọi thông báo do BE1 và BE2 tạo đều đã có `data`; BE1: `outbid` / `refund` hoàn cọc `{ auctionId }`, `win` / `sold` `{ auctionId, orderId }`, `address_reminder` / `warn` quá hạn thanh toán `{ orderId, auctionId }`. Chỉ thông báo tạo trước migration `008` có `data = null`. Bảng đầy đủ: [`api.md` mục 15](api.md#trường-data--mở-đúng-màn-khi-bấm-thông-báo).
+- **Thông báo**: `GET /api/notifications`, `POST /api/notifications/:id/read`, `POST /api/notifications/read-all`. Mỗi thông báo có trường `data` (migration `008`, cột `notifications.data` JSONB) chứa id liên quan (`auctionId`, `orderId`, `listingId`, `disputeId`) để app bấm vào là mở đúng phiên / đơn / tin / tranh chấp; Socket.io `notification:new` gửi kèm cùng `data`. Mọi thông báo do BE1 và BE2 tạo đều đã có `data`; BE1: `outbid` / `refund` hoàn cọc `{ auctionId }`, `win` / `sold` `{ auctionId, orderId }`, `address_reminder` / `warn` quá hạn thanh toán `{ orderId, auctionId }`. Chỉ thông báo tạo trước migration `008` có `data = null`. Bảng đầy đủ: [`api.md` mục 15](api.md#trường-data--mở-đúng-màn-khi-bấm-thông-báo).
 
 ## 3. Sơ đồ
 
@@ -203,7 +204,10 @@ sequenceDiagram
 
     B->>API: POST /api/auth/register, /api/auth/login
     API-->>B: JWT
-    S->>API: POST /api/listings, /photos, /submit
+    S->>API: POST /api/listings
+    S->>API: POST /api/uploads/images (ảnh trong máy -> Supabase Storage)
+    API-->>S: urls
+    S->>API: POST /api/listings/{id}/photos (urls), /submit
     A->>API: POST /api/appraisals/{id}/decision more_info
     S->>API: POST /api/listings/{id}/resubmit
     A->>API: POST /api/appraisals/{id}/decision approve
@@ -330,6 +334,8 @@ Giới hạn hiện tại:
 | Hạn token đăng nhập | 7 ngày | `TOKEN_TTL`, `auth_service.js` | Có |
 | Đẩy tạm dừng / tiếp tục | Ngay sau COMMIT, qua `LISTEN auction_pause` (một kết nối Postgres riêng, tự kết nối lại sau 5 giây nếu rớt) | `sockets/pause_listener.js` (BE1), trigger migration 007 | Có |
 | Kết nối DB rảnh bị rớt | Ghi log, không sập tiến trình; chờ kết nối tối đa 20 giây | `pool.on('error')`, `connectionTimeoutMillis`, `config/db.js` | Có |
+| Tắt server (Ctrl+C, nodemon khởi động lại) | Dừng scheduler, `pause_listener`, đóng Socket.io và server, `pool.end()` trong tối đa 3 giây để trả kết nối Supabase (giới hạn 15) | `shutdown()` trong `app.js` | Có |
+| Kiểm tra sống | `GET /api/health` chạy `SELECT 1` (chờ tối đa 3 giây): `db: 'ok'`, lỗi thì `503 DB_UNAVAILABLE` | `routes/index.js` | Có |
 
 Scheduler chỉ khởi động khi chạy server trực tiếp (`npm start` / `npm run dev`); chạy script hoặc test thì không có tiến trình nền. Nhiều máy cùng chạy server trên database dùng chung thì khoá `FOR UPDATE SKIP LOCKED` ngăn xử lý trùng.
 
@@ -378,6 +384,6 @@ Không còn việc nào chặn luồng chính ở phía backend.
 | # | Việc | Chủ |
 |---|---|---|
 | 2 | **Nhắc người mua chọn địa chỉ giao hàng.** Phần BE1 **xong**: thông báo `win` nhắc chọn địa chỉ, thanh toán xong mà đơn chưa có địa chỉ thì gửi `address_reminder` (một lần mỗi đơn). Còn lại (BE2, tuỳ chọn): nhắc thêm khi kho đóng gói mà đơn chưa có địa chỉ, cho kho lọc đơn thiếu địa chỉ | BE2 |
-| 3 | **Seller không quản lý được ảnh / tin nháp:** chưa có API xoá ảnh, xem chi tiết một tin, hay huỷ tin nháp (hiện chỉ có danh sách `GET /api/listings/mine`). Khi bị yêu cầu bổ sung ảnh, Seller chỉ thêm được ảnh (tối đa 10), không bỏ ảnh xấu | BE2 |
+| 3 | **Seller chưa quản lý hết tin nháp:** đã có tải ảnh từ điện thoại và xoá ảnh (`DELETE /api/listings/:id/photos/:photoId`); còn thiếu xem chi tiết một tin và huỷ tin nháp (hiện chỉ có danh sách `GET /api/listings/mine`), sắp lại thứ tự ảnh | BE2 |
 | 4 | **Kiểm thử chạy trên database dùng chung**, chạy tay, không có CI. Dữ liệu test có tiền tố riêng và tự dọn, nhưng trong lúc chạy vẫn có tài khoản / phiên test trên DB thật và job nền của server đang chạy có thể chạm vào | BE1, BE2 |
 

@@ -185,6 +185,91 @@
               ]
             }
           }
+        },
+        {
+          "name": "PATCH /api/me",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/me",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "me"
+              ]
+            },
+            "description": "Quyền: bidder, seller. Sửa họ tên / số điện thoại / ảnh đại diện; Seller thêm shopName. Chi tiết: docs/api.md mục 3.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_seller}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"fullName\": \"Trần Thu Hà\",\n  \"phone\": \"0903 222 333\",\n  \"shopName\": \"Gốm Hà Bát Tràng\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /api/me/password",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/me/password",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "me",
+                "password"
+              ]
+            },
+            "description": "Quyền: mọi vai trò. Sai mật khẩu hiện tại: 400 WRONG_PASSWORD. Chi tiết: docs/api.md mục 3.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_bidder}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"currentPassword\": \"123456\",\n  \"newPassword\": \"matkhaumoi1\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
         }
       ]
     },
@@ -578,6 +663,63 @@
           }
         },
         {
+          "name": "POST /api/uploads/images",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/uploads/images?purpose=listing",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "uploads",
+                "images"
+              ],
+              "query": [
+                {
+                  "key": "purpose",
+                  "value": "listing"
+                }
+              ]
+            },
+            "description": "Quyền: bidder, seller. form-data, trường files (chọn 1–8 ảnh JPEG/PNG/WEBP, mỗi ảnh ≤ 5 MB). Trả { urls } để gửi vào POST /api/listings/:id/photos. Chưa cấu hình Storage: 503 UPLOAD_NOT_CONFIGURED. Chi tiết: docs/api.md mục 5.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_seller}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "files",
+                  "type": "file",
+                  "src": []
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "if (j.success) pm.collectionVariables.set(\"uploaded_urls\", JSON.stringify(j.data.urls));"
+                ]
+              }
+            }
+          ]
+        },
+        {
           "name": "POST /api/listings/:id/photos",
           "request": {
             "method": "POST",
@@ -618,6 +760,37 @@
                   "language": "json"
                 }
               }
+            }
+          }
+        },
+        {
+          "name": "DELETE /api/listings/:id/photos/:photoId",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/listings/{{listing_id}}/photos/{{photo_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "listings",
+                "{{listing_id}}",
+                "photos",
+                "{{photo_id}}"
+              ]
+            },
+            "description": "Quyền: seller, tin của mình khi draft / needs_info. photo_id lấy từ photos[].id của tin. Chi tiết: docs/api.md mục 5.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_seller}}",
+                  "type": "string"
+                }
+              ]
             }
           }
         },
@@ -2390,6 +2563,35 @@
               ]
             }
           }
+        },
+        {
+          "name": "POST /api/notifications/read-all",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/notifications/read-all",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "notifications",
+                "read-all"
+              ]
+            },
+            "description": "Quyền: bidder, seller. Đánh dấu mọi thông báo đã đọc, trả { updated }. Chi tiết: docs/api.md mục 15.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_bidder}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
         }
       ]
     },
@@ -2555,7 +2757,7 @@
                 "health"
               ]
             },
-            "description": "Quyền: không cần đăng nhập. Chi tiết: docs/api.md mục 17.",
+            "description": "Quyền: không cần đăng nhập. Chi tiết: docs/api.md mục 17. Trả db: 'ok' | 'error'; database lỗi thì 503.",
             "auth": {
               "type": "noauth"
             }

@@ -24,9 +24,22 @@ npm run dev
 | `NODE_ENV` | `production` thì lỗi 5xx chỉ trả "Lỗi hệ thống". |
 | `DATABASE_URL` | Chuỗi kết nối Postgres. Với Supabase dùng chuỗi **Session pooler** (host `*.pooler.supabase.com`, cổng 5432, username dạng `postgres.<mã project>`). **Không** dùng Direct connection: nó chỉ có IPv6 nên nhiều mạng không kết nối được. |
 | `DB_SSL` | `true` khi dùng Supabase. |
-| `DB_POOL_MAX` | Tuỳ chọn, số kết nối tối đa của pool (bỏ trống thì 10; `.env.example` đặt 4). Session pooler của Supabase chỉ cho **15 kết nối cho cả database**, cộng dồn mọi bản đang chạy: `npm run dev` của từng người, `test:be1`, `test:be2` (hai bộ test tự dùng 4), mỗi tiến trình thêm 1 kết nối riêng cho `LISTEN` của `pause_listener`. Vượt giới hạn thì gặp lỗi `EMAXCONNSESSION`. Không đổi sang transaction pooler (cổng 6543) vì `LISTEN` không chạy qua đó. |
+| `DB_POOL_MAX` | Tuỳ chọn, số kết nối tối đa của pool (bỏ trống thì 10; `.env.example` đặt 4). Session pooler của Supabase chỉ cho **15 kết nối cho cả database**, cộng dồn mọi bản đang chạy: `npm run dev` của từng người, `test:be1`, `test:be2` (hai bộ test tự dùng 4), mỗi tiến trình thêm 1 kết nối riêng cho `LISTEN` của `pause_listener`. Vượt giới hạn thì gặp lỗi `EMAXCONNSESSION`. Không đổi sang transaction pooler (cổng 6543) vì `LISTEN` không chạy qua đó. **Người làm app (FE) tự chạy backend riêng để thử: đặt `DB_POOL_MAX=2`.** |
 | `JWT_SECRET` | Khoá ký token đăng nhập. Bắt buộc, không có giá trị mặc định. |
 | `AUTO_PAYOUT_ENABLED` | `false` để tắt job tự giải ngân sau 72 giờ (mặc định bật). |
+| `SUPABASE_URL` | Tuỳ chọn, dùng cho tải ảnh (`POST /api/uploads/images`). Dạng `https://<project-ref>.supabase.co`. |
+| `SUPABASE_SERVICE_KEY` | Tuỳ chọn, khoá để backend ghi vào Storage: **Secret key** (`sb_secret_...`) hoặc khoá legacy **service_role** (`eyJ...`). Khoá này có toàn quyền trên project: chỉ đặt trong `.env` của backend, không đưa vào app, không commit, không dán vào log hay chat. |
+| `STORAGE_BUCKET` | Tuỳ chọn, tên bucket chứa ảnh (mặc định `listing-photos`). Chưa có thì backend tự tạo bucket public, giới hạn 5 MB, chỉ nhận JPEG / PNG / WEBP. |
+
+Thiếu `SUPABASE_URL` hoặc `SUPABASE_SERVICE_KEY` thì server vẫn chạy bình thường, chỉ route tải ảnh trả `503 UPLOAD_NOT_CONFIGURED` (app vẫn thêm ảnh được bằng URL có sẵn).
+
+**Lấy key Storage**: Supabase Dashboard → chọn project → **Project Settings → API Keys**.
+- Tab "API Keys": bấm tạo / hiện **Secret key** (`sb_secret_...`).
+- Hoặc tab "Legacy API Keys": khoá **service_role**.
+- Không dùng **Publishable** / **anon** key: hai khoá này không có quyền ghi Storage.
+- `SUPABASE_URL`: Project Settings → **Data API** → Project URL.
+
+Backend chỉ gửi header `apikey` với khoá `sb_secret_`, và thêm `Authorization: Bearer` khi khoá là JWT (`eyJ...`).
 
 File `.env` chứa mật khẩu nên **không được đưa lên git** (đã có trong `.gitignore`). Mỗi người tự tạo `.env` của mình.
 
@@ -34,7 +47,7 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 
 | Lệnh | Việc |
 |---|---|
-| `npm run dev` | Chạy server, tự khởi động lại khi sửa code |
+| `npm run dev` | Chạy server, tự khởi động lại khi sửa `src/` hoặc `.env` (`nodemon.json`). Khi khởi động in địa chỉ cho máy này, Android Emulator (`10.0.2.2`) và điện thoại thật (IP LAN); Ctrl+C trả kết nối database ngay |
 | `npm start` | Chạy server (không tự khởi động lại) |
 | `npm run db:migrate` | Chạy các file trong `migrations/` chưa được áp dụng |
 | `npm run db:seed` | Thêm dữ liệu demo (BE1 + BE2), chạy lại nhiều lần không bị trùng. Mật khẩu demo `123456` |
@@ -98,7 +111,7 @@ npm run demo:bidbot -- --auction 871 --only-outbid --stop-before 120   # chỉ v
 ```
 migrations/        # file SQL tạo/đổi cấu trúc database (001 ... 008)
 scripts/           # migrate, seed (seed_demo.js BE1, seed.js BE2), test_be1, test_be2 (+ test_be2_clean), docs_check
-docs/              # tài liệu (xem mục Tài liệu), docs/archive/ là bản lưu trữ
+docs/              # tài liệu (xem mục Tài liệu)
 src/
 ├── config/        # kết nối DB (db.js), biến môi trường (env.js)
 ├── middleware/    # auth (requireAuth, requireRole), error handler
@@ -167,8 +180,7 @@ Hai domain nối nhau qua các điểm sau, cần tôn trọng:
 | [`docs/mainflow.md`](docs/mainflow.md) | Cả nhóm, giảng viên | Luồng nghiệp vụ từ đăng ký đến giải ngân, sơ đồ, luồng tiền, luồng thời gian, việc còn thiếu |
 | [`docs/architecture.md`](docs/architecture.md) | Backend | Quy ước, phân chia BE1 / BE2 theo file, hàm hai bên gọi nhau, quyết định thiết kế |
 | [`docs/test-be2.md`](docs/test-be2.md) | Backend | Kết quả kiểm thử BE2 (sinh tự động bởi `node scripts/test_be2.js --report docs/test-be2.md`) |
-| [`docs/bidvibe.postman_collection.json`](docs/bidvibe.postman_collection.json), [`docs/bidvibe.postman_environment.json`](docs/bidvibe.postman_environment.json) | App, backend | Bộ request Postman cho 60 route; đăng nhập tự lưu token |
-| [`docs/archive/handoff.md`](docs/archive/handoff.md) | — | Bản bàn giao cũ, chỉ để tra cứu lịch sử |
+| [`docs/bidvibe.postman_collection.json`](docs/bidvibe.postman_collection.json), [`docs/bidvibe.postman_environment.json`](docs/bidvibe.postman_environment.json) | App, backend | Bộ request Postman cho 65 route; đăng nhập tự lưu token |
 
 ## Quy ước Git
 
