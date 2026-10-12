@@ -1,6 +1,6 @@
 # Kiến trúc & Quy ước — BidVibe Backend
 
-> Cập nhật: 2026-10-10.
+> Cập nhật: 2026-10-12.
 
 Tài liệu cho người viết backend. API cho app xem [`api.md`](api.md), Socket.io xem [`socket.md`](socket.md).
 
@@ -27,8 +27,8 @@ Mọi endpoint trả về theo format thống nhất (theo đúng `middleware/er
 - `sockets/auction_socket.js`, `sockets/index.js`, `sockets/pause_listener.js`
 
 ### BE2 — Marketplace Operations
-- `routes/auth.routes.js`, `routes/listing.routes.js`, `routes/appraisal.routes.js`, `routes/ai.routes.js`, `routes/address.routes.js`, `routes/fulfilment.routes.js`, `routes/warehouse.routes.js`, `routes/dispute.routes.js`, `routes/admin.routes.js`, `routes/notification.routes.js`, `routes/chat.routes.js`
-- `services/auth_service.js`, `services/listing_service.js`, `services/appraisal_service.js`, `services/ai_price_suggestion.js`, `services/address_service.js`, `services/fulfilment_service.js`, `services/payout_service.js`, `services/dispute_service.js`, `services/admin_service.js`, `services/notification_service.js`, `services/chat_service.js`
+- `routes/auth.routes.js`, `routes/listing.routes.js`, `routes/appraisal.routes.js`, `routes/ai.routes.js`, `routes/address.routes.js`, `routes/fulfilment.routes.js`, `routes/warehouse.routes.js`, `routes/dispute.routes.js`, `routes/admin.routes.js`, `routes/notification.routes.js`, `routes/chat.routes.js`, `routes/upload.routes.js`
+- `services/auth_service.js`, `services/listing_service.js`, `services/appraisal_service.js`, `services/ai_price_suggestion.js`, `services/address_service.js`, `services/fulfilment_service.js`, `services/payout_service.js`, `services/dispute_service.js`, `services/admin_service.js`, `services/notification_service.js`, `services/chat_service.js`, `services/upload_service.js`
 - `utils/validate.js`
 
 BE2 không có thư mục model riêng: truy vấn nằm trong service.
@@ -95,7 +95,7 @@ Tạm dừng / tiếp tục phiên: BE2 chỉ cần đổi `flagged_auctions.sta
 Ghi lại để cả nhóm làm theo; đổi thì cập nhật mục này trước.
 
 1. **Giải ngân cho Seller chỉ đổi `orders.payout_status`** (`pending` → `released`). Chưa có ví Seller, nên không cộng tiền vào đâu; tiền coi như nền tảng chuyển khoản cho người bán ngoài hệ thống.
-2. **Ảnh tin đăng chỉ lưu URL** trong `listing_photos` (`url`, `order_index`). Backend không nhận file upload; app tự tải ảnh lên nơi khác rồi gửi URL. Seed dùng ảnh mẫu `picsum.photos`.
+2. **Ảnh tin đăng lưu URL** trong `listing_photos` (`url`, `order_index`); file ảnh nằm ở Supabase Storage. `POST /api/uploads/images` nhận multipart, kiểm magic bytes, tải lên bucket public bằng REST của Storage (`fetch`, không dùng SDK), trả URL public; app gửi URL đó vào `POST /api/listings/:id/photos`. Khoá `SUPABASE_SERVICE_KEY` chỉ nằm ở backend. Thiếu cấu hình thì route trả `503`, phần còn lại không phụ thuộc Storage. Seed dùng ảnh mẫu `picsum.photos` / Wikimedia.
 3. **AI gợi ý giá và chatbot dùng nội dung soạn sẵn**, chưa gọi mô hình thật (chưa có biến môi trường cho khoá AI). Giữ nguyên chữ ký hàm để sau này thay bằng lời gọi mô hình mà không đổi API.
 4. **Chống chốt phút chót là 30 giây**, đúng như code BE1 (`SNIPE_WINDOW_MS`).
 5. **Duyệt tin:** BE2 đặt `listings.status = 'approved'` rồi gọi `createAuctionForListing` (BE1) trong cùng giao dịch; hàm đó chuyển tin sang `live`. Vì vậy sau khi duyệt, tin luôn ở `live`, còn `approved` chỉ tồn tại bên trong giao dịch.

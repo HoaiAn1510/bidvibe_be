@@ -53,7 +53,7 @@ Một file duy nhất cho toàn bộ REST API của backend. Sự kiện real-ti
 
 **Kiểu dữ liệu**
 
-- `id` là **chuỗi số** (`"12"`). Id trên đường dẫn sai định dạng → `400 VALIDATION_ERROR`. Trong body, các trường id (`auctionId`, `orderId`, `addressId`, `sessionId`) nhận cả số và chuỗi số. Ngoại lệ đã biết: `photos[].id` trong phản hồi tin đăng (mục 5) là **số**, còn ở mục 6 là chuỗi.
+- `id` là **chuỗi số** (`"12"`). Id trên đường dẫn sai định dạng → `400 VALIDATION_ERROR`. Trong body, các trường id (`auctionId`, `orderId`, `addressId`, `sessionId`) nhận cả số và chuỗi số.
 - Tiền là **số nguyên VND** (`1250000`), không có phần thập phân.
 - Thời gian là chuỗi ISO 8601, UTC (`"2026-10-10T15:29:32.100Z"`; một số trường lồng trong JSON trả dạng `"...+00:00"`, vẫn là ISO 8601).
 
@@ -135,14 +135,49 @@ Lỗi: `400 VALIDATION_ERROR`, `401 INVALID_CREDENTIALS`, `403 ACCOUNT_SUSPENDED
 Mọi vai trò. Hồ sơ của người đang đăng nhập.
 
 ```json
-// 200 (bidder / seller)
+// 200 (bidder)
 { "id": "10", "fullName": "Nguyễn Minh Anh", "email": "minhanh@gmail.com", "phone": "0903 112 233",
   "avatarUrl": null, "status": "active", "role": "bidder", "kind": "account" }
+// 200 (seller: thêm storeName = tên gian hàng)
+{ "id": "1122", "fullName": "Trần Thu Hà", "email": "thuha@example.com", "phone": null, "avatarUrl": null,
+  "status": "active", "role": "seller", "kind": "account", "storeName": "Gốm Hà" }
 // 200 (ops)
 { "id": "3", "fullName": "Hoàng Gia Bảo", "email": "admin@bidvibe.vn", "role": "admin", "status": "active", "kind": "ops" }
 ```
 
 Lỗi: `401 UNAUTHORIZED` ("Thiếu token xác thực", "Token không hợp lệ hoặc đã hết hạn", "Tài khoản không còn tồn tại"), `403 ACCOUNT_SUSPENDED`.
+
+### `PATCH /api/me`
+
+Chỉ `bidder` / `seller` (tài khoản `ops` → `403 FORBIDDEN`). Sửa hồ sơ của chính mình; gửi trường nào sửa trường đó:
+
+| Trường | Kiểu | Ghi chú |
+|---|---|---|
+| `fullName` | string | 1–100 ký tự |
+| `phone` | string \| null | 9–15 chữ số, cho phép `+`, khoảng trắng, `.`, `-`, `()`; `null` để xoá |
+| `avatarUrl` | string \| null | URL `http(s)`, thường lấy từ [`POST /api/uploads/images?purpose=avatar`](#post-apiuploadsimages); `null` để xoá |
+| `shopName` | string | Chỉ `seller` (tên gian hàng, 1–100 ký tự); `bidder` gửi → `400` |
+
+Phản hồi `200` cùng dạng [`GET /api/me`](#get-apime):
+
+```json
+// PATCH { "phone": "0903 222 333", "shopName": "Gốm Hà Bát Tràng" } -> 200
+{ "id": "1122", "fullName": "Trần Thu Hà", "email": "thuha@example.com", "phone": "0903 222 333",
+  "avatarUrl": null, "status": "active", "role": "seller", "kind": "account", "storeName": "Gốm Hà Bát Tràng" }
+```
+
+Lỗi: `400 VALIDATION_ERROR` ("Số điện thoại không hợp lệ", "Ảnh đại diện không hợp lệ", "Chỉ Seller có tên gian hàng", "Không có trường nào để cập nhật"), `403 FORBIDDEN`.
+
+### `POST /api/me/password`
+
+Mọi vai trò (cả `ops`). Body `{ "currentPassword": "...", "newPassword": "..." }`; mật khẩu mới 6–72 ký tự. Token cũ vẫn dùng được tới khi hết hạn.
+
+```json
+// 200
+{ "changed": true }
+```
+
+Lỗi: `400 WRONG_PASSWORD` ("Mật khẩu hiện tại không đúng"), `400 VALIDATION_ERROR` ("Mật khẩu tối thiểu 6 ký tự", "Mật khẩu hiện tại không được để trống").
 
 ---
 
@@ -266,11 +301,51 @@ Chỉ `seller`, tin của mình, khi `draft` hoặc `needs_info`. Gửi trườn
 
 Lỗi: `404 NOT_FOUND`, `409 INVALID_STATE` ("Không thể sửa khi tin đăng đang ở trạng thái "chờ thẩm định""), `400 VALIDATION_ERROR`.
 
+### `POST /api/uploads/images`
+
+`bidder` / `seller` (tài khoản `ops` → `403 FORBIDDEN`). Tải ảnh chọn / chụp trên điện thoại lên Supabase Storage, nhận lại URL public để gửi tiếp vào [`POST /api/listings/:id/photos`](#post-apilistingsidphotos) hoặc `avatarUrl` của [`PATCH /api/me`](#patch-apime).
+
+- `multipart/form-data`, trường **`files`** (lặp lại cho mỗi ảnh), 1–8 ảnh mỗi lần, tối đa **5 MB** mỗi ảnh.
+- Chỉ JPEG, PNG, WEBP. Server nhận diện bằng nội dung file (magic bytes), không tin `Content-Type` hay đuôi tên file.
+- Query `?purpose=listing` (mặc định) hoặc `?purpose=avatar`: chỉ quyết định thư mục lưu.
+
+```json
+// 201 — urls theo đúng thứ tự file gửi lên
+{ "urls": [
+  "https://<project-ref>.supabase.co/storage/v1/object/public/listing-photos/listing/1122/1791812307070-0d2895e1720e.png",
+  "https://<project-ref>.supabase.co/storage/v1/object/public/listing-photos/listing/1122/1791812307071-4b1c9a02f3d5.jpg"
+] }
+// 503 — server chưa cấu hình Storage
+{ "code": "UPLOAD_NOT_CONFIGURED", "message": "Máy chủ chưa cấu hình nơi lưu ảnh (Supabase Storage)" }
+```
+
+URL có dạng `{SUPABASE_URL}/storage/v1/object/public/{bucket}/{purpose}/{accountId}/{thời điểm}-{ngẫu nhiên}.{jpg|png|webp}`. Ví dụ `201` ở trên chỉ minh hoạ dạng URL (lúc viết tài liệu chưa có key Storage thật); `503` là phản hồi thật. Code Dart: [`fe-quickstart.md`](fe-quickstart.md#5c-tải-ảnh).
+
+Lỗi: `400 INVALID_FILE_TYPE` ("Ảnh thứ 2 không phải JPEG, PNG hoặc WEBP"), `413 FILE_TOO_LARGE` ("Mỗi ảnh tối đa 5 MB"), `400 TOO_MANY_FILES` ("Tối đa 8 ảnh mỗi lần"), `400 VALIDATION_ERROR` (không có file, sai tên trường, `purpose` sai), `403 FORBIDDEN`, `502 UPLOAD_FAILED` (Storage trả lỗi / không kết nối được), `503 UPLOAD_NOT_CONFIGURED`.
+
 ### `POST /api/listings/:id/photos`
 
-Chỉ `seller`, tin của mình, khi `draft` / `needs_info`. Body `{ "url": "https://..." }` hoặc `{ "urls": ["https://...", ...] }`; chỉ nhận `http(s)`; tối đa 10 ảnh mỗi tin. Ảnh chỉ lưu URL (app tự tải ảnh lên nơi khác). Chưa có API xoá ảnh.
+Chỉ `seller`, tin của mình, khi `draft` / `needs_info`. Body `{ "url": "https://..." }` hoặc `{ "urls": ["https://...", ...] }`; chỉ nhận `http(s)`; tối đa 10 ảnh mỗi tin. Ảnh chọn trên điện thoại: tải lên bằng [`POST /api/uploads/images`](#post-apiuploadsimages) trước, rồi gửi `urls` nhận được vào đây.
 
-Phản hồi `201` là tin đăng với `photos` mới. Lỗi: `400 VALIDATION_ERROR`, `404 NOT_FOUND`, `409 INVALID_STATE`.
+Phản hồi `201` là tin đăng với `photos` mới (`photos[].id` là chuỗi như mọi id khác):
+
+```json
+"photos": [ { "id": "686", "url": "https://picsum.photos/seed/a/800/600", "orderIndex": 0 },
+            { "id": "687", "url": "https://picsum.photos/seed/b/800/600", "orderIndex": 1 } ]
+```
+
+Lỗi: `400 VALIDATION_ERROR`, `404 NOT_FOUND`, `409 INVALID_STATE`.
+
+### `DELETE /api/listings/:id/photos/:photoId`
+
+Chỉ `seller`, tin của mình, khi `draft` / `needs_info`. Xoá một ảnh; các ảnh còn lại giữ nguyên `orderIndex`.
+
+```json
+// 200 — ảnh còn lại
+{ "photos": [ { "id": "687", "url": "https://picsum.photos/seed/b/800/600", "orderIndex": 1 } ] }
+```
+
+Lỗi: `404 NOT_FOUND` (tin không phải của mình, hoặc ảnh không thuộc tin này), `409 INVALID_STATE` ("Không thể xoá ảnh khi tin đăng đang ở trạng thái "chờ thẩm định""), `400 VALIDATION_ERROR` (id sai định dạng).
 
 ### `POST /api/listings/:id/submit`
 
@@ -888,6 +963,17 @@ Không có body.
 
 Lỗi: `404 NOT_FOUND` (không phải thông báo của mình).
 
+### `POST /api/notifications/read-all`
+
+`bidder` / `seller`. Đánh dấu mọi thông báo chưa đọc của mình là đã đọc. Không có body.
+
+```json
+// 200 — số thông báo vừa chuyển sang đã đọc (0 nếu không còn thông báo chưa đọc)
+{ "updated": 2 }
+```
+
+Lỗi: `403 FORBIDDEN` (tài khoản `ops`).
+
 ---
 
 ## 16. Chatbot và AI
@@ -927,11 +1013,14 @@ Lỗi: `400 VALIDATION_ERROR` (danh mục không tồn tại).
 
 ### `GET /api/health`
 
-Không cần đăng nhập. Kiểm tra server đang chạy.
+Không cần đăng nhập. Kiểm tra server đang chạy và kết nối được database (`SELECT 1`, chờ tối đa 3 giây).
 
 ```json
 // 200
-{ "success": true, "data": { "status": "ok", "uptime": 2.144922 }, "error": null }
+{ "success": true, "data": { "status": "ok", "db": "ok", "uptime": 4.528784 }, "error": null }
+// 503 — database lỗi
+{ "success": false, "data": { "status": "degraded", "db": "error", "uptime": 3.2559049 },
+  "error": { "code": "DB_UNAVAILABLE", "message": "Không kết nối được database" } }
 ```
 
 Đường dẫn không tồn tại → `404 NOT_FOUND` ("Không tìm thấy route: GET /api/...").
@@ -1097,6 +1186,9 @@ Gom từ mọi `AppError` trong code. "Gợi ý hiển thị" khi muốn khác `
 | `INVALID_JSON` | 400 | Body không phải JSON | Lỗi lập trình, ghi log |
 | `BID_TOO_LOW` | 400 | Giá thấp hơn giá hiện tại + bước giá | Hiện `message` (có giá tối thiểu), tải lại phiên |
 | `PHOTOS_REQUIRED` | 400 | Gửi thẩm định khi chưa có ảnh | Chuyển tới bước thêm ảnh |
+| `WRONG_PASSWORD` | 400 | Đổi mật khẩu: mật khẩu hiện tại sai | Hiện `message` ở trường mật khẩu hiện tại |
+| `INVALID_FILE_TYPE` | 400 | Tải ảnh không phải JPEG / PNG / WEBP | Hiện `message`, cho chọn ảnh khác |
+| `TOO_MANY_FILES` | 400 | Tải quá 8 ảnh một lần | Chia nhỏ lần tải |
 | `UNAUTHORIZED` | 401 | Thiếu / sai / hết hạn token, tài khoản đã bị xoá | Xoá token, về màn đăng nhập |
 | `INVALID_CREDENTIALS` | 401 | Sai email hoặc mật khẩu | Hiện `message` ở form đăng nhập |
 | `INSUFFICIENT_FUNDS` | 402 | Ví không đủ tiền cọc / thanh toán | Gợi ý nạp tiền ([ví](#post-apiwallettopup)) |
@@ -1105,6 +1197,7 @@ Gom từ mọi `AppError` trong code. "Gợi ý hiển thị" khi muốn khác `
 | `DEPOSIT_REQUIRED` | 403 | Đặt giá khi chưa cọc | Mở bước đặt cọc |
 | `NOT_FOUND` | 404 | Không tồn tại **hoặc không thuộc về bạn**; route sai | Quay lại danh sách |
 | `PAYLOAD_TOO_LARGE` | 413 | Body quá lớn | Lỗi lập trình |
+| `FILE_TOO_LARGE` | 413 | Ảnh quá 5 MB | Nén / thu nhỏ ảnh rồi tải lại |
 | `ALREADY_JOINED` | 409 | Đã đặt cọc phiên này | Coi như thành công, tải lại phiên |
 | `ALREADY_LEADING` | 409 | Đang dẫn đầu, không tự vượt giá mình | Hiện `message` |
 | `ALREADY_REPORTED` | 409 | Đã báo cáo phiên này | Hiện `message` |
@@ -1125,6 +1218,9 @@ Gom từ mọi `AppError` trong code. "Gợi ý hiển thị" khi muốn khác `
 | `SELF_LOCKOUT` | 409 | Admin tự khoá / tự bỏ quyền mình | Hiện `message` |
 | `INTERNAL_ERROR` | 500 | Lỗi hệ thống | Thông báo chung, thử lại |
 | `WALLET_INCONSISTENT` | 500 | Số dư ví không khớp (không nên xảy ra) | Thông báo chung |
+| `UPLOAD_FAILED` | 502 | Storage lỗi khi lưu ảnh | Thử lại sau |
+| `UPLOAD_NOT_CONFIGURED` | 503 | Server chưa cấu hình Supabase Storage | Báo "Chưa tải ảnh được", cho nhập URL ảnh |
+| `DB_UNAVAILABLE` | 503 | (`GET /api/health`) server không kết nối được database | Báo máy chủ đang gặp sự cố |
 
 Lỗi khi kết nối Socket.io (`connect_error`): `UNAUTHORIZED`, `ACCOUNT_SUSPENDED`, `INTERNAL_ERROR` — xem [`socket.md`](socket.md).
 
@@ -1141,6 +1237,8 @@ Bảng này khớp 1-1 với route đăng ký trong `src/routes/` (kiểm tra b�
 | POST | `/api/auth/login` | không cần đăng nhập | [3](#post-apiauthlogin) |
 | POST | `/api/auth/ops/login` | không cần đăng nhập | [3](#post-apiauthopslogin) |
 | GET | `/api/me` | mọi vai trò | [3](#get-apime) |
+| PATCH | `/api/me` | bidder, seller | [3](#patch-apime) |
+| POST | `/api/me/password` | mọi vai trò | [3](#post-apimepassword) |
 | GET | `/api/addresses` | bidder | [4](#get-apiaddresses) |
 | POST | `/api/addresses` | bidder | [4](#post-apiaddresses) |
 | PATCH | `/api/addresses/:id` | bidder | [4](#patch-apiaddressesid) |
@@ -1150,7 +1248,9 @@ Bảng này khớp 1-1 với route đăng ký trong `src/routes/` (kiểm tra b�
 | POST | `/api/listings` | seller | [5](#post-apilistings) |
 | GET | `/api/listings/mine` | seller | [5](#get-apilistingsmine) |
 | PATCH | `/api/listings/:id` | seller | [5](#patch-apilistingsid) |
+| POST | `/api/uploads/images` | bidder, seller | [5](#post-apiuploadsimages) |
 | POST | `/api/listings/:id/photos` | seller | [5](#post-apilistingsidphotos) |
+| DELETE | `/api/listings/:id/photos/:photoId` | seller | [5](#delete-apilistingsidphotosphotoid) |
 | POST | `/api/listings/:id/submit` | seller | [5](#post-apilistingsidsubmit) |
 | POST | `/api/listings/:id/resubmit` | seller | [5](#post-apilistingsidresubmit) |
 | GET | `/api/appraisals/queue` | appraiser | [6](#get-apiappraisalsqueue) |
@@ -1193,6 +1293,7 @@ Bảng này khớp 1-1 với route đăng ký trong `src/routes/` (kiểm tra b�
 | PATCH | `/api/admin/accounts/:id` | admin | [14](#patch-apiadminaccountsid) |
 | GET | `/api/notifications` | bidder, seller | [15](#get-apinotifications) |
 | POST | `/api/notifications/:id/read` | bidder, seller | [15](#post-apinotificationsidread) |
+| POST | `/api/notifications/read-all` | bidder, seller | [15](#post-apinotificationsread-all) |
 | POST | `/api/chat/messages` | bidder, seller | [16](#post-apichatmessages) |
 | GET | `/api/chat/sessions/:id/messages` | bidder, seller | [16](#get-apichatsessionsidmessages) |
 | POST | `/api/ai/suggest-price` | seller, appraiser | [16](#post-apiaisuggest-price) |
