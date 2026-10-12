@@ -15,9 +15,6 @@ const io = new Server(server, { cors: { origin: env.corsOrigin } });
 app.use(cors({ origin: env.corsOrigin }));
 app.use(express.json());
 
-// Cho phép route/service truy cập io qua req.app.get('io')
-app.set('io', io);
-
 app.use('/api', routes);
 app.use(notFound);
 app.use(errorHandler);
