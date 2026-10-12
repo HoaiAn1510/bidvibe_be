@@ -503,7 +503,57 @@ async function main() {
   await api('Người khác đọc lịch sử trò chuyện', 'GET', `/api/chat/sessions/${chat.sessionId}/messages`, { token: T.b2, expect: 404 });
 
   // ------------------------------------------------------------------
-  begin('11. Kiểm tra tính nhất quán của ví');
+  begin('11. Dữ liệu điều hướng (data) của thông báo');
+  const sellerNotes = await api('Thông báo người bán có data', 'GET', '/api/notifications?limit=100',
+    { token: T.seller, note: (j) => { const n = j.data.notifications.find((x) => x.type === 'listing_approved'); return `listing_approved data=${JSON.stringify(n.data)}`; } });
+  const approved = sellerNotes.notifications.find((x) => x.type === 'listing_approved' && x.data && x.data.listingId === String(L1.id));
+  assert.ok(approved, 'listing_approved phải có data.listingId');
+  assert.strictEqual(approved.data.auctionId, String(A1));
+  const needInfo = sellerNotes.notifications.find((x) => x.type === 'listing_needs_info');
+  assert.deepStrictEqual(needInfo.data, { listingId: String(L1.id) });
+  const bn = await api('Thông báo người mua về đơn có data', 'GET', '/api/notifications?limit=100',
+    { token: T.b1, note: (j) => { const n = j.data.notifications.find((x) => x.type === 'order'); return `order data=${JSON.stringify(n.data)}`; } });
+  const shipped = bn.notifications.find((x) => x.type === 'order' && x.data && x.data.orderId === String(O1));
+  assert.ok(shipped && shipped.data.auctionId === String(A1), 'thông báo order phải có orderId + auctionId');
+  const b2n = await api('Thông báo tranh chấp có disputeId', 'GET', '/api/notifications?limit=100',
+    { token: T.b2, note: (j) => { const n = j.data.notifications.find((x) => x.type === 'refund' && x.data); return `refund data=${JSON.stringify(n.data)}`; } });
+  const refundNote = b2n.notifications.find((x) => x.type === 'refund' && x.data && x.data.disputeId === String(dB.id));
+  assert.ok(refundNote && refundNote.data.orderId === String(B.orderId), 'refund tranh chấp phải có orderId + disputeId');
+
+  // Gọi theo chữ ký cũ (như BE1 đang gọi) và thông báo cũ trước migration 008: data null, không lỗi.
+  const { createNotification, emitNotification, notify } = require('../src/services/notification_service');
+  const b1id = (await q1('SELECT id FROM accounts WHERE email = $1', [email('b1')])).id;
+  const legacy = await createNotification(pool, { accountId: b1id, type: 'outbid', title: 'Kiểu gọi BE1, không có data' });
+  assert.strictEqual(legacy.data, null);
+  await pool.query(`INSERT INTO notifications (account_id, type, title) VALUES ($1, 'warn', 'Thông báo cũ trước migration 008')`, [b1id]);
+  const plainNotes = await api('Thông báo không có data trả data null', 'GET', '/api/notifications?limit=3',
+    { token: T.b1, note: (j) => j.data.notifications.map((x) => `${x.type}:${JSON.stringify(x.data)}`).join(', ') });
+  assert.ok(plainNotes.notifications.slice(0, 2).every((x) => x.data === null));
+  const cleaned = await createNotification(pool, { accountId: b1id, type: 'info', title: 'data rỗng', data: { orderId: null, auctionId: '' } });
+  assert.strictEqual(cleaned.data, null);
+  record('createNotification bỏ khoá rỗng; không còn khoá nào thì lưu NULL', 'data { orderId: null, auctionId: "" } -> null');
+
+  // Socket.io: notification:new gửi kèm data (có hoặc null).
+  const s3 = await sock.connect(T.b1);
+  const nextNote = () => new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('không nhận được notification:new')), 10_000);
+    s3.once('notification:new', (n) => { clearTimeout(t); resolve(n); });
+  });
+  let wait = nextNote();
+  await notify(pool, b1id, 'order', 'Thử socket có data', { orderId: O1, auctionId: A1 });
+  const ev1 = await wait;
+  assert.deepStrictEqual(ev1.data, { orderId: String(O1), auctionId: String(A1) });
+  record('Socket notification:new có data', JSON.stringify(ev1));
+  wait = nextNote();
+  emitNotification(await createNotification(pool, { accountId: b1id, type: 'outbid', title: 'Thử socket kiểu BE1' }));
+  const ev2 = await wait;
+  assert.strictEqual(ev2.data, null);
+  assert.ok(['id', 'type', 'title', 'createdAt', 'data'].every((k) => k in ev2));
+  record('Socket notification:new kiểu gọi BE1: data null, các trường cũ giữ nguyên', JSON.stringify(ev2));
+  s3.close();
+
+  // ------------------------------------------------------------------
+  begin('12. Kiểm tra tính nhất quán của ví');
   const bad = await pool.query(
     `SELECT b.account_id FROM bidders b JOIN accounts a ON a.id = b.account_id
      JOIN LATERAL (SELECT balance_after FROM wallet_transactions w WHERE w.bidder_id = b.account_id ORDER BY id DESC LIMIT 1) t ON true
@@ -514,7 +564,7 @@ async function main() {
   record('Số dư ví khớp balance_after của giao dịch cuối', 'cả hai Bidder test');
 
   // ------------------------------------------------------------------
-  begin('12. Kết nối database bị rớt không làm sập tiến trình');
+  begin('13. Kết nối database bị rớt không làm sập tiến trình');
   assert.ok(pool.listenerCount('error') > 0, 'pool phải có listener cho sự kiện error');
   let exited = false;
   const onExit = () => { exited = true; };

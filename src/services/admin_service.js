@@ -134,7 +134,7 @@ async function flagAction(adminId, flagId, input = {}) {
 
   const out = await inTransaction(async (client) => {
     const { rows } = await client.query(
-      `SELECT f.id, f.status, f.auction_id, l.title, l.seller_id
+      `SELECT f.id, f.status, f.auction_id, l.id AS listing_id, l.title, l.seller_id
        FROM flagged_auctions f JOIN auctions a ON a.id = f.auction_id JOIN listings l ON l.id = a.listing_id
        WHERE f.id = $1 FOR UPDATE OF f`,
       [flagId],
@@ -145,6 +145,8 @@ async function flagAction(adminId, flagId, input = {}) {
     if (f.status === next) throw conflict('Cờ đã ở trạng thái này');
 
     const notes = [];
+    // Thông báo gửi người bán: mở phiên / tin của mình (người bán không xem được cờ nên không gửi flagId).
+    const flagData = { auctionId: f.auction_id, listingId: f.listing_id };
     let cancelled = null;
     if (action === 'terminate') {
       // BE1: huỷ phiên + hoàn cọc mọi người tham gia; phiên không còn 'active' thì báo 409.
@@ -154,15 +156,15 @@ async function flagAction(adminId, flagId, input = {}) {
 
     if (action === 'pause') {
       notes.push(await createNotification(client, {
-        accountId: f.seller_id, type: 'warn', title: `Phiên "${f.title}" tạm dừng để kiểm tra.`,
+        accountId: f.seller_id, type: 'warn', title: `Phiên "${f.title}" tạm dừng để kiểm tra.`, data: flagData,
       }));
     } else if (action === 'terminate') {
       notes.push(await createNotification(client, {
-        accountId: f.seller_id, type: 'warn', title: `Phiên "${f.title}" bị Admin chấm dứt: ${reason}`,
+        accountId: f.seller_id, type: 'warn', title: `Phiên "${f.title}" bị Admin chấm dứt: ${reason}`, data: flagData,
       }));
     } else if (f.status === 'paused') {
       notes.push(await createNotification(client, {
-        accountId: f.seller_id, type: 'info', title: `Phiên "${f.title}" tiếp tục sau khi kiểm tra.`,
+        accountId: f.seller_id, type: 'info', title: `Phiên "${f.title}" tiếp tục sau khi kiểm tra.`, data: flagData,
       }));
     }
     return { notes, cancelled };

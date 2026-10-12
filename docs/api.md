@@ -827,13 +827,55 @@ Chỉ `bidder` / `seller` (tài khoản `ops` → `403 FORBIDDEN` "Tài khoản 
 Query `limit`, `offset`. Mới nhất trước.
 
 ```json
-// 200
+// 200 (người bán, sau khi thẩm định yêu cầu bổ sung rồi duyệt)
+{ "notifications": [
+  { "id": "2354", "type": "listing_approved", "title": "Tin đăng \"Máy nghe nhạc cassette 1988\" đã được duyệt, phiên đấu giá đã mở.",
+    "isRead": false, "createdAt": "2026-10-12T02:15:50.277Z", "data": { "auctionId": "841", "listingId": "849" } },
+  { "id": "2353", "type": "listing_needs_info", "title": "Tin đăng \"Máy nghe nhạc cassette 1988\" cần bổ sung: Chụp thêm ảnh số seri",
+    "isRead": false, "createdAt": "2026-10-12T02:15:49.635Z", "data": { "listingId": "849" } } ],
+  "unreadCount": 2 }
+// 200 (người mua demo: thông báo tạo trước migration 008 / loại chưa truyền data)
 { "notifications": [ { "id": "916", "type": "warn",
   "title": "Quá hạn thanh toán · Radio bóng đèn Philips 1960, vỏ gỗ óc chó. Cọc đã bị tịch thu và giao dịch bị huỷ.",
-  "isRead": false, "createdAt": "2026-10-10T15:10:48.547Z" } ], "unreadCount": 4 }
+  "isRead": false, "createdAt": "2026-10-10T15:10:48.547Z", "data": null } ], "unreadCount": 4 }
 ```
 
-Giá trị `type`: xem [enum thông báo](#thông-báo-notificationstype). Thông báo mới cũng được đẩy real-time qua Socket.io `notification:new`.
+Giá trị `type`: xem [enum thông báo](#thông-báo-notificationstype). Thông báo mới cũng được đẩy real-time qua Socket.io `notification:new` (cùng các trường, kể cả `data`).
+
+#### Trường `data` — mở đúng màn khi bấm thông báo
+
+`data` là object chứa id của đối tượng liên quan, hoặc **`null`** (thông báo tạo trước migration `008`, hoặc loại chưa truyền `data`). App phải chịu được `null` và khoá vắng mặt.
+
+| Khoá | Kiểu | Mở bằng |
+|---|---|---|
+| `auctionId` | chuỗi id | [`GET /api/auctions/:id`](#get-apiauctionsid) |
+| `orderId` | chuỗi id | Người mua: [`GET /api/orders/:id`](#get-apiordersid) (thanh toán) hoặc [`GET /api/orders/:id/tracking`](#get-apiordersidtracking); người bán: `/tracking` |
+| `listingId` | chuỗi id | Tin trong [`GET /api/listings/mine`](#get-apilistingsmine) (người bán) |
+| `disputeId` | chuỗi id | Tranh chấp trong [`GET /api/disputes/mine`](#get-apidisputesmine) |
+
+Tên khoá cố định; chỉ có khoá liên quan tới loại thông báo đó. Gợi ý điều hướng theo thứ tự: có `disputeId` → màn tranh chấp; có `orderId` → màn đơn; có `listingId` → tin của tôi; có `auctionId` → chi tiết phiên; `null` → chỉ đánh dấu đã đọc.
+
+| `type` | Khi nào | Người nhận | `data` | Ai tạo |
+|---|---|---|---|---|
+| `listing_approved` | Tin được duyệt, phiên mở | Người bán | `{ listingId, auctionId }` | BE2 |
+| `listing_rejected` | Tin bị từ chối | Người bán | `{ listingId }` | BE2 |
+| `listing_needs_info` | Thẩm định yêu cầu bổ sung | Người bán | `{ listingId }` | BE2 |
+| `order` | Người bán gửi kho; kho nhận; kho gửi đi; đã giao | Người mua | `{ orderId, auctionId }` | BE2 |
+| `dispute` | Kho kiểm không khớp; bên kia mở tranh chấp; kết quả tranh chấp | Người mua / người bán | `{ orderId, auctionId, disputeId }` | BE2 |
+| `refund` | Admin hoàn tiền tranh chấp | Người mua | `{ orderId, auctionId, disputeId }` | BE2 |
+| `payout` | Người mua xác nhận / tự giải ngân sau 72 giờ | Người bán | `{ orderId, auctionId }` | BE2 |
+| `payout` | Admin giữ nguyên giao dịch khi xử lý tranh chấp | Người bán | `{ orderId, auctionId, disputeId }` | BE2 |
+| `info` | Tự giải ngân sau 72 giờ (báo người mua) | Người mua | `{ orderId, auctionId }` | BE2 |
+| `info` | Phiên chạy lại sau khi tạm dừng | Người bán | `{ auctionId, listingId }` | BE2 |
+| `warn` | Phiên bị tạm dừng / chấm dứt | Người bán | `{ auctionId, listingId }` | BE2 |
+| `outbid` | Bị vượt giá | Người mua | **chưa truyền (`null`)**; sẽ là `{ auctionId }` | BE1 |
+| `win` | Thắng phiên, cần thanh toán | Người mua | **chưa truyền (`null`)**; sẽ là `{ auctionId, orderId }` | BE1 |
+| `address_reminder` | Đã thanh toán, đơn chưa có địa chỉ | Người mua | **chưa truyền (`null`)**; sẽ là `{ orderId, auctionId }` | BE1 |
+| `refund` | Hoàn cọc khi thua phiên / phiên bị huỷ | Người mua | **chưa truyền (`null`)**; sẽ là `{ auctionId }` | BE1 |
+| `sold` | Phiên của mình kết thúc có người thắng | Người bán | **chưa truyền (`null`)**; sẽ là `{ auctionId, orderId }` | BE1 |
+| `warn` | Quá hạn thanh toán, mất cọc | Người mua | **chưa truyền (`null`)**; sẽ là `{ orderId, auctionId }` | BE1 |
+
+Cùng một `type` có thể đến từ nhiều tình huống (ví dụ `refund`, `warn`, `info`, `payout`); app điều hướng theo khoá trong `data`, không theo `type`.
 
 ### `POST /api/notifications/:id/read`
 
@@ -1023,7 +1065,7 @@ Mỗi giao dịch có sẵn `kindLabel` (cột thứ hai) do server trả về.
 
 #### Thông báo (`notifications.type`)
 
-Không phải enum trong DB; các giá trị code đang dùng:
+Không phải enum trong DB; các giá trị code đang dùng. Khoá trong trường `data` của từng loại: xem [bảng `data`](#trường-data--mở-đúng-màn-khi-bấm-thông-báo).
 
 | `type` | Khi nào | Người nhận |
 |---|---|---|

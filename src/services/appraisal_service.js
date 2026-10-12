@@ -127,7 +127,9 @@ async function decide(appraiserId, listingId, input = {}) {
       type = 'listing_needs_info';
       title = `Tin đăng "${l.title}" cần bổ sung: ${reason}`;
     }
-    const note = await createNotification(client, { accountId: l.seller_id, type, title });
+    const note = await createNotification(client, {
+      accountId: l.seller_id, type, title, data: { listingId: l.id, auctionId }, // auctionId chỉ có khi duyệt
+    });
     const status = await client.query('SELECT status FROM listings WHERE id = $1', [listingId]);
     return {
       appraisalId: ap.rows[0].id,
