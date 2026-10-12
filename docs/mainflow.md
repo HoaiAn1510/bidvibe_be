@@ -91,13 +91,13 @@ Một tài khoản `accounts` chỉ là Bidder **hoặc** Seller, không cả ha
 | Không có lượt giá | `auctions.status` → `ended`, `listings.status` → `ended`, không tạo đơn |
 | Có người thắng | `auctions.status` → `ended`, `winner_id`; `listings.status` → `ended`; tạo `orders` (`payment_status = 'awaiting_payment'`, `payment_deadline = now + 24 giờ`, `payout_status = 'pending'`) |
 | Cọc | Người thắng: `applied_to_payment` (vẫn nằm trong `wallet_held`). Người thua: `released`, hoàn về ví (`deposit_release`) |
-| Thông báo | `win`, `refund`, `sold`; Socket.io `auction:ended` |
+| Thông báo | `win` (kèm mã đơn, hạn thanh toán, nhắc chọn địa chỉ giao hàng), `refund`, `sold`; Socket.io `auction:ended` |
 | Giao dịch | Một giao dịch mỗi phiên, `FOR UPDATE SKIP LOCKED` |
 
 ### Bước 7 — Thanh toán trong 24 giờ, quá hạn mất cọc [Đã có]
 
 - **Xem đơn** — `GET /api/orders/mine`, `GET /api/orders/:id` (BE1). Tổng = giá chốt + phí 5 phần trăm (làm tròn nghìn) + vận chuyển 40.000đ, cọc được trừ.
-- **Thanh toán** — `POST /api/orders/:id/pay` `{ method: 'wallet' | 'qr' | 'card' }`. `payment_status`: `awaiting_payment` → `paid`; cọc rời `wallet_held`, giao dịch ví `payment`. Tiền nằm trong ký quỹ nền tảng (`payout_status = 'pending'`).
+- **Thanh toán** — `POST /api/orders/:id/pay` `{ method: 'wallet' | 'qr' | 'card' }`. `payment_status`: `awaiting_payment` → `paid`; cọc rời `wallet_held`, giao dịch ví `payment`. Tiền nằm trong ký quỹ nền tảng (`payout_status = 'pending'`). Đơn chưa có địa chỉ giao hàng (`orders.shipping_address_id` NULL) thì người mua nhận thêm một thông báo `address_reminder` trong cùng giao dịch (một lần mỗi đơn).
 - **Quá hạn** — scheduler gọi `processPaymentTimeouts()`: `payment_status` → `expired`, `listings.status` → `cancelled`, cọc `forfeited` (giao dịch ví `deposit_forfeit`), thông báo `warn`.
 
 ### Bước 8 — Seller gửi hàng về kho [Đã có]

@@ -157,7 +157,8 @@ socket.on('auction:update', (u) {
 | `type` | Khi nào | Người nhận |
 |---|---|---|
 | `outbid` | Có người đặt giá cao hơn mình | Người vừa bị vượt |
-| `win` | Phiên kết thúc, mình thắng — thanh toán trong 24 giờ | Người thắng |
+| `win` | Phiên kết thúc, mình thắng. `title` có mã đơn (`Đơn #<id>`), hạn thanh toán (24 giờ) và nhắc chọn địa chỉ giao hàng | Người thắng |
+| `address_reminder` | Vừa thanh toán xong mà đơn chưa có địa chỉ giao hàng; một lần mỗi đơn. `title` bắt đầu bằng `Đơn #<id>` | Người mua |
 | `refund` | Hoàn cọc (thua phiên / phiên bị huỷ) hoặc Admin hoàn tiền tranh chấp | Người mua |
 | `sold` | Phiên của mình kết thúc có người thắng | Người bán |
 | `warn` | Quá hạn thanh toán (mất cọc); phiên bị tạm dừng / chấm dứt | Người mua / người bán |

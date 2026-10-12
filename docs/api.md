@@ -1008,7 +1008,8 @@ Không phải enum trong DB; các giá trị code đang dùng:
 | `type` | Khi nào | Người nhận |
 |---|---|---|
 | `outbid` | Bị người khác vượt giá | Người mua |
-| `win` | Thắng phiên, cần thanh toán trong 24 giờ | Người mua |
+| `win` | Thắng phiên. Nội dung có mã đơn (`Đơn #<id>`), hạn thanh toán (giờ Việt Nam, 24 giờ) và nhắc chọn địa chỉ giao hàng | Người mua |
+| `address_reminder` | Đã thanh toán nhưng đơn chưa có địa chỉ giao hàng (kho sẽ chặn `409 ORDER_NO_ADDRESS`). Gửi **một lần** mỗi đơn, ngay khi thanh toán. Nội dung bắt đầu bằng `Đơn #<id>` | Người mua |
 | `refund` | Hoàn cọc / hoàn tiền tranh chấp | Người mua |
 | `sold` | Phiên của mình kết thúc có người thắng | Người bán |
 | `warn` | Quá hạn thanh toán; phiên bị tạm dừng / chấm dứt | Người mua / người bán |

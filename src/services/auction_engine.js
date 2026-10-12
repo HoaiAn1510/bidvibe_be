@@ -20,6 +20,23 @@ const depositFor = (startPrice) => roundThousand(startPrice * 0.1);
 const feeFor = (price) => roundThousand(price * FEE_RATE);
 
 const fmt = (n) => `${Number(n).toLocaleString('vi-VN')}đ`;
+// Giờ Việt Nam cho nội dung thông báo, ví dụ "14:05 13/10".
+// Tự ghép từ formatToParts để không phụ thuộc cách ICU của từng máy trình bày ngày.
+const VN_TIME = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Ho_Chi_Minh', hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', hourCycle: 'h23',
+});
+const fmtTime = (t) => {
+  const p = Object.fromEntries(VN_TIME.formatToParts(new Date(t)).map((x) => [x.type, x.value]));
+  return `${p.hour}:${p.minute} ${p.day}/${p.month}`;
+};
+
+// Nội dung thông báo cho người thắng (type 'win'). notifications chỉ có type + title nên mã đơn và
+// hạn thanh toán nằm trong title; app mở đơn qua GET /api/orders/mine.
+const winTitle = ({ title, finalPrice, orderId, paymentDeadline }) =>
+  `Bạn đã thắng phiên · ${title} · giá chốt ${fmt(finalPrice)}. Đơn #${orderId}: thanh toán trước ${fmtTime(paymentDeadline)} (24 giờ) và chọn địa chỉ giao hàng để kho gửi hàng cho bạn.`;
+// Nhắc chọn địa chỉ sau khi đã thanh toán mà đơn chưa có địa chỉ (type 'address_reminder').
+const addressReminderTitle = ({ title, orderId }) =>
+  `Đơn #${orderId} · ${title} đã thanh toán nhưng chưa có địa chỉ giao hàng. Hãy chọn địa chỉ để kho gửi hàng cho bạn.`;
 
 async function inTransaction(fn) {
   const client = await pool.connect();
@@ -247,7 +264,7 @@ async function closeAuction(auctionId) {
     const order = await client.query(
       `INSERT INTO orders (auction_id, bidder_id, seller_id, final_price, payment_deadline)
        VALUES ($1, $2, $3, $4, now() + ($5 || ' milliseconds')::interval)
-       RETURNING id`,
+       RETURNING id, payment_deadline`,
       [auctionId, winnerId, a.seller_id, finalPrice, String(PAYMENT_WINDOW_MS)],
     );
 
@@ -263,7 +280,9 @@ async function closeAuction(auctionId) {
         notes.push(await createNotification(client, {
           accountId: d.bidder_id,
           type: 'win',
-          title: `Bạn đã thắng phiên · ${a.title} · giá chốt ${fmt(finalPrice)}. Thanh toán trong 24 giờ.`,
+          title: winTitle({
+            title: a.title, finalPrice, orderId: order.rows[0].id, paymentDeadline: order.rows[0].payment_deadline,
+          }),
         }));
       } else {
         await client.query(`UPDATE auction_deposits SET status = 'released' WHERE id = $1`, [d.id]);
@@ -386,10 +405,12 @@ async function payOrder({ bidderId, orderId, method = 'wallet' }) {
   if (!['wallet', 'qr', 'card'].includes(method)) {
     throw new AppError('Phương thức thanh toán không hợp lệ', 400, 'VALIDATION_ERROR');
   }
-  return inTransaction(async (client) => {
+  const out = await inTransaction(async (client) => {
     const { rows } = await client.query(
-      `SELECT o.id, o.auction_id, o.bidder_id, o.final_price, o.payment_status, o.payment_deadline
-       FROM orders o WHERE o.id = $1 FOR UPDATE`,
+      `SELECT o.id, o.auction_id, o.bidder_id, o.final_price, o.payment_status, o.payment_deadline,
+              o.shipping_address_id, l.title
+       FROM orders o JOIN auctions a ON a.id = o.auction_id JOIN listings l ON l.id = a.listing_id
+       WHERE o.id = $1 FOR UPDATE OF o`,
       [orderId],
     );
     const o = rows[0];
@@ -418,8 +439,19 @@ async function payOrder({ bidderId, orderId, method = 'wallet' }) {
       viaWallet: method === 'wallet',
     });
     await client.query(`UPDATE orders SET payment_status = 'paid' WHERE id = $1`, [orderId]);
-    return { orderId: o.id, paymentStatus: 'paid', totalDue, balanceAfter: tx.balanceAfter };
+
+    // Đơn chưa có địa chỉ thì kho sẽ chặn ở bước gửi (409 ORDER_NO_ADDRESS): nhắc người mua.
+    // Chỉ đọc orders.shipping_address_id (cột của BE2). Đơn chỉ thanh toán thành công đúng một lần
+    // (khoá FOR UPDATE + kiểm tra 'paid' ở trên) nên thông báo này không bao giờ bị gửi trùng.
+    const reminder = o.shipping_address_id == null
+      ? await createNotification(client, {
+        accountId: bidderId, type: 'address_reminder', title: addressReminderTitle({ title: o.title, orderId: o.id }),
+      })
+      : null;
+    return { result: { orderId: o.id, paymentStatus: 'paid', totalDue, balanceAfter: tx.balanceAfter }, reminder };
   });
+  emitNotification(out.reminder); // sau COMMIT
+  return out.result;
 }
 
 // Quá 24 giờ chưa thanh toán: mất cọc, huỷ giao dịch.

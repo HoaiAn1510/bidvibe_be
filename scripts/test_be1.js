@@ -482,6 +482,72 @@ async function main() {
     }
   });
 
+  console.log('Nhắc người thắng thanh toán và chọn địa chỉ giao hàng');
+  {
+    const addressService = require('../src/services/address_service');
+    const fulfilment = require('../src/services/fulfilment_service');
+    const D = await mkAccount('bidder', 'Dan');
+    const E = await mkAccount('bidder', 'Eve');
+    for (const id of [D, E]) await tx((c) => walletService.topUp(c, { bidderId: id, amount: 10_000_000 }));
+    const notes = async (accountId, type) => (await pool.query(
+      'SELECT title FROM notifications WHERE account_id = $1 AND type = $2 ORDER BY id', [accountId, type])).rows.map((r) => r.title);
+    // Phiên kết thúc với `winner` thắng; trả về đơn của người thắng.
+    const wonOrder = async (winner) => {
+      const { auctionId: aw } = await mkAuction(seller);
+      await engine.joinAuction({ bidderId: winner, auctionId: aw });
+      await engine.placeBid({ bidderId: winner, auctionId: aw, increment: 50_000 });
+      await expire(aw);
+      await closedAuction(aw);
+      return (await pool.query('SELECT id, payment_deadline FROM orders WHERE auction_id = $1', [aw])).rows[0];
+    };
+
+    await step('thắng phiên: thông báo win nhắc thanh toán trong 24 giờ và chọn địa chỉ, kèm mã đơn', async () => {
+      const before = (await notes(D, 'win')).length;
+      const o = await wonOrder(D);
+      const wins = await notes(D, 'win');
+      assert.strictEqual(wins.length, before + 1);
+      const t = wins[wins.length - 1];
+      assert.ok(t.includes(`Đơn #${o.id}`), t);
+      assert.ok(/thanh toán trước \d{2}:\d{2} \d{2}\/\d{2} \(24 giờ\)/.test(t), t);
+      assert.ok(t.includes('chọn địa chỉ giao hàng'), t);
+      // Hạn trong thông báo khớp payment_deadline của đơn (giờ Việt Nam).
+      const vn = new Date(new Date(o.payment_deadline).getTime() + 7 * 3600_000); // UTC+7, không có giờ mùa hè
+      const hhmm = `${String(vn.getUTCHours()).padStart(2, '0')}:${String(vn.getUTCMinutes()).padStart(2, '0')} ${String(vn.getUTCDate()).padStart(2, '0')}/${String(vn.getUTCMonth() + 1).padStart(2, '0')}`;
+      assert.ok(t.includes(hhmm), `${t} / ${hhmm}`);
+    });
+    await step('thanh toán xong mà đơn chưa có địa chỉ: một thông báo address_reminder', async () => {
+      const o = await wonOrder(D);
+      const before = await notes(D, 'address_reminder');
+      const r = await engine.payOrder({ bidderId: D, orderId: o.id, method: 'wallet' });
+      assert.deepStrictEqual(Object.keys(r).sort(), ['balanceAfter', 'orderId', 'paymentStatus', 'totalDue']); // phản hồi không đổi
+      const after = await notes(D, 'address_reminder');
+      assert.strictEqual(after.length, before.length + 1);
+      assert.ok(after[after.length - 1].startsWith(`Đơn #${o.id} `), after[after.length - 1]);
+      await rejects(engine.payOrder({ bidderId: D, orderId: o.id }), 'ALREADY_PAID');
+      assert.strictEqual((await notes(D, 'address_reminder')).length, after.length, 'trả lại lần hai không được nhắc thêm');
+    });
+    await step('thanh toán song song cùng một đơn: một lượt thành công, đúng một lần nhắc', async () => {
+      const o = await wonOrder(E);
+      const before = (await notes(E, 'address_reminder')).length;
+      const rs = await Promise.allSettled([1, 2, 3].map(() => engine.payOrder({ bidderId: E, orderId: o.id, method: 'wallet' })));
+      assert.strictEqual(rs.filter((x) => x.status === 'fulfilled').length, 1);
+      assert.ok(rs.filter((x) => x.status === 'rejected').every((x) => x.reason.code === 'ALREADY_PAID'));
+      const mine = (await notes(E, 'address_reminder')).filter((t) => t.startsWith(`Đơn #${o.id} `));
+      assert.strictEqual((await notes(E, 'address_reminder')).length, before + 1);
+      assert.strictEqual(mine.length, 1);
+    });
+    await step('đơn đã chọn địa chỉ trước khi thanh toán: không nhắc', async () => {
+      const addr = await addressService.create(E, {
+        recipientName: `${PREFIX}Eve`, phone: '0901234567', addressLine: '1 Đường Test', city: 'TP.HCM',
+      });
+      const o = await wonOrder(E);
+      await fulfilment.setShippingAddress(E, o.id, { addressId: addr.id }); // API của BE2, chỉ gọi
+      const before = (await notes(E, 'address_reminder')).length;
+      await engine.payOrder({ bidderId: E, orderId: o.id, method: 'wallet' });
+      assert.strictEqual((await notes(E, 'address_reminder')).length, before);
+    });
+  }
+
   console.log('Socket.io: tạm dừng / tiếp tục và ngắt tài khoản bị khoá');
   {
     const jwt = require('jsonwebtoken');
