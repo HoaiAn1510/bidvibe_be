@@ -16,7 +16,11 @@ module.exports = {
   // Supabase Storage cho POST /api/uploads/images. Thiếu URL hoặc key thì route trả 503
   // UPLOAD_NOT_CONFIGURED, server vẫn chạy. Key là secret key / service_role: chỉ dùng ở backend,
   // không trả cho app, không ghi log.
-  supabaseUrl: (process.env.SUPABASE_URL || '').replace(/\/+$/, ''),
+  // Chỉ lấy phần gốc https://<ref>.supabase.co: dán nhầm "RESTful endpoint" (.../rest/v1) vẫn chạy.
+  supabaseUrl: (() => {
+    const raw = (process.env.SUPABASE_URL || '').trim();
+    try { return raw ? new URL(raw).origin : ''; } catch { return raw.replace(/\/+$/, ''); }
+  })(),
   supabaseServiceKey: process.env.SUPABASE_SERVICE_KEY || '',
   storageBucket: process.env.STORAGE_BUCKET || 'listing-photos',
   // Job tự giải ngân sau 72 giờ (mặc định bật). Đặt AUTO_PAYOUT_ENABLED=false để tắt.
