@@ -21,7 +21,9 @@ const errorHandler = (err, req, res, next) => {
     err = new AppError('Dữ liệu gửi lên quá lớn', 413, 'PAYLOAD_TOO_LARGE');
   }
   const statusCode = err.statusCode || 500;
-  if (statusCode >= 500) console.error(err);
+  // 503 là trạng thái đã biết (ví dụ chưa cấu hình Storage): một dòng là đủ, không in stack.
+  if (statusCode === 503) console.error(`[${err.code}] ${err.message}`);
+  else if (statusCode >= 500) console.error(err);
 
   res.status(statusCode).json({
     success: false,

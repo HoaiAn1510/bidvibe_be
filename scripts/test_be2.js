@@ -3,12 +3,21 @@
 //   node scripts/test_be2.js                        chạy kiểm thử
 //   node scripts/test_be2.js --report docs/test-be2.md   chạy và ghi kết quả ra file Markdown
 //
-// An toàn với dữ liệu thật: mọi tài khoản test có email test_be2_<thời điểm>_...@example.com,
-// cuối cùng chỉ xoá đúng những dòng gắn với các tài khoản đó (kể cả khi lỗi giữa chừng). Dữ liệu
-// demo / của BE1 không bị đụng tới (chỉ đọc qua các API danh sách của Admin).
+// Chạy song song được (nhiều người, hoặc cùng lúc với test:be1) trên database dùng chung:
+//   - mỗi lần chạy có mã riêng; email, họ tên, tên gian hàng, tiêu đề tin đều bắt đầu bằng
+//     test_be2_<mã lần chạy>_ (email: test_be2_<mã>_<tên>@example.com);
+//   - cuối lần chạy (kể cả khi lỗi) chỉ xoá các dòng đi ra từ tài khoản của CHÍNH lần chạy này;
+//     dữ liệu bỏ sót từ lần chạy bị ngắt dọn bằng npm run test:clean (scripts/test_be2_clean.js);
+//   - mọi thứ cần ghi đều tạo mới; dữ liệu demo / của BE1 / của lần chạy khác chỉ được đọc.
 // Server test KHÔNG chạy scheduler, nên hai mốc thời gian được ép thủ công:
 //   - đóng phiên: đặt ends_at về quá khứ rồi gọi auction_engine.closeAuction (BE1);
-//   - tự giải ngân: đặt payout_deadline về quá khứ rồi gọi payout_service.releaseOverduePayouts.
+//   - tự giải ngân: đặt payout_deadline về quá khứ rồi gọi payout_service.releaseOverduePayouts
+//     chỉ cho đơn của lần chạy này.
+// Scheduler của server khác (đồng đội đang chạy npm run dev) có thể làm hộ hai việc trên trước;
+// test chấp nhận cả hai trường hợp miễn là trạng thái cuối trong database đúng.
+// Supabase session pooler giới hạn tổng số kết nối của cả database (15): test dùng ít kết nối để
+// chạy song song với lần chạy khác / test:be1 / server của đồng đội. Đặt trước khi nạp pool.
+process.env.DB_POOL_MAX = process.env.DB_POOL_MAX || '4';
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -17,8 +26,11 @@ const { server, io } = require('../src/app');
 const { pool } = require('../src/config/db');
 const engine = require('../src/services/auction_engine');
 const payout = require('../src/services/payout_service');
+const uploadService = require('../src/services/upload_service');
+const env = require('../src/config/env');
 const registerSockets = require('../src/sockets');
 const { io: ioClient } = require('socket.io-client');
+const clean = require('./test_be2_clean');
 
 // Kết nối Socket.io thật tới server test (không tự kết nối lại để quan sát việc bị ngắt).
 const openSockets = [];
@@ -54,9 +66,9 @@ const sock = {
   },
 };
 
-const STAMP = Date.now();
-const PREFIX = `test_be2_${STAMP}`;
-const EMAIL_LIKE = 'test\\_be2\\_%@example.com';
+// Mã lần chạy: thời điểm bắt đầu (base36) + 3 ký tự ngẫu nhiên; chỉ gồm chữ thường và số.
+const RUN_ID = `${Date.now().toString(36)}${Math.floor(Math.random() * 36 ** 3).toString(36).padStart(3, '0')}`;
+const RUN = `${clean.PREFIX}${RUN_ID}_`;
 const PASSWORD = 'matkhau123';
 const reportPath = process.argv.includes('--report') ? process.argv[process.argv.indexOf('--report') + 1] : null;
 
@@ -65,7 +77,8 @@ const rows = [];
 let section = '';
 let passed = 0;
 
-const email = (name) => `${PREFIX}_${name}@example.com`;
+const email = (name) => `${RUN}${name}${clean.DOMAIN}`;
+const named = (text) => `${RUN}${text}`; // họ tên, tên gian hàng, tiêu đề tin
 
 function summarize(json) {
   if (!json.success) return `${json.error.code}: ${json.error.message}`;
@@ -75,11 +88,13 @@ function summarize(json) {
 }
 
 // Gọi API thật, kiểm tra mã trạng thái, ghi lại một dòng cho báo cáo.
-async function api(label, method, url, { token, body, raw, expect = 200, code, note } = {}) {
+// form: FormData (multipart) — để fetch tự đặt Content-Type kèm boundary.
+async function api(label, method, url, { token, body, raw, form, expect = 200, code, note } = {}) {
+  const auth = token ? { Authorization: `Bearer ${token}` } : {};
   const res = await fetch(base + url, {
     method,
-    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
-    body: raw ?? (body === undefined ? undefined : JSON.stringify(body)),
+    headers: form ? auth : { 'Content-Type': 'application/json', ...auth },
+    body: form ?? raw ?? (body === undefined ? undefined : JSON.stringify(body)),
   });
   const json = await res.json();
   const shown = url.replace(/^\/api/, '');
@@ -103,32 +118,98 @@ const begin = (name) => { section = name; console.log(`\n${name}`); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const q1 = async (sql, params) => (await pool.query(sql, params)).rows[0];
 
+// Chỉ dọn dữ liệu của lần chạy này (tài khoản có email test_be2_<mã lần chạy>_...).
 async function cleanup() {
-  const acc = (await pool.query('SELECT id FROM accounts WHERE email LIKE $1', [EMAIL_LIKE])).rows.map((r) => r.id);
-  const ops = (await pool.query('SELECT id FROM ops_accounts WHERE email LIKE $1', [EMAIL_LIKE])).rows.map((r) => r.id);
-  if (!acc.length && !ops.length) return;
-  const run = (sql) => pool.query(sql, [acc]);
-  const orders = 'SELECT id FROM orders WHERE seller_id = ANY($1) OR bidder_id = ANY($1)';
-  await run(`DELETE FROM disputes WHERE order_id IN (${orders})`);           // cascade dispute_timeline
-  await run(`DELETE FROM shipments WHERE order_id IN (${orders})`);          // cascade shipment_events
-  await run(`DELETE FROM warehouse_receipts WHERE order_id IN (${orders})`);
-  await run(`DELETE FROM orders WHERE id IN (${orders})`);
-  await run('DELETE FROM wallet_transactions WHERE bidder_id = ANY($1)');
-  // cascade: bids, auction_deposits, flagged_auctions -> flag_evidence
-  await run('DELETE FROM auctions WHERE listing_id IN (SELECT id FROM listings WHERE seller_id = ANY($1))');
-  await run('DELETE FROM listings WHERE seller_id = ANY($1)');               // cascade photos, appraisals
-  await run('DELETE FROM accounts WHERE id = ANY($1)');                      // cascade bidders, sellers, notifications, chat
-  await pool.query('DELETE FROM ops_accounts WHERE id = ANY($1)', [ops]);
+  const { acc, ops } = await clean.findAccounts(RUN);
+  await clean.purge(acc.map((r) => r.id), ops.map((r) => r.id));
 }
 
-// Ép phiên hết giờ rồi đóng bằng hàm của BE1 (scheduler không chạy trong test).
+// Ép phiên hết giờ rồi đóng bằng hàm của BE1 (scheduler không chạy trong test). Nếu scheduler
+// của server khác đang/đã đóng phiên này (closeAuction trả null), đọc kết quả từ database.
 async function endAuction(auctionId) {
   await pool.query(
     `UPDATE auctions SET ends_at = now() - interval '1 second', starts_at = LEAST(starts_at, now() - interval '1 hour')
      WHERE id = $1`,
     [auctionId],
   );
-  return engine.closeAuction(auctionId);
+  const r = await engine.closeAuction(auctionId);
+  if (r) return r;
+  for (let i = 0; i < 40; i += 1) {
+    const a = await q1('SELECT status, winner_id FROM auctions WHERE id = $1', [auctionId]);
+    if (a.status !== 'active') {
+      const o = await q1('SELECT id FROM orders WHERE auction_id = $1', [auctionId]);
+      return { auctionId, hasWinner: Boolean(a.winner_id), orderId: o ? o.id : null };
+    }
+    await sleep(250);
+  }
+  throw new Error(`phiên ${auctionId} không đóng được`);
+}
+
+// Danh sách có phân trang dùng chung với dữ liệu demo / lần chạy khác: tìm trang chứa phần tử
+// của lần chạy này rồi trả về query string của trang đó (để bước kiểm thử gọi đúng trang).
+async function pageOf(url, token, key, pred) {
+  const sep = url.includes('?') ? '&' : '?';
+  for (let offset = 0; offset < 5000; offset += 100) {
+    const res = await fetch(`${base}${url}${sep}limit=100&offset=${offset}`, { headers: { Authorization: `Bearer ${token}` } });
+    const list = (await res.json()).data[key];
+    if (list.some(pred)) return `${url}${sep}limit=100&offset=${offset}`;
+    if (list.length < 100) break;
+  }
+  throw new Error(`không tìm thấy phần tử của lần chạy này trong ${url}`);
+}
+
+// Object đã tải lên Storage trong lần chạy này; xoá đúng các object đó (kể cả khi test lỗi).
+const uploadedPaths = [];
+async function deleteUploaded() {
+  while (uploadedPaths.length) {
+    const p = uploadedPaths.pop();
+    if (p) await uploadService.deleteObject(p).catch((e) => console.error(`không xoá được ảnh test ${p}:`, e.message));
+  }
+}
+
+// Supabase Storage giả lập (chỉ dùng khi chưa cấu hình Storage thật): ghi lại request để kiểm header,
+// trả "Bucket not found" khi bucket chưa được tạo, failNext = true để mô phỏng Storage lỗi.
+function startMockStorage() {
+  const http = require('http');
+  const mock = { requests: [], buckets: new Set(), objects: new Map(), failNext: false };
+  mock.server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks);
+      const isJson = (req.headers['content-type'] || '').startsWith('application/json');
+      mock.requests.push({
+        method: req.method, url: req.url, apikey: req.headers.apikey, authorization: req.headers.authorization,
+        body: isJson ? JSON.parse(raw.toString()) : null,
+      });
+      const send = (status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body)); };
+      if (!req.headers.apikey && !req.url.startsWith('/storage/v1/object/public/')) return send(401, { message: 'Thiếu apikey' });
+      if (req.method === 'POST' && req.url === '/storage/v1/bucket') {
+        mock.buckets.add(JSON.parse(raw.toString()).id);
+        return send(200, { name: 'ok' });
+      }
+      const m = /^\/storage\/v1\/object\/(public\/)?([^/]+)\/(.+)$/.exec(req.url);
+      if (!m) return send(404, { message: 'route không có' });
+      const [, pub, bucket, key] = m;
+      if (req.method === 'POST' && !pub) {
+        if (mock.failNext) { mock.failNext = false; return send(500, { message: 'Lỗi giả lập' }); }
+        if (!mock.buckets.has(bucket)) return send(400, { statusCode: '404', error: 'Bucket not found', message: 'Bucket not found' });
+        mock.objects.set(`${bucket}/${key}`, raw);
+        return send(200, { Key: `${bucket}/${key}` });
+      }
+      if (req.method === 'GET' && pub) {
+        if (!mock.objects.has(`${bucket}/${key}`)) return send(400, { message: 'Object not found' });
+        res.writeHead(200);
+        return res.end(mock.objects.get(`${bucket}/${key}`));
+      }
+      if (req.method === 'DELETE' && !pub) { mock.objects.delete(`${bucket}/${key}`); return send(200, {}); }
+      return send(404, { message: 'route không có' });
+    });
+  });
+  return new Promise((resolve) => mock.server.listen(0, () => {
+    mock.url = `http://localhost:${mock.server.address().port}`;
+    resolve(mock);
+  }));
 }
 
 async function wallet(token) {
@@ -137,7 +218,6 @@ async function wallet(token) {
 }
 
 async function main() {
-  await cleanup(); // dọn rác của lần chạy trước nếu bị ngắt giữa chừng
   await new Promise((r) => server.listen(0, r));
   base = `http://localhost:${server.address().port}`;
   const T = {};
@@ -150,13 +230,13 @@ async function main() {
     { body: { fullName: 'X', email: 'khong-phai-email', password: PASSWORD, role: 'bidder' }, expect: 400 });
   await api('Body JSON hỏng trả INVALID_JSON', 'POST', '/api/auth/login', { raw: '{email:', expect: 400 });
   T.seller = (await api('Seller đăng ký', 'POST', '/api/auth/register', {
-    body: { fullName: 'Người bán test', email: email('seller'), password: PASSWORD, role: 'seller', shopName: 'Shop test BE2' }, expect: 201,
+    body: { fullName: named('Người bán'), email: email('seller'), password: PASSWORD, role: 'seller', shopName: named('Shop') }, expect: 201,
   })).token;
   T.b1 = (await api('Bidder 1 đăng ký', 'POST', '/api/auth/register', {
-    body: { fullName: 'Người mua Một', email: email('b1'), password: PASSWORD, role: 'bidder' }, expect: 201,
+    body: { fullName: named('Người mua Một'), email: email('b1'), password: PASSWORD, role: 'bidder' }, expect: 201,
   })).token;
   T.b2 = (await api('Bidder 2 đăng ký', 'POST', '/api/auth/register', {
-    body: { fullName: 'Người mua Hai', email: email('b2'), password: PASSWORD, role: 'bidder' }, expect: 201,
+    body: { fullName: named('Người mua Hai'), email: email('b2'), password: PASSWORD, role: 'bidder' }, expect: 201,
   })).token;
   await api('Đăng ký trùng email', 'POST', '/api/auth/register',
     { body: { fullName: 'X', email: email('b1'), password: PASSWORD, role: 'bidder' }, expect: 409 });
@@ -165,14 +245,14 @@ async function main() {
 
   // Admin test được tạo thẳng trong DB (tài khoản nội bộ không tự đăng ký), các ops khác tạo qua API.
   await pool.query(
-    `INSERT INTO ops_accounts (name, email, role, password_hash) VALUES ('Admin test', $1, 'admin', $2)`,
-    [email('admin'), await bcrypt.hash(PASSWORD, 10)],
+    `INSERT INTO ops_accounts (name, email, role, password_hash) VALUES ($3, $1, 'admin', $2)`,
+    [email('admin'), await bcrypt.hash(PASSWORD, 10), named('Admin')],
   );
   T.admin = (await api('Admin đăng nhập ops', 'POST', '/api/auth/ops/login', { body: { email: email('admin'), password: PASSWORD } })).token;
   await api('Admin tạo tài khoản Thẩm định', 'POST', '/api/admin/ops-accounts',
-    { token: T.admin, body: { name: 'Thẩm định test', email: email('appraiser'), role: 'appraiser', password: PASSWORD }, expect: 201 });
+    { token: T.admin, body: { name: named('Thẩm định'), email: email('appraiser'), role: 'appraiser', password: PASSWORD }, expect: 201 });
   const wh = await api('Admin tạo tài khoản Kho', 'POST', '/api/admin/ops-accounts',
-    { token: T.admin, body: { name: 'Kho test', email: email('warehouse'), role: 'warehouse', password: PASSWORD }, expect: 201 });
+    { token: T.admin, body: { name: named('Kho'), email: email('warehouse'), role: 'warehouse', password: PASSWORD }, expect: 201 });
   await api('Tạo ops trùng email', 'POST', '/api/admin/ops-accounts',
     { token: T.admin, body: { name: 'X', email: email('warehouse'), role: 'warehouse', password: PASSWORD }, expect: 409 });
   T.ap = (await api('Thẩm định đăng nhập', 'POST', '/api/auth/ops/login', { body: { email: email('appraiser'), password: PASSWORD } })).token;
@@ -186,15 +266,16 @@ async function main() {
     { token: T.seller, body: { categoryCode: 'elec', condition: 'Như mới' }, note: (j) => `basis=${j.data.basis}, gợi ý ${j.data.suggestedStartingPrice}` });
   const L1 = await api('Tạo tin (nháp)', 'POST', '/api/listings', {
     token: T.seller, expect: 201, note: (j) => `id=${j.data.id}, status=${j.data.status}`,
-    body: { title: 'Máy nghe nhạc test BE2', categoryCode: 'elec', startingPrice: 1_000_000, durationHours: 24, condition: 'Như mới', aiSuggestedPrice: hint.suggestedStartingPrice },
+    body: { title: named('Máy nghe nhạc'), categoryCode: 'elec', startingPrice: 1_000_000, durationHours: 24, condition: 'Như mới', aiSuggestedPrice: hint.suggestedStartingPrice },
   });
   await api('Gửi thẩm định khi chưa có ảnh', 'POST', `/api/listings/${L1.id}/submit`, { token: T.seller, expect: 400 });
   await api('Thêm ảnh (URL)', 'POST', `/api/listings/${L1.id}/photos`,
     { token: T.seller, body: { urls: ['https://picsum.photos/seed/be2a/800/600', 'https://picsum.photos/seed/be2b/800/600'] }, expect: 201, note: (j) => `${j.data.photos.length} ảnh` });
   await api('Gửi thẩm định', 'POST', `/api/listings/${L1.id}/submit`, { token: T.seller, note: (j) => `status=${j.data.status}` });
   await api('Sửa khi đang chờ thẩm định', 'PATCH', `/api/listings/${L1.id}`, { token: T.seller, body: { title: 'x' }, expect: 409 });
-  await api('Hàng chờ thẩm định có tin mới', 'GET', '/api/appraisals/queue',
-    { token: T.ap, note: (j) => `có tin test: ${j.data.items.some((i) => String(i.listingId) === String(L1.id))}` });
+  const isL1 = (i) => String(i.listingId) === String(L1.id);
+  await api('Hàng chờ thẩm định có tin mới', 'GET', await pageOf('/api/appraisals/queue', T.ap, 'items', isL1),
+    { token: T.ap, note: (j) => `có tin test: ${j.data.items.some(isL1)}` });
   await api('Yêu cầu bổ sung', 'POST', `/api/appraisals/${L1.id}/decision`,
     { token: T.ap, body: { decision: 'more_info', reason: 'Chụp thêm ảnh số seri' }, expect: 201, note: (j) => `listing=${j.data.listingStatus}` });
   await api('Duyệt khi tin đang chờ bổ sung', 'POST', `/api/appraisals/${L1.id}/decision`, { token: T.ap, body: { decision: 'approve' }, expect: 409 });
@@ -270,8 +351,9 @@ async function main() {
   await api('Seller gửi hàng về kho', 'POST', `/api/orders/${O1}/ship-to-warehouse`,
     { token: T.seller, note: (j) => `stage=${j.data.stage}, mã ${j.data.warehouse.orderCode}` });
   await api('Seller gửi lần hai', 'POST', `/api/orders/${O1}/ship-to-warehouse`, { token: T.seller, expect: 409 });
-  await api('Kho xem đơn đang về', 'GET', '/api/warehouse/orders?stage=in_transit_to_warehouse',
-    { token: T.wh, note: (j) => `có đơn test: ${j.data.orders.some((o) => String(o.id) === String(O1))}` });
+  const isO1 = (o) => String(o.id) === String(O1);
+  await api('Kho xem đơn đang về', 'GET', await pageOf('/api/warehouse/orders?stage=in_transit_to_warehouse', T.wh, 'orders', isO1),
+    { token: T.wh, note: (j) => `có đơn test: ${j.data.orders.some(isO1)}` });
   await api('Đóng gói trước khi nhận', 'POST', `/api/warehouse/orders/${O1}/pack`, { token: T.wh, expect: 409 });
   await api('Kho nhận hàng', 'POST', `/api/warehouse/orders/${O1}/receive`, { token: T.wh, note: (j) => `stage=${j.data.stage}` });
   await api('Kiểm hàng: khớp mô tả', 'POST', `/api/warehouse/orders/${O1}/inspect`,
@@ -288,8 +370,8 @@ async function main() {
     { token: T.b1, body: { addressId: Number(addrB.id) }, note: (j) => `${j.data.shippingAddress.addressLine}, ${j.data.shippingAddress.city}` });
   await api('Bidder 1 đổi sang địa chỉ khác (còn trước khi gửi)', 'POST', `/api/orders/${O1}/shipping-address`,
     { token: T.b1, body: { addressId: Number(addrA.id) }, note: (j) => `${j.data.shippingAddress.addressLine}, ${j.data.shippingAddress.city}` });
-  await api('Kho thấy địa chỉ giao hàng', 'GET', '/api/warehouse/orders?stage=packed',
-    { token: T.wh, note: (j) => { const o = j.data.orders.find((x) => String(x.id) === String(O1)); return `${o.shippingAddress.recipientName} · ${o.shippingAddress.phone} · ${o.shippingAddress.addressLine}, ${o.shippingAddress.city}`; } });
+  await api('Kho thấy địa chỉ giao hàng', 'GET', await pageOf('/api/warehouse/orders?stage=packed', T.wh, 'orders', isO1),
+    { token: T.wh, note: (j) => { const o = j.data.orders.find(isO1); return `${o.shippingAddress.recipientName} · ${o.shippingAddress.phone} · ${o.shippingAddress.addressLine}, ${o.shippingAddress.city}`; } });
   await api('Gửi cho đơn vị vận chuyển', 'POST', `/api/warehouse/orders/${O1}/ship`,
     { token: T.wh, body: { carrier: 'GHN Express', trackingCode: 'GHNTEST0001' }, note: (j) => `stage=${j.data.stage}, mã ${j.data.shipment.trackingCode}` });
   await api('Đổi địa chỉ khi đơn đã gửi đi', 'POST', `/api/orders/${O1}/shipping-address`,
@@ -354,16 +436,17 @@ async function main() {
 
   // ------------------------------------------------------------------
   begin('6. Tranh chấp do Kho mở (hàng không khớp) -> Admin hoàn tiền');
-  const B = await sellOne('Bình gốm test BE2 (tranh chấp)', T.b2);
+  const B = await sellOne(named('Bình gốm (tranh chấp)'), T.b2);
   await api('Kiểm hàng: không khớp thiếu ghi chú', 'POST', `/api/warehouse/orders/${B.orderId}/inspect`, { token: T.wh, body: { result: 'mismatch' }, expect: 400 });
   await api('Kiểm hàng: không khớp -> tự mở tranh chấp', 'POST', `/api/warehouse/orders/${B.orderId}/inspect`,
     { token: T.wh, body: { result: 'mismatch', notes: 'Miệng bình có vết nứt, mô tả ghi nguyên vẹn' }, note: (j) => `stage=${j.data.stage}, payoutStatus=${j.data.payoutStatus}` });
   await api('Không đóng gói được đơn đang tranh chấp', 'POST', `/api/warehouse/orders/${B.orderId}/pack`, { token: T.wh, body: {}, expect: 409 });
   await api('Bidder mở thêm tranh chấp khi đã có', 'POST', '/api/disputes',
     { token: T.b2, body: { orderId: Number(B.orderId), title: 'Trùng', reason: 'x' }, expect: 409 });
-  const dl = await api('Admin xem tranh chấp đang mở', 'GET', '/api/admin/disputes?status=open',
-    { token: T.admin, note: (j) => `${j.data.disputes.length} tranh chấp mở` });
-  const dB = dl.disputes.find((d) => String(d.orderId) === String(B.orderId));
+  const isB = (d) => String(d.orderId) === String(B.orderId);
+  const dl = await api('Admin xem tranh chấp đang mở', 'GET', await pageOf('/api/admin/disputes?status=open', T.admin, 'disputes', isB),
+    { token: T.admin, note: (j) => `có tranh chấp của đơn test: ${j.data.disputes.some(isB)}` });
+  const dB = dl.disputes.find(isB);
   assert.ok(dB && dB.source === 'warehouse' && dB.reporterId === null && dB.timeline.length >= 2);
   const before = await wallet(T.b2);
   await api('Admin phán quyết hoàn tiền', 'POST', `/api/admin/disputes/${dB.id}/resolve`,
@@ -380,7 +463,7 @@ async function main() {
 
   // ------------------------------------------------------------------
   begin('7. Tranh chấp do Bidder mở sau khi giao -> Admin giữ nguyên, giải ngân');
-  const C = await sellOne('Đồng hồ test BE2 (giữ nguyên)', T.b1);
+  const C = await sellOne(named('Đồng hồ (giữ nguyên)'), T.b1);
   await shipAndDeliver(C.orderId);
   await api('Bidder 2 mở tranh chấp đơn của người khác', 'POST', '/api/disputes',
     { token: T.b2, body: { orderId: Number(C.orderId), title: 'x', reason: 'x' }, expect: 404 });
@@ -392,21 +475,25 @@ async function main() {
 
   // ------------------------------------------------------------------
   begin('8. Tự giải ngân sau 72 giờ');
-  const D = await sellOne('Radio test BE2 (tự giải ngân)', T.b1);
+  const D = await sellOne(named('Radio (tự giải ngân)'), T.b1);
   await shipAndDeliver(D.orderId);
-  const notYet = await payout.releaseOverduePayouts();
+  // Chỉ xét đơn của lần chạy này: không giải ngân đơn demo hay đơn của lần chạy khác.
+  const notYet = await payout.releaseOverduePayouts({ orderIds: [D.orderId] });
   assert.ok(!notYet.map(String).includes(String(D.orderId)));
   record('Chưa tới hạn thì job không giải ngân', 'đơn vẫn payout_status = pending');
   await pool.query(`UPDATE orders SET payout_deadline = now() - interval '1 minute' WHERE id = $1`, [D.orderId]);
-  const released = await payout.releaseOverduePayouts();
-  assert.ok(released.map(String).includes(String(D.orderId)));
+  const released = await payout.releaseOverduePayouts({ orderIds: [D.orderId] });
+  // Scheduler của server khác cũng có thể giải ngân trước; điều cần kiểm là trạng thái cuối.
+  const paidOut = await q1('SELECT payout_status FROM orders WHERE id = $1', [D.orderId]);
+  assert.ok(released.map(String).includes(String(D.orderId)) || paidOut.payout_status === 'released');
+  assert.strictEqual(paidOut.payout_status, 'released');
   await api('Đơn đã tự giải ngân', 'GET', `/api/orders/${D.orderId}/tracking`,
     { token: T.seller, note: (j) => `stage=${j.data.stage}, payoutStatus=${j.data.payoutStatus}, deliveredConfirmedAt=${j.data.deliveredConfirmedAt}` });
 
   // ------------------------------------------------------------------
   begin('9. Phiên bị gắn cờ (fraud_detection của BE1) -> Admin xử lý');
   const l = await api('Tạo tin', 'POST', '/api/listings',
-    { token: T.seller, expect: 201, body: { title: 'Máy ảnh test BE2 (gắn cờ)', categoryCode: 'elec', startingPrice: 1_000_000, durationHours: 24 } });
+    { token: T.seller, expect: 201, body: { title: named('Máy ảnh (gắn cờ)'), categoryCode: 'elec', startingPrice: 1_000_000, durationHours: 24 } });
   await api('Thêm ảnh', 'POST', `/api/listings/${l.id}/photos`, { token: T.seller, body: { url: 'https://picsum.photos/seed/be2f/800/600' }, expect: 201 });
   await api('Gửi thẩm định', 'POST', `/api/listings/${l.id}/submit`, { token: T.seller });
   const E = (await api('Duyệt', 'POST', `/api/appraisals/${l.id}/decision`, { token: T.ap, body: { decision: 'approve' }, expect: 201 })).auctionId;
@@ -426,8 +513,9 @@ async function main() {
     flag = await q1(`SELECT id FROM flagged_auctions WHERE auction_id = $1 ORDER BY id LIMIT 1`, [E]);
   }
   assert.ok(flag, 'fraud_detection phải tạo cờ');
-  await api('Admin xem cờ đang chờ', 'GET', '/api/admin/flags?status=pending',
-    { token: T.admin, note: (j) => { const f = j.data.flags.find((x) => String(x.id) === String(flag.id)); return `${f.severity} ${f.confidence}: ${f.reason}`; } });
+  const isFlag = (x) => String(x.id) === String(flag.id);
+  await api('Admin xem cờ đang chờ', 'GET', await pageOf('/api/admin/flags?status=pending', T.admin, 'flags', isFlag),
+    { token: T.admin, note: (j) => { const f = j.data.flags.find(isFlag); return `${f.severity} ${f.confidence}: ${f.reason}`; } });
   await api('Tạm dừng phiên', 'POST', `/api/admin/flags/${flag.id}/action`, { token: T.admin, body: { action: 'pause' }, note: (j) => `flag=${j.data.status}` });
   await api('Đặt giá khi phiên tạm dừng', 'POST', '/api/bids', { token: T.b1, body: { auctionId: E, amount: 2_000_000 }, expect: 409 });
   await api('Chuyển sang xác minh (bỏ tạm dừng)', 'POST', `/api/admin/flags/${flag.id}/action`, { token: T.admin, body: { action: 'verify' }, note: (j) => `flag=${j.data.status}` });
@@ -444,7 +532,7 @@ async function main() {
   begin('10. Admin: bảng điều khiển, báo cáo, khoá tài khoản; Chatbot');
   await api('Bảng điều khiển', 'GET', '/api/admin/dashboard', { token: T.admin, note: (j) => `phiên live ${j.data.auctions.live}, tranh chấp mở ${j.data.disputes.open}, ký quỹ ${j.data.escrowHeld}` });
   await api('Báo cáo tuần', 'GET', '/api/admin/report/weekly', { token: T.admin, note: (j) => `${j.data.sales.orders} đơn, GMV ${j.data.sales.gmv}` });
-  await api('Danh sách tài khoản (lọc theo từ khoá)', 'GET', `/api/admin/accounts?q=${PREFIX}`, { token: T.admin, note: (j) => `${j.data.accounts.length} tài khoản test` });
+  await api('Danh sách tài khoản (lọc theo từ khoá)', 'GET', `/api/admin/accounts?q=${RUN_ID}`, { token: T.admin, note: (j) => `${j.data.accounts.length} tài khoản test` });
   const b2id = (await q1('SELECT id FROM accounts WHERE email = $1', [email('b2')])).id;
   const s1 = await sock.connect(T.b2);
   record('Bidder 2 kết nối Socket.io', `connected=${s1.connected}`);
@@ -553,18 +641,173 @@ async function main() {
   s3.close();
 
   // ------------------------------------------------------------------
-  begin('12. Kiểm tra tính nhất quán của ví');
-  const bad = await pool.query(
-    `SELECT b.account_id FROM bidders b JOIN accounts a ON a.id = b.account_id
+  begin('12. Tải ảnh từ điện thoại (Supabase Storage)');
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+  const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(60)]);
+  const formOf = (files, field = 'files') => {
+    const f = new FormData();
+    for (const [buf, name, type] of files) f.append(field, new Blob([buf], { type }), name);
+    return f;
+  };
+  const png = () => [PNG, 'anh.png', 'image/png'];
+  await api('Tải ảnh không có token', 'POST', '/api/uploads/images', { form: formOf([png()]), expect: 401 });
+  await api('Tài khoản nội bộ tải ảnh bị chặn', 'POST', '/api/uploads/images', { token: T.admin, form: formOf([png()]), expect: 403 });
+
+  const realStorage = uploadService.isConfigured();
+  const savedEnv = { url: env.supabaseUrl, key: env.supabaseServiceKey, bucket: env.storageBucket };
+  let mock = null;
+  if (!realStorage) {
+    await api('Chưa cấu hình Storage thì trả 503', 'POST', '/api/uploads/images',
+      { token: T.seller, form: formOf([png()]), expect: 503, code: 'UPLOAD_NOT_CONFIGURED' });
+    record('Tải lên Supabase Storage thật: bỏ qua (chưa cấu hình Storage)', 'các bước dưới chạy với Storage giả lập trong tiến trình');
+    mock = await startMockStorage();
+    Object.assign(env, { supabaseUrl: mock.url, supabaseServiceKey: 'sb_secret_gia_lap', storageBucket: `${RUN}bucket`.replace(/_/g, '-') });
+  }
+  try {
+    await api('File không phải ảnh (Content-Type nói là PNG)', 'POST', '/api/uploads/images',
+      { token: T.seller, form: formOf([[Buffer.from('xin chao, day khong phai anh'), 'gia.png', 'image/png']]), expect: 400, code: 'INVALID_FILE_TYPE' });
+    await api('Ảnh GIF bị từ chối', 'POST', '/api/uploads/images',
+      { token: T.seller, form: formOf([png(), [Buffer.from('GIF89a\x01\x00\x01\x00\x00\x00\x00'), 'a.gif', 'image/gif']]), expect: 400, code: 'INVALID_FILE_TYPE' });
+    const big = Buffer.alloc(5 * 1024 * 1024 + 1);
+    PNG.copy(big);
+    await api('Ảnh quá 5 MB', 'POST', '/api/uploads/images', { token: T.seller, form: formOf([[big, 'to.png', 'image/png']]), expect: 413, code: 'FILE_TOO_LARGE' });
+    await api('Quá 8 ảnh một lần', 'POST', '/api/uploads/images',
+      { token: T.seller, form: formOf(Array.from({ length: 9 }, png)), expect: 400, code: 'TOO_MANY_FILES' });
+    await api('Không có file', 'POST', '/api/uploads/images', { token: T.seller, form: new FormData(), expect: 400, code: 'VALIDATION_ERROR' });
+    await api('Sai tên trường (file thay vì files)', 'POST', '/api/uploads/images',
+      { token: T.seller, form: formOf([png()], 'file'), expect: 400, code: 'VALIDATION_ERROR' });
+    await api('purpose không hợp lệ', 'POST', '/api/uploads/images?purpose=banner',
+      { token: T.seller, form: formOf([png()]), expect: 400, code: 'VALIDATION_ERROR' });
+
+    const up = await api('Seller tải 2 ảnh (PNG, JPEG)', 'POST', '/api/uploads/images', {
+      token: T.seller, form: formOf([png(), [JPG, 'chup.jpg', 'image/jpeg']]), expect: 201,
+      note: (j) => j.data.urls.map((u) => u.replace(/^.*\/object\/public\//, '…/public/')).join(', '),
+    });
+    up.urls.forEach((u) => { const p = uploadService.pathFromPublicUrl(u); if (p) uploadedPaths.push(p); });
+    assert.strictEqual(up.urls.length, 2);
+    assert.ok(up.urls[0].endsWith('.png') && up.urls[1].endsWith('.jpg'), 'URL phải theo đúng thứ tự file');
+    const sellerId = (await q1('SELECT id FROM accounts WHERE email = $1', [email('seller')])).id;
+    assert.ok(up.urls.every((u) => u.startsWith(`${env.supabaseUrl}/storage/v1/object/public/${env.storageBucket}/listing/${sellerId}/`)));
+    for (const u of up.urls) {
+      const r = await fetch(u);
+      assert.strictEqual(r.status, 200, `GET ${u} phải 200`);
+    }
+    record('GET URL public của ảnh vừa tải', `200 cho cả ${up.urls.length} ảnh${realStorage ? '' : ' (Storage giả lập)'}`);
+    const av = await api('Bidder tải ảnh đại diện (purpose=avatar)', 'POST', '/api/uploads/images?purpose=avatar',
+      { token: T.b1, form: formOf([png()]), expect: 201, note: (j) => j.data.urls[0].replace(/^.*\/object\/public\//, '…/public/') });
+    av.urls.forEach((u) => uploadedPaths.push(uploadService.pathFromPublicUrl(u)));
+    assert.ok(av.urls[0].includes('/avatar/'));
+    T.avatarUrl = av.urls[0];
+    T.uploaded = up.urls;
+
+    if (mock) {
+      const puts = mock.requests.filter((r) => r.method === 'POST' && r.url.startsWith('/storage/v1/object/'));
+      assert.ok(puts.every((r) => r.apikey === 'sb_secret_gia_lap' && !r.authorization), 'key sb_secret_ chỉ đi qua header apikey');
+      const creates = mock.requests.filter((r) => r.url === '/storage/v1/bucket');
+      assert.strictEqual(creates.length, 1, 'bucket chưa có thì tạo đúng một lần');
+      assert.deepStrictEqual(creates[0].body, {
+        id: env.storageBucket, name: env.storageBucket, public: true, file_size_limit: 5 * 1024 * 1024,
+        allowed_mime_types: ['image/jpeg', 'image/png', 'image/webp'],
+      });
+      record('Gọi Storage: header và tự tạo bucket', 'sb_secret_: chỉ apikey; bucket chưa có -> tạo 1 lần (public, 5 MB, 3 loại ảnh) rồi tải lại');
+      env.supabaseServiceKey = 'eyJgia.lap.jwt';
+      const jwtUp = await api('Key dạng JWT (service_role)', 'POST', '/api/uploads/images', { token: T.seller, form: formOf([png()]), expect: 201 });
+      jwtUp.urls.forEach((u) => uploadedPaths.push(uploadService.pathFromPublicUrl(u)));
+      const last = mock.requests.filter((r) => r.method === 'POST' && r.url.startsWith('/storage/v1/object/')).pop();
+      assert.ok(last.apikey === 'eyJgia.lap.jwt' && last.authorization === 'Bearer eyJgia.lap.jwt');
+      record('Key JWT gửi cả apikey và Authorization: Bearer', 'đúng');
+      mock.failNext = true;
+      await api('Storage trả lỗi thì 502 UPLOAD_FAILED', 'POST', '/api/uploads/images',
+        { token: T.seller, form: formOf([png()]), expect: 502, code: 'UPLOAD_FAILED' });
+    }
+  } finally {
+    // Xoá đúng các object do lần chạy này tải lên (cả khi lỗi giữa chừng: xem cuối main()).
+    await deleteUploaded();
+    if (mock) {
+      Object.assign(env, { supabaseUrl: savedEnv.url, supabaseServiceKey: savedEnv.key, storageBucket: savedEnv.bucket });
+      await new Promise((r) => mock.server.close(r));
+    }
+  }
+  record('Xoá các ảnh test vừa tải lên Storage', realStorage ? 'đã xoá đúng các object của lần chạy' : 'Storage giả lập: đã xoá');
+
+  // ------------------------------------------------------------------
+  begin('13. Hồ sơ, đổi mật khẩu, đọc hết thông báo, xoá ảnh tin đăng');
+  const meSeller = await api('GET /me của Seller có storeName', 'GET', '/api/me', { token: T.seller, note: (j) => `storeName=${j.data.storeName}` });
+  assert.strictEqual(meSeller.storeName, named('Shop'));
+  const meB1 = await api('GET /me của Bidder không có storeName', 'GET', '/api/me', { token: T.b1, note: (j) => `storeName có: ${'storeName' in j.data}` });
+  assert.ok(!('storeName' in meB1));
+  const edited2 = await api('Seller sửa họ tên, số điện thoại, tên gian hàng', 'PATCH', '/api/me', {
+    token: T.seller, body: { fullName: named('Người bán (đã sửa)'), phone: '0903 222 333', shopName: named('Shop mới') },
+    note: (j) => `fullName=${j.data.fullName}, phone=${j.data.phone}, storeName=${j.data.storeName}`,
+  });
+  assert.deepStrictEqual([edited2.fullName, edited2.phone, edited2.storeName], [named('Người bán (đã sửa)'), '0903 222 333', named('Shop mới')]);
+  assert.deepStrictEqual(Object.keys(edited2).sort(), Object.keys(meSeller).sort(), 'PATCH /me trả cùng dạng GET /me');
+  const withAvatar = await api('Bidder đặt ảnh đại diện bằng URL vừa tải', 'PATCH', '/api/me',
+    { token: T.b1, body: { avatarUrl: T.avatarUrl }, note: (j) => `avatarUrl ${j.data.avatarUrl ? 'đã đặt' : 'trống'}` });
+  assert.strictEqual(withAvatar.avatarUrl, T.avatarUrl);
+  const noAvatar = await api('Bidder xoá ảnh đại diện (null)', 'PATCH', '/api/me', { token: T.b1, body: { avatarUrl: null } });
+  assert.strictEqual(noAvatar.avatarUrl, null);
+  await api('Số điện thoại sai', 'PATCH', '/api/me', { token: T.b1, body: { phone: 'abc' }, expect: 400, code: 'VALIDATION_ERROR' });
+  await api('avatarUrl không phải URL', 'PATCH', '/api/me', { token: T.b1, body: { avatarUrl: 'khong-phai-url' }, expect: 400, code: 'VALIDATION_ERROR' });
+  await api('Bidder gửi shopName', 'PATCH', '/api/me', { token: T.b1, body: { shopName: 'X' }, expect: 400, code: 'VALIDATION_ERROR' });
+  await api('Không có trường nào', 'PATCH', '/api/me', { token: T.b1, body: {}, expect: 400, code: 'VALIDATION_ERROR' });
+  await api('Tài khoản nội bộ sửa hồ sơ', 'PATCH', '/api/me', { token: T.admin, body: { fullName: 'X' }, expect: 403 });
+
+  await api('Đổi mật khẩu: sai mật khẩu hiện tại', 'POST', '/api/me/password',
+    { token: T.seller, body: { currentPassword: 'sai-mat-khau', newPassword: 'matkhaumoi1' }, expect: 400, code: 'WRONG_PASSWORD' });
+  await api('Đổi mật khẩu: mật khẩu mới quá ngắn', 'POST', '/api/me/password',
+    { token: T.seller, body: { currentPassword: PASSWORD, newPassword: '123' }, expect: 400, code: 'VALIDATION_ERROR' });
+  await api('Seller đổi mật khẩu', 'POST', '/api/me/password', { token: T.seller, body: { currentPassword: PASSWORD, newPassword: 'matkhaumoi1' } });
+  await api('Đăng nhập bằng mật khẩu cũ', 'POST', '/api/auth/login', { body: { email: email('seller'), password: PASSWORD }, expect: 401 });
+  await api('Đăng nhập bằng mật khẩu mới', 'POST', '/api/auth/login', { body: { email: email('seller'), password: 'matkhaumoi1' } });
+  await api('Tài khoản nội bộ đổi mật khẩu', 'POST', '/api/me/password', { token: T.ap, body: { currentPassword: PASSWORD, newPassword: 'matkhaumoi1' } });
+  await api('Thẩm định đăng nhập bằng mật khẩu mới', 'POST', '/api/auth/ops/login', { body: { email: email('appraiser'), password: 'matkhaumoi1' } });
+
+  const unread = await q1('SELECT count(*)::int AS n FROM notifications n JOIN accounts a ON a.id = n.account_id WHERE a.email = $1 AND NOT n.is_read', [email('b1')]);
+  assert.ok(unread.n > 0, 'Bidder 1 phải có thông báo chưa đọc');
+  const ra = await api('Đánh dấu đã đọc tất cả', 'POST', '/api/notifications/read-all', { token: T.b1, note: (j) => `updated=${j.data.updated}` });
+  assert.strictEqual(ra.updated, unread.n);
+  const allRead = await api('Mọi thông báo đã đọc', 'GET', '/api/notifications?limit=100',
+    { token: T.b1, note: (j) => `${j.data.notifications.filter((n) => !n.isRead).length} chưa đọc` });
+  assert.ok(allRead.notifications.every((n) => n.isRead));
+  const ra2 = await api('Gọi lại khi không còn thông báo chưa đọc', 'POST', '/api/notifications/read-all', { token: T.b1, note: (j) => `updated=${j.data.updated}` });
+  assert.strictEqual(ra2.updated, 0);
+  await api('Tài khoản nội bộ gọi read-all', 'POST', '/api/notifications/read-all', { token: T.admin, expect: 403 });
+
+  const L2 = await api('Tạo tin nháp để thử xoá ảnh', 'POST', '/api/listings',
+    { token: T.seller, expect: 201, body: { title: named('Đèn bàn (xoá ảnh)'), categoryCode: 'antique', startingPrice: 1_000_000, durationHours: 24 } });
+  const withPhotos = await api('Thêm 3 ảnh', 'POST', `/api/listings/${L2.id}/photos`, {
+    token: T.seller, expect: 201, body: { urls: [...T.uploaded, 'https://picsum.photos/seed/be2d/800/600'] },
+    note: (j) => `photos[].id: ${j.data.photos.map((p) => `${JSON.stringify(p.id)}`).join(', ')}`,
+  });
+  assert.ok(withPhotos.photos.every((p) => typeof p.id === 'string'), 'photos[].id phải là chuỗi');
+  const [p1, p2, p3] = withPhotos.photos;
+  const left = await api('Xoá ảnh thứ hai', 'DELETE', `/api/listings/${L2.id}/photos/${p2.id}`,
+    { token: T.seller, note: (j) => `còn ${j.data.photos.map((p) => p.id).join(', ')}` });
+  assert.deepStrictEqual(left.photos.map((p) => p.id), [p1.id, p3.id]);
+  await api('Xoá lại ảnh đã xoá', 'DELETE', `/api/listings/${L2.id}/photos/${p2.id}`, { token: T.seller, expect: 404 });
+  const otherPhoto = await q1('SELECT id FROM listing_photos WHERE listing_id = $1 LIMIT 1', [L1.id]);
+  await api('Xoá ảnh của tin khác qua đường dẫn tin này', 'DELETE', `/api/listings/${L2.id}/photos/${otherPhoto.id}`, { token: T.seller, expect: 404 });
+  await api('Bidder xoá ảnh tin đăng', 'DELETE', `/api/listings/${L2.id}/photos/${p1.id}`, { token: T.b1, expect: 403 });
+  await api('photoId không hợp lệ', 'DELETE', `/api/listings/${L2.id}/photos/abc`, { token: T.seller, expect: 400 });
+  await api('Gửi thẩm định', 'POST', `/api/listings/${L2.id}/submit`, { token: T.seller });
+  await api('Xoá ảnh khi tin đang chờ thẩm định', 'DELETE', `/api/listings/${L2.id}/photos/${p1.id}`,
+    { token: T.seller, expect: 409, code: 'INVALID_STATE' });
+
+  // ------------------------------------------------------------------
+  begin('14. Kiểm tra tính nhất quán của ví');
+  const ledger = await pool.query(
+    `SELECT b.account_id, t.balance_after = b.wallet_balance AS ok FROM bidders b JOIN accounts a ON a.id = b.account_id
      JOIN LATERAL (SELECT balance_after FROM wallet_transactions w WHERE w.bidder_id = b.account_id ORDER BY id DESC LIMIT 1) t ON true
-     WHERE a.email LIKE $1 AND t.balance_after <> b.wallet_balance`,
-    [EMAIL_LIKE],
+     WHERE a.email LIKE $1`,
+    [`${clean.like(RUN)}%`],
   );
-  assert.strictEqual(bad.rowCount, 0);
+  assert.strictEqual(ledger.rowCount, 2, 'phải kiểm đúng 2 Bidder của lần chạy này');
+  assert.ok(ledger.rows.every((r) => r.ok));
   record('Số dư ví khớp balance_after của giao dịch cuối', 'cả hai Bidder test');
 
   // ------------------------------------------------------------------
-  begin('13. Kết nối database bị rớt không làm sập tiến trình');
+  begin('15. Kết nối database bị rớt không làm sập tiến trình');
   assert.ok(pool.listenerCount('error') > 0, 'pool phải có listener cho sự kiện error');
   let exited = false;
   const onExit = () => { exited = true; };
@@ -595,8 +838,10 @@ function writeReport(ok, error) {
     '',
     `Chạy lúc ${new Date().toISOString()} bằng \`node scripts/test_be2.js --report docs/test-be2.md\`.`,
     'Gọi API thật qua HTTP (server chạy trong tiến trình, cổng ngẫu nhiên) trên database thật dùng chung.',
-    'Tài khoản test có email `test_be2_<thời điểm>_...@example.com` và được dọn sạch sau khi chạy.',
-    'Server test không chạy scheduler nên hai mốc thời gian được ép: đóng phiên (đặt `ends_at` về quá khứ rồi gọi `closeAuction` của BE1) và tự giải ngân (đặt `payout_deadline` về quá khứ rồi gọi `releaseOverduePayouts`). Token trong phản hồi được che.',
+    '',
+    '**Mã lần chạy và dọn dữ liệu.** Mỗi lần chạy sinh một mã riêng (thời điểm bắt đầu dạng base36 + 3 ký tự ngẫu nhiên). Email có dạng `test_be2_<mã lần chạy>_<tên>@example.com`; họ tên, tên gian hàng, tiêu đề tin cũng bắt đầu bằng `test_be2_<mã lần chạy>_`. Cuối lần chạy (kể cả khi lỗi) chỉ xoá các dòng đi ra từ tài khoản của chính lần đó, nên hai `test:be2`, hoặc `test:be2` cùng `test:be1`, chạy song song được. Mọi dữ liệu cần ghi đều tạo mới; dữ liệu demo chỉ được đọc. Dữ liệu bỏ sót do lần chạy bị ngắt: `npm run test:clean` (xem trước bằng `npm run test:clean -- --dry-run`), chỉ xoá tài khoản `test_be2_` của lần chạy bắt đầu hơn 1 giờ trước.',
+    '',
+    'Server test không chạy scheduler nên hai mốc thời gian được ép: đóng phiên (đặt `ends_at` về quá khứ rồi gọi `closeAuction` của BE1) và tự giải ngân (đặt `payout_deadline` về quá khứ rồi gọi `releaseOverduePayouts` chỉ cho đơn của lần chạy). Token trong phản hồi được che.',
     '',
     `**Kết quả: ${ok ? `ĐẠT ${passed} bước` : `LỖI sau ${passed} bước — ${error}`}**`,
   ];
@@ -624,6 +869,7 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
+    await deleteUploaded();
     await cleanup().catch((e) => console.error('cleanup lỗi:', e.message));
     openSockets.forEach((s) => s.close());
     io.close();

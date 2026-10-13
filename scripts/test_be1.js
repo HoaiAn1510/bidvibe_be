@@ -1,9 +1,14 @@
-// Kiểm thử end-to-end phần BE1 trên DB dùng chung bằng dữ liệu tạm có tiền tố riêng:
-//   tài khoản  email  test_be1_<tên>_<số>@be1test.local, họ tên  test_be1_<tên>
-//   tin đăng   tiêu đề test_be1_item
+// Kiểm thử end-to-end phần BE1 trên DB dùng chung bằng dữ liệu tạm có tiền tố riêng, kèm mã lần chạy:
+//   tài khoản  email  test_be1_<mã lần chạy>_<tên>_<số>@be1test.local, họ tên  test_be1_<tên>
+//   tin đăng   tiêu đề test_be1_<mã lần chạy>_item
 // Mọi thao tác ghi/xoá chỉ chạm các dòng đi ra từ những tài khoản đó; dữ liệu thật và dữ
-// liệu của người khác không bị sửa hay xoá. Dọn sạch khi xong (kể cả khi test lỗi).
+// liệu của người khác không bị sửa hay xoá. Cuối lần chạy (kể cả khi lỗi) chỉ dọn dữ liệu của
+// CHÍNH lần chạy này; đầu lần chạy chỉ dọn dữ liệu test_be1_ bỏ dở từ hơn 30 phút trước, nên
+// hai người chạy test cùng lúc trên database dùng chung không xoá dữ liệu của nhau.
 // Chạy: npm run test:be1   (hoặc node scripts/test_be1.js)
+// Supabase session pooler giới hạn tổng số kết nối của cả database (15): test dùng ít kết nối để
+// chạy song song với lần chạy khác / test:be2 / server của đồng đội. Đặt trước khi nạp pool.
+process.env.DB_POOL_MAX = process.env.DB_POOL_MAX || '4';
 const assert = require('assert');
 const { pool } = require('../src/config/db');
 const engine = require('../src/services/auction_engine');
@@ -12,8 +17,19 @@ const fraud = require('../src/services/fraud_detection');
 
 const PREFIX = 'test_be1_';
 const DOMAIN = '@be1test.local';
+// Mã lần chạy: thời điểm bắt đầu (base36) + 3 ký tự ngẫu nhiên; chỉ gồm chữ thường và số.
+const RUN_ID = `${Date.now().toString(36)}${Math.floor(Math.random() * 36 ** 3).toString(36).padStart(3, '0')}`;
+const RUN = `${PREFIX}${RUN_ID}_`;
 // LIKE: dấu _ là ký tự đại diện nên phải escape để chỉ khớp đúng tiền tố.
-const EMAIL_LIKE = `test\\_be1\\_%${DOMAIN}`;
+const like = (p) => p.replace(/_/g, '\\_');
+const EMAIL_LIKE_ANY = `${like(PREFIX)}%${DOMAIN}`;
+const EMAIL_LIKE_RUN = `${like(RUN)}%${DOMAIN}`;
+const STALE_MS = 30 * 60_000;
+// Thời điểm bắt đầu của lần chạy đã tạo email này; email kiểu cũ (không có mã) coi như rất cũ.
+const runStartOf = (email) => {
+  const m = /^test_be1_([0-9a-z]{9,})_/.exec(email);
+  return m ? parseInt(m[1].slice(0, -3), 36) : 0;
+};
 let passed = 0;
 const step = async (name, fn) => {
   await fn();
@@ -26,7 +42,7 @@ const rejects = async (promise, code) => {
 };
 
 async function mkAccount(role, name) {
-  const email = `${PREFIX}${name.toLowerCase()}_${Date.now()}_${Math.floor(Math.random() * 1e6)}${DOMAIN}`;
+  const email = `${RUN}${name.toLowerCase()}_${Math.floor(Math.random() * 1e6)}${DOMAIN}`;
   const { rows } = await pool.query(
     `INSERT INTO accounts (full_name, email, password_hash) VALUES ($1, $2, 'x') RETURNING id`, [PREFIX + name, email]);
   const id = rows[0].id;
@@ -39,7 +55,7 @@ async function mkAuction(sellerId, startPrice = 1_000_000) {
   const cat = (await pool.query(`SELECT id FROM categories WHERE code = 'shoes'`)).rows[0].id;
   const l = await pool.query(
     `INSERT INTO listings (seller_id, category_id, title, starting_price, duration_hours, status)
-     VALUES ($1, $2, $4, $3, 1, 'approved') RETURNING id`, [sellerId, cat, startPrice, `${PREFIX}item`]);
+     VALUES ($1, $2, $4, $3, 1, 'approved') RETURNING id`, [sellerId, cat, startPrice, `${RUN}item`]);
   const auctionId = await engine.inTransaction((c) => engine.createAuctionForListing(c, l.rows[0].id));
   return { listingId: l.rows[0].id, auctionId };
 }
@@ -50,8 +66,16 @@ const expire = (auctionId) => pool.query(`UPDATE auctions SET ends_at = now() - 
 
 // Chỉ xoá những dòng đi ra từ tài khoản test_be1_*: phiên của người bán test, và mọi dòng
 // của người mua test. Không có điều kiện nào có thể khớp dữ liệu thật.
-async function cleanup() {
-  const ids = (await pool.query(`SELECT id FROM accounts WHERE email LIKE $1`, [EMAIL_LIKE])).rows.map((r) => r.id);
+//   cleanup('run')   dữ liệu của lần chạy này
+//   cleanup('stale') dữ liệu test_be1_ của các lần chạy bắt đầu hơn 30 phút trước (bị ngắt giữa chừng)
+async function testRows(scope, table) {
+  const { rows } = await pool.query(`SELECT id, email FROM ${table} WHERE email LIKE $1`,
+    [scope === 'run' ? EMAIL_LIKE_RUN : EMAIL_LIKE_ANY]);
+  return scope === 'run' ? rows : rows.filter((r) => Date.now() - runStartOf(r.email) > STALE_MS);
+}
+
+async function cleanup(scope) {
+  const ids = (await testRows(scope, 'accounts')).map((r) => r.id);
   if (!ids.length) return;
   const q = (sql) => pool.query(sql, [ids]);
   const aucs = `SELECT a.id FROM auctions a JOIN listings l ON l.id = a.listing_id WHERE l.seller_id = ANY($1)`;
@@ -66,8 +90,9 @@ async function cleanup() {
   await q(`DELETE FROM accounts WHERE id = ANY($1)`); // cascade: bidders, sellers, notifications
 }
 
-async function cleanupOps() {
-  await pool.query(`DELETE FROM ops_accounts WHERE email LIKE $1`, [EMAIL_LIKE]);
+async function cleanupOps(scope) {
+  const ids = (await testRows(scope, 'ops_accounts')).map((r) => r.id);
+  if (ids.length) await pool.query('DELETE FROM ops_accounts WHERE id = ANY($1)', [ids]);
 }
 
 // Một server khác (của đồng đội) cùng trỏ vào DB này có thể đóng phiên test của mình trước
@@ -83,8 +108,8 @@ async function closedAuction(auctionId) {
 }
 
 async function main() {
-  await cleanup(); // dọn rác của lần chạy trước nếu bị ngắt giữa chừng
-  await cleanupOps();
+  await cleanup('stale'); // lần chạy bị ngắt giữa chừng; không đụng lần chạy đang diễn ra của người khác
+  await cleanupOps('stale');
   const seller = await mkAccount('seller', 'Seller');
   const [A, B, C] = [await mkAccount('bidder', 'Alice'), await mkAccount('bidder', 'Bob'), await mkAccount('bidder', 'Carl')];
   const tx = (f) => engine.inTransaction(f);
@@ -576,10 +601,10 @@ async function main() {
       }
 
       await step('GET /api/auctions: total, limit, offset, minNextBid, seller.name, depositAffordable', async () => {
-        const q = encodeURIComponent(PREFIX);
+        const q = encodeURIComponent(RUN);
         const d = await get(`/auctions?q=${q}&limit=2&offset=0&sort=newest`, tok(H, 'bidder'));
         const n = (await pool.query(
-          `SELECT count(*)::int AS n FROM auctions a JOIN listings l ON l.id = a.listing_id WHERE l.title ILIKE $1`, [`%${PREFIX}%`])).rows[0].n;
+          `SELECT count(*)::int AS n FROM auctions a JOIN listings l ON l.id = a.listing_id WHERE l.title ILIKE $1`, [`%${like(RUN)}%`])).rows[0].n;
         assert.deepStrictEqual([d.total, d.limit, d.offset], [n, 2, 0]);
         assert.ok(n > 2 && d.auctions.length === 2, 'trang đầu chỉ 2 phần tử, total là tổng thật');
         const page2 = await get(`/auctions?q=${q}&limit=2&offset=2&sort=newest`, tok(H, 'bidder'));
@@ -661,10 +686,11 @@ async function main() {
       const b1 = await mkLoginBidder('BotOne', 5_000_000);
       const b2 = await mkLoginBidder('BotTwo', 5_000_000);
       const poor = await mkLoginBidder('BotPoor', 150_000); // đủ cọc 100.000 nhưng không đủ trả đơn nếu thắng
+      const allowedEmails = [b1.email, b2.email, poor.email];
 
       await step('bot đặt cọc rồi trả giá luân phiên qua API, dừng khi đủ --max lượt', async () => {
         const { auctionId: ab } = await mkAuction(seller); // 1.000.000đ, bước 50.000
-        const r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 4, log });
+        const r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 4, log, allowedEmails });
         assert.deepStrictEqual(r, { bids: 4, reason: 'đủ 4 lượt' });
         const rows = (await pool.query('SELECT bidder_id, amount::int AS a FROM bids WHERE auction_id = $1 ORDER BY id', [ab])).rows;
         assert.deepStrictEqual(rows.map((x) => x.a), [1_050_000, 1_100_000, 1_150_000, 1_200_000]);
@@ -675,7 +701,7 @@ async function main() {
       await step('bot không đủ tiền trả đơn nếu thắng thì không cọc, không trả giá; không còn bot hợp lệ thì dừng', async () => {
         const { auctionId: ab } = await mkAuction(seller);
         const before = await wallet(poor.id);
-        const r = await runBidbot({ base, auctionId: ab, accounts: [poor], intervalMs: 50, max: 3, log });
+        const r = await runBidbot({ base, auctionId: ab, accounts: [poor], intervalMs: 50, max: 3, log, allowedEmails });
         assert.strictEqual(r.bids, 0);
         assert.ok(r.reason.startsWith('không bot nào đủ điều kiện'), r.reason);
         assert.deepStrictEqual(await wallet(poor.id), before, 'ví không đổi');
@@ -683,10 +709,10 @@ async function main() {
       await step('bot dừng khi phiên hết giờ và khi nhận tín hiệu dừng (Ctrl+C)', async () => {
         const { auctionId: ab } = await mkAuction(seller);
         await expire(ab);
-        assert.deepStrictEqual(await runBidbot({ base, auctionId: ab, accounts: [b1], intervalMs: 50, max: 3, log }),
+        assert.deepStrictEqual(await runBidbot({ base, auctionId: ab, accounts: [b1], intervalMs: 50, max: 3, log, allowedEmails }),
           { bids: 0, reason: 'phiên đã kết thúc' });
         const { auctionId: ab2 } = await mkAuction(seller);
-        const r = await runBidbot({ base, auctionId: ab2, accounts: [b1, b2], intervalMs: 50, max: 10, log, stopSignal: { stop: true } });
+        const r = await runBidbot({ base, auctionId: ab2, accounts: [b1, b2], intervalMs: 50, max: 10, log, allowedEmails, stopSignal: { stop: true } });
         assert.deepStrictEqual(r, { bids: 0, reason: 'dừng theo yêu cầu (Ctrl+C)' });
       });
       await step('script từ chối chạy khi NODE_ENV=production, báo lỗi khi thiếu --auction', async () => {
@@ -700,8 +726,180 @@ async function main() {
         const noArg = run([], { NODE_ENV: 'development' });
         assert.strictEqual(noArg.status, 1);
         assert.ok(noArg.stderr.includes('--auction'), noArg.stderr);
+        // Chỉ định tài khoản không phải bot (kể cả tài khoản demo của người dùng) -> từ chối trước khi gọi API.
+        const other = run(['--auction', '1', '--bots', 'bot1@bidvibe.demo,minhanh@gmail.com'], { NODE_ENV: 'development' });
+        assert.strictEqual(other.status, 1);
+        assert.ok(other.stderr.includes('minhanh@gmail.com') && other.stderr.includes('Từ chối'), other.stderr);
+      });
+      await step('bot chỉ dùng tài khoản được phép; thiếu / sai tài khoản bot thì từ chối, không ghi gì', async () => {
+        const { auctionId: ab } = await mkAuction(seller);
+        const r1 = await runBidbot({ base, auctionId: ab, accounts: [b1], intervalMs: 50, max: 3, log }); // mặc định: chỉ 3 bot demo
+        assert.strictEqual(r1.bids, 0);
+        assert.ok(r1.reason.startsWith('từ chối: chỉ được dùng tài khoản bot') && r1.reason.includes(b1.email), r1.reason);
+        const r2 = await runBidbot({ base, auctionId: ab, accounts: [{ email: b1.email, password: 'sai' }], intervalMs: 50, max: 3, log, allowedEmails });
+        assert.ok(r2.reason.startsWith('từ chối: không đăng nhập được tài khoản bot'), r2.reason);
+        const n = (await pool.query('SELECT count(*)::int AS n FROM auction_deposits WHERE auction_id = $1', [ab])).rows[0].n;
+        assert.strictEqual(n, 0);
+      });
+      await step('bot không trả giá khi phiên còn dưới --stop-before giây (hạn chế bot thắng)', async () => {
+        const { auctionId: ab } = await mkAuction(seller);
+        await pool.query(`UPDATE auctions SET ends_at = now() + interval '50 seconds' WHERE id = $1`, [ab]);
+        const r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 3, log, allowedEmails, stopBeforeSeconds: 60 });
+        assert.deepStrictEqual(r, { bids: 0, reason: 'phiên còn dưới 60 giây, bot dừng để không thắng phiên' });
+      });
+      await step('--only-outbid: chỉ trả giá khi người khác dẫn đầu, bot dẫn đầu rồi thì chờ', async () => {
+        const { auctionId: ab } = await mkAuction(seller);
+        const stopAfter = (ms) => { const sig = { stop: false }; setTimeout(() => { sig.stop = true; }, ms); return sig; };
+        // Chưa ai đặt giá: bot chờ, không đặt.
+        let r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 5, log, allowedEmails, onlyOutbid: true, stopSignal: stopAfter(400) });
+        assert.strictEqual(r.bids, 0);
+        // Người thật (không phải bot) đặt giá -> bot vượt đúng một lần rồi chờ vì bot đang dẫn đầu.
+        const human = await mkAccount('bidder', 'Human');
+        await tx((c) => walletService.topUp(c, { bidderId: human, amount: 5_000_000 }));
+        await engine.joinAuction({ bidderId: human, auctionId: ab });
+        await engine.placeBid({ bidderId: human, auctionId: ab, increment: 50_000 });
+        r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 5, log, allowedEmails, onlyOutbid: true, stopSignal: stopAfter(800) });
+        assert.deepStrictEqual(r, { bids: 1, reason: 'dừng theo yêu cầu (Ctrl+C)' });
+        const last = (await pool.query('SELECT amount::int AS a FROM bids WHERE auction_id = $1 ORDER BY id DESC LIMIT 1', [ab])).rows[0].a;
+        assert.strictEqual(last, 1_100_000);
       });
     } finally {
+      await new Promise((res) => server.close(res));
+    }
+  }
+
+  console.log('Thông báo của BE1 có data (GET /api/notifications và Socket.io notification:new)');
+  {
+    const jwt = require('jsonwebtoken');
+    const env = require('../src/config/env');
+    const { io: ioClient } = require('socket.io-client');
+    const { server } = require('../src/app');
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    const url = `http://127.0.0.1:${server.address().port}`;
+    const tok = (id, role) => jwt.sign({ sub: String(id), kind: 'account', role }, env.jwtSecret, { expiresIn: '5m' });
+    const sockets = [];
+    // Kết nối socket cho một tài khoản và gom mọi notification:new nhận được.
+    const listen = (id, role) => new Promise((resolve, reject) => {
+      const s = ioClient(url, { auth: { token: tok(id, role) }, transports: ['websocket'], reconnection: false, forceNew: true });
+      sockets.push(s);
+      s.got = [];
+      s.on('notification:new', (n) => s.got.push(n));
+      s.once('connect', () => resolve(s));
+      s.once('connect_error', reject);
+    });
+    const latestApi = async (id, role, type) => {
+      const r = await fetch(`${url}/api/notifications?limit=50`, { headers: { Authorization: `Bearer ${tok(id, role)}` } });
+      const body = await r.json();
+      assert.strictEqual(r.status, 200, JSON.stringify(body.error));
+      return body.data.notifications.find((n) => n.type === type);
+    };
+    // data đúng tập khoá, mọi giá trị là chuỗi, khớp giá trị mong đợi; API và socket giống nhau.
+    const checkData = async ({ id, role, sock, type, expect }) => {
+      const api = await latestApi(id, role, type);
+      assert.ok(api, `không có thông báo ${type} qua API`);
+      assert.deepStrictEqual(Object.keys(api.data).sort(), Object.keys(expect).sort(), `${type}: khoá ${JSON.stringify(api.data)}`);
+      for (const [k, v] of Object.entries(api.data)) assert.strictEqual(typeof v, 'string', `${type}.${k} phải là chuỗi`);
+      assert.deepStrictEqual(api.data, expect);
+      await sleep(300);
+      const ev = [...sock.got].reverse().find((n) => n.type === type);
+      assert.ok(ev, `không nhận được notification:new ${type}`);
+      assert.deepStrictEqual(ev.data, expect, `${type}: socket ${JSON.stringify(ev.data)}`);
+      assert.strictEqual(String(ev.id), String(api.id));
+    };
+
+    try {
+      const W = await mkAccount('bidder', 'Win');
+      const L = await mkAccount('bidder', 'Lose');
+      const S = await mkAccount('seller', 'Sel');
+      for (const id of [W, L]) await tx((c) => walletService.topUp(c, { bidderId: id, amount: 5_000_000 }));
+      const [sW, sL, sS] = [await listen(W, 'bidder'), await listen(L, 'bidder'), await listen(S, 'seller')];
+
+      await step('đặt giá → đóng phiên → thanh toán: outbid, win, refund (thua), sold, address_reminder có data đúng khoá', async () => {
+        const { auctionId: a1 } = await mkAuction(S);
+        for (const id of [W, L]) await engine.joinAuction({ bidderId: id, auctionId: a1 });
+        await engine.placeBid({ bidderId: L, auctionId: a1, increment: 50_000 });
+        await engine.placeBid({ bidderId: W, auctionId: a1, increment: 50_000 });
+        await checkData({ id: L, role: 'bidder', sock: sL, type: 'outbid', expect: { auctionId: String(a1) } });
+
+        await expire(a1);
+        await engine.closeAuction(a1); // gọi ngay sau khi hết giờ để thông báo phát từ server của test này
+        const o = (await pool.query('SELECT id FROM orders WHERE auction_id = $1', [a1])).rows[0];
+        assert.ok(o, 'phải có đơn');
+        const both = { auctionId: String(a1), orderId: String(o.id) };
+        await checkData({ id: W, role: 'bidder', sock: sW, type: 'win', expect: both });
+        await checkData({ id: L, role: 'bidder', sock: sL, type: 'refund', expect: { auctionId: String(a1) } });
+        await checkData({ id: S, role: 'seller', sock: sS, type: 'sold', expect: both });
+
+        await engine.payOrder({ bidderId: W, orderId: o.id, method: 'wallet' });
+        await checkData({ id: W, role: 'bidder', sock: sW, type: 'address_reminder', expect: { orderId: String(o.id), auctionId: String(a1) } });
+      });
+      await step('mỗi loại win / sold / address_reminder chỉ ghi đúng một thông báo cho luồng trên', async () => {
+        const types = (await pool.query(
+          `SELECT type, count(*)::int AS n FROM notifications WHERE account_id = ANY($1) AND type IN ('win','sold','address_reminder')
+           GROUP BY type ORDER BY type`, [[W, S]])).rows;
+        assert.deepStrictEqual(types, [{ type: 'address_reminder', n: 1 }, { type: 'sold', n: 1 }, { type: 'win', n: 1 }]);
+      });
+      await step('refund khi huỷ phiên (cancelAuction) có data { auctionId }', async () => {
+        const { auctionId: a2 } = await mkAuction(S);
+        await engine.joinAuction({ bidderId: L, auctionId: a2 });
+        const done = await tx((c) => engine.cancelAuction(c, a2, { reason: 'test' }));
+        done.emit();
+        await checkData({ id: L, role: 'bidder', sock: sL, type: 'refund', expect: { auctionId: String(a2) } });
+      });
+      await step('warn quá hạn thanh toán (processPaymentTimeouts) có data { orderId, auctionId }', async () => {
+        const { auctionId: a3 } = await mkAuction(S);
+        await engine.joinAuction({ bidderId: L, auctionId: a3 });
+        await engine.placeBid({ bidderId: L, auctionId: a3, increment: 50_000 });
+        await expire(a3);
+        await engine.closeAuction(a3);
+        // Scheduler của server khác (npm run dev của đồng đội) có thể đóng phiên / xử lý quá hạn trước
+        // test: hàm của test bỏ qua dòng đang bị khoá (SKIP LOCKED). Chờ tối đa 10 giây, mỗi 300ms
+        // đọc lại, cho tới khi DB về đúng trạng thái; không giả định ai là người xử lý.
+        const waitFor = async (read, what) => {
+          for (const end = Date.now() + 10_000; ; await sleep(300)) {
+            const v = await read();
+            if (v) return v;
+            assert.ok(Date.now() < end, `${what} sau 10 giây`);
+          }
+        };
+        const o = await waitFor(async () => (await pool.query('SELECT id FROM orders WHERE auction_id = $1', [a3])).rows[0],
+          'không có đơn của phiên vừa đóng');
+        await pool.query(`UPDATE orders SET payment_deadline = now() - interval '1 minute' WHERE id = $1`, [o.id]);
+        const mine = (await engine.processPaymentTimeouts()).map(String).includes(String(o.id));
+        const expect = { orderId: String(o.id), auctionId: String(a3) };
+        if (mine) {
+          // Test tự xử lý đơn: kiểm đủ API và socket như các loại thông báo khác.
+          await checkData({ id: L, role: 'bidder', sock: sL, type: 'warn', expect });
+        } else {
+          // Server khác xử lý: notification:new phát trên Socket.io của server đó, socket của test không
+          // nhận được; vẫn kiểm đủ khoá, kiểu và giá trị data qua API.
+          const api = await waitFor(() => latestApi(L, 'bidder', 'warn'), 'không có thông báo warn qua API');
+          assert.deepStrictEqual(Object.keys(api.data).sort(), Object.keys(expect).sort(), `warn: khoá ${JSON.stringify(api.data)}`);
+          for (const [k, v] of Object.entries(api.data)) assert.strictEqual(typeof v, 'string', `warn.${k} phải là chuỗi`);
+          assert.deepStrictEqual(api.data, expect);
+        }
+        const warn = await latestApi(L, 'bidder', 'warn');
+        assert.ok(warn.title.startsWith('Quá hạn thanh toán'), `warn: tiêu đề ${warn.title}`);
+        // Trạng thái cuối: đơn quá hạn, tin bị huỷ, cọc bị tịch thu (có giao dịch deposit_forfeit).
+        const st = await waitFor(async () => (await pool.query(
+          `SELECT o.payment_status, l.status AS listing_status, d.status AS deposit_status,
+                  (SELECT count(*)::int FROM wallet_transactions w
+                   WHERE w.bidder_id = o.bidder_id AND w.related_auction_id = o.auction_id AND w.kind = 'deposit_forfeit') AS forfeits
+           FROM orders o JOIN auctions a ON a.id = o.auction_id JOIN listings l ON l.id = a.listing_id
+           LEFT JOIN auction_deposits d ON d.auction_id = o.auction_id AND d.bidder_id = o.bidder_id
+           WHERE o.id = $1 AND o.payment_status = 'expired'`, [o.id])).rows[0], 'đơn chưa chuyển quá hạn');
+        assert.deepStrictEqual(st, { payment_status: 'expired', listing_status: 'cancelled', deposit_status: 'forfeited', forfeits: 1 });
+      });
+      await step('thông báo cũ data = null vẫn đọc được qua API', async () => {
+        await pool.query(`INSERT INTO notifications (account_id, type, title) VALUES ($1, 'outbid', $2)`, [W, `${PREFIX}cũ`]);
+        const r = await fetch(`${url}/api/notifications?limit=50`, { headers: { Authorization: `Bearer ${tok(W, 'bidder')}` } });
+        const body = await r.json();
+        assert.strictEqual(r.status, 200);
+        const old = body.data.notifications.find((n) => n.title === `${PREFIX}cũ`);
+        assert.strictEqual(old.data, null);
+      });
+    } finally {
+      sockets.forEach((s) => s.close());
       await new Promise((res) => server.close(res));
     }
   }
@@ -829,7 +1027,7 @@ async function main() {
         await assert.rejects(connect(tok('999999999', 'account', 'bidder')), { message: 'UNAUTHORIZED' });
       });
       await step('disconnectAccount với kind ops chỉ ngắt tài khoản nội bộ, không nhầm với account trùng id', async () => {
-        const email = `${PREFIX}ops_${Date.now()}${DOMAIN}`;
+        const email = `${RUN}ops_${Math.floor(Math.random() * 1e6)}${DOMAIN}`;
         const opsId = (await pool.query(
           `INSERT INTO ops_accounts (name, email, role) VALUES ($1, $2, 'admin') RETURNING id`, [`${PREFIX}ops`, email])).rows[0].id;
         // ops_accounts.id có thể trùng số với A/B/C: đóng hết socket account để kiểm tra không bị nhiễu.
@@ -851,13 +1049,121 @@ async function main() {
     }
   }
 
+  console.log('Real-time giữa nhiều backend cùng một database (pg_notify kênh bidvibe_events)');
+  {
+    const { spawn } = require('child_process');
+    const net = require('net');
+    const path = require('path');
+    const jwt = require('jsonwebtoken');
+    const env = require('../src/config/env');
+    const { io: ioClient } = require('socket.io-client');
+    const tok = (id, kind, role) => jwt.sign({ sub: String(id), kind, role }, env.jwtSecret, { expiresIn: '5m' });
+    const freePort = () => new Promise((resolve, reject) => {
+      const s = net.createServer().once('error', reject).listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
+    });
+    // Server con chạy `node src/app.js` như npm run dev của một người khác: cổng riêng, cùng DB, pool 2.
+    const children = [];
+    const startServer = async (name) => {
+      const port = await freePort();
+      const child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'app.js')], {
+        cwd: path.join(__dirname, '..'),
+        env: { ...process.env, PORT: String(port), DB_POOL_MAX: '2', NODE_ENV: 'development' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      children.push(child);
+      let out = '';
+      child.stdout.on('data', (d) => { out += d; });
+      child.stderr.on('data', (d) => { out += d; });
+      // Sẵn sàng khi đã lắng nghe cổng VÀ đã LISTEN kênh bidvibe_events.
+      for (const end = Date.now() + 20_000; !(out.includes('đang chạy tại') && out.includes('[realtime] đang nghe')); await sleep(200)) {
+        if (child.exitCode !== null) throw new Error(`server ${name} thoát sớm: ${out.slice(-300)}`);
+        if (Date.now() > end) throw new Error(`server ${name} không sẵn sàng sau 20 giây`);
+      }
+      return `http://127.0.0.1:${port}`;
+    };
+    const sockets = [];
+    const connect = (url, token) => new Promise((resolve, reject) => {
+      const s = ioClient(url, { auth: { token }, transports: ['websocket'], reconnection: false, forceNew: true });
+      sockets.push(s);
+      s.once('connect', () => resolve(s));
+      s.once('connect_error', (e) => { s.close(); reject(e); });
+    });
+    const waitFor = (s, event, pred = () => true, ms = 8000) => new Promise((resolve) => {
+      const timer = setTimeout(() => { s.off(event, h); resolve(null); }, ms);
+      function h(data) { if (pred(data)) { clearTimeout(timer); s.off(event, h); resolve(data ?? true); } }
+      s.on(event, h);
+    });
+    const rest = async (url, method, p, token, body) => {
+      const r = await fetch(url + p, {
+        method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const j = await r.json();
+      assert.strictEqual(r.status < 300, true, `${method} ${p}: ${r.status} ${JSON.stringify(j.error)}`);
+      return j.data;
+    };
+
+    try {
+      const [urlA, urlB] = [await startServer('A'), await startServer('B')];
+      const S = await mkAccount('seller', 'MultiSel');
+      const [P, Q] = [await mkAccount('bidder', 'MultiP'), await mkAccount('bidder', 'MultiQ')];
+      for (const id of [P, Q]) await tx((c) => walletService.topUp(c, { bidderId: id, amount: 5_000_000 }));
+      const { auctionId: am } = await mkAuction(S);
+      await engine.joinAuction({ bidderId: P, auctionId: am });
+      await engine.joinAuction({ bidderId: Q, auctionId: am });
+      const sP = await connect(urlB, tok(P, 'account', 'bidder')); // P nối server B
+      sP.emit('auction:join', String(am));
+      await sleep(300);
+
+      await step('đặt giá qua REST server A -> client nối server B nhận auction:update (đúng một lần)', async () => {
+        const updates = [];
+        sP.on('auction:update', (u) => { if (u.auctionId === String(am)) updates.push(u); });
+        const got = waitFor(sP, 'auction:update', (u) => u.auctionId === String(am) && u.reason === 'bid');
+        const bid = await rest(urlA, 'POST', '/api/bids', tok(P, 'account', 'bidder'), { auctionId: String(am), increment: 50_000 });
+        const u = await got;
+        assert.ok(u, 'server B không phát auction:update của lượt giá đặt ở server A');
+        assert.strictEqual(u.currentPrice, bid.currentPrice);
+        await sleep(800);
+        assert.strictEqual(updates.length, 1, `nhận ${updates.length} lần auction:update (mong 1)`);
+        sP.off('auction:update');
+      });
+      await step('bị vượt giá (đặt qua server A) -> client nối server B nhận notification:new outbid có data', async () => {
+        const got = waitFor(sP, 'notification:new', (n) => n.type === 'outbid');
+        await rest(urlA, 'POST', '/api/bids', tok(Q, 'account', 'bidder'), { auctionId: String(am), increment: 50_000 });
+        const n = await got;
+        assert.ok(n, 'server B không phát notification:new');
+        assert.deepStrictEqual(n.data, { auctionId: String(am) });
+        assert.ok(['id', 'type', 'title', 'createdAt', 'data'].every((k) => k in n));
+      });
+      await step('Admin khoá tài khoản qua server A -> client nối server B nhận account:disconnected rồi bị ngắt', async () => {
+        const adminId = (await pool.query(
+          `INSERT INTO ops_accounts (name, email, role) VALUES ($1, $2, 'admin') RETURNING id`,
+          [`${PREFIX}multi_admin`, `${RUN}multi_admin_${Math.floor(Math.random() * 1e6)}${DOMAIN}`])).rows[0].id;
+        const notice = waitFor(sP, 'account:disconnected');
+        const gone = new Promise((resolve) => sP.once('disconnect', resolve));
+        await rest(urlA, 'PATCH', `/api/admin/accounts/${P}`, tok(adminId, 'ops', 'admin'), { status: 'suspended' });
+        assert.deepStrictEqual(await notice, { code: 'ACCOUNT_SUSPENDED', message: 'Tài khoản đã bị khoá' });
+        const reason = await Promise.race([gone, sleep(8000).then(() => null)]);
+        assert.ok(reason, 'server B không ngắt socket của tài khoản bị khoá');
+      });
+    } finally {
+      sockets.forEach((s) => s.close());
+      // Luôn tắt server con, kể cả khi bước nào đó lỗi.
+      await Promise.all(children.map((c) => new Promise((resolve) => {
+        if (c.exitCode !== null) return resolve();
+        c.once('exit', resolve);
+        c.kill();
+      })));
+    }
+  }
+
   console.log(`\nTất cả ${passed} bước đạt.`);
 }
 
 main()
   .catch((err) => { console.error('\n✗ THẤT BẠI:', err); process.exitCode = 1; })
   .finally(async () => {
-    await cleanup().catch((e) => console.error('cleanup lỗi:', e.message));
-    await cleanupOps().catch((e) => console.error('cleanup ops lỗi:', e.message));
+    await cleanup('run').catch((e) => console.error('cleanup lỗi:', e.message));
+    await cleanupOps('run').catch((e) => console.error('cleanup ops lỗi:', e.message));
     await pool.end();
   });

@@ -1,6 +1,6 @@
 # Nối app Flutter với backend BidVibe — hướng dẫn nhanh
 
-> Cập nhật: 2026-10-12.
+> Cập nhật: 2026-10-13.
 
 Đọc một lần là nối được. Chi tiết từng endpoint ở [`api.md`](api.md), sự kiện real-time ở [`socket.md`](socket.md).
 
@@ -16,7 +16,17 @@ npm run dev          # server tại cổng PORT trong .env
 curl http://localhost:5000/api/health   # {"success":true,"data":{"status":"ok",...}}
 ```
 
-Cổng là biến `PORT` trong `.env` (`.env.example` đặt `5000`; không đặt thì `3000`). Server lắng nghe `0.0.0.0`.
+Cổng là biến `PORT` trong `.env` (`.env.example` đặt `5000`; không đặt thì `3000`). Server lắng nghe `0.0.0.0` và khi khởi động in sẵn các địa chỉ cần dùng:
+
+```
+BidVibe API đang chạy tại http://localhost:5000
+  Android Emulator: http://10.0.2.2:5000
+  Điện thoại thật (cùng Wi-Fi): http://192.168.1.23:5000
+```
+
+- `Cổng 5000 đang bị dùng (có thể đã chạy npm run dev ở cửa sổ khác)`: đã có một server đang chạy, dùng luôn server đó hoặc tắt nó trước.
+- Tắt bằng Ctrl+C: server trả kết nối database ngay. Database Supabase dùng chung chỉ cho 15 kết nối cho cả nhóm. Người làm app tự chạy backend thì đặt `DB_POOL_MAX=2` trong `.env`.
+- `GET /api/health` trả `db: "ok"` khi server nối được database. Gặp `503` / `db: "error"` thì do database chứ không do app.
 
 | App chạy trên | Địa chỉ gốc REST (`baseUrl`) | Socket.io |
 |---|---|---|
@@ -26,19 +36,44 @@ Cổng là biến `PORT` trong `.env` (`.env.example` đặt `5000`; không đ�
 
 Mọi đường dẫn REST bắt đầu bằng `/api`, ví dụ `http://10.0.2.2:5000/api/auctions`.
 
-Lưu ý khi chạy trên thiết bị:
+### Android Emulator
 
-- Android 9 trở lên chặn HTTP thuần: thêm `android:usesCleartextTraffic="true"` vào thẻ `<application>` trong `AndroidManifest.xml` và quyền `<uses-permission android:name="android.permission.INTERNET"/>`.
-- Điện thoại thật: lấy IP LAN của máy chạy backend (`ipconfig` trên Windows), mở cổng 5000 trên tường lửa Windows.
+`10.0.2.2` là địa chỉ của máy tính nhìn từ trong emulator (`localhost` trong emulator là chính emulator). Cần đủ ba việc trong `android/app/src/main/AndroidManifest.xml`:
+
+```xml
+<manifest ...>
+  <uses-permission android:name="android.permission.INTERNET"/>
+  <application
+      android:usesCleartextTraffic="true"
+      ...>
+```
+
+- Android 9 trở lên chặn HTTP thuần, nên cần `usesCleartextTraffic="true"`.
+- Nếu `<application>` đã có `android:networkSecurityConfig="@xml/network_security_config"`, Android **bỏ qua** `usesCleartextTraffic`. Khi đó phải cho phép HTTP tới `10.0.2.2` trong file cấu hình đó (thêm IP LAN nếu dùng điện thoại thật):
+
+```xml
+<!-- android/app/src/main/res/xml/network_security_config.xml -->
+<network-security-config>
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="false">10.0.2.2</domain>
+    <domain includeSubdomains="false">localhost</domain>
+  </domain-config>
+</network-security-config>
+```
+
+- Kiểm tra nhanh: mở Chrome trong emulator, vào `http://10.0.2.2:5000/api/health`. Thấy JSON là mạng ổn; nếu app vẫn lỗi thì do cấu hình app.
+- Điện thoại thật: dùng địa chỉ "Điện thoại thật" server in ra (cùng Wi-Fi), mở cổng 5000 trên tường lửa Windows.
+- Sửa `AndroidManifest.xml` xong phải chạy lại app từ đầu (`flutter run`), hot reload không áp dụng.
 
 ## 2. Tài khoản demo
 
-Tạo bằng `npm run db:seed` (chạy lại nhiều lần không bị trùng; cũng gia hạn các phiên demo đang diễn ra). **Mật khẩu mọi tài khoản: `123456`.**
+Tạo bằng `npm run db:seed` (chạy lại nhiều lần không bị trùng; cũng gia hạn các phiên demo đang diễn ra). **Mật khẩu mọi tài khoản: `123456`.** Trước buổi demo xem thêm [Làm mới dữ liệu demo](#làm-mới-dữ-liệu-demo-trước-buổi-demo).
 
 | Vai trò | Email | Đăng nhập bằng | Ghi chú |
 |---|---|---|---|
 | bidder | `minhanh@gmail.com` | `POST /api/auth/login` | Tài khoản demo chính, có đơn hàng và thông báo |
 | bidder | `viet.tran@gmail.com`, `chau.le@outlook.com`, `hung.pham@gmail.com` | `POST /api/auth/login` | Ví được nạp 20.000.000đ khi seed lần đầu |
+| bidder (bot) | `bot1@bidvibe.demo`, `bot2@bidvibe.demo`, `bot3@bidvibe.demo` | `POST /api/auth/login` | **Chỉ cho bot đấu giá** (`npm run demo:bidbot`), ví 50.000.000đ. Đừng đăng nhập app bằng các tài khoản này |
 | seller | `long@sneakersg.vn` (Sneaker Sài Gòn) | `POST /api/auth/login` | Có phiên đang diễn ra và đơn đã bán |
 | seller | `ha@phocoxua.vn`, `bao@retroaudio.vn`, `hai@retrocamera.vn`, `hoa@caonguyenxua.vn` | `POST /api/auth/login` | |
 | appraiser | `ngoc.le@bidvibe.vn`, `khoa.tran@bidvibe.vn`, `huy.do@bidvibe.vn` | `POST /api/auth/ops/login` | Hàng chờ thẩm định có sẵn tin |
@@ -47,6 +82,20 @@ Tạo bằng `npm run db:seed` (chạy lại nhiều lần không bị trùng; c
 | admin | `admin@bidvibe.vn`, `trang.dang@bidvibe.vn`, `tuan.vo@bidvibe.vn` | `POST /api/auth/ops/login` | Có cờ gian lận và tranh chấp đang mở |
 
 Database dùng chung cả nhóm: thao tác trên tài khoản demo (đặt giá, thanh toán...) sẽ đổi dữ liệu người khác cũng thấy. Muốn thử thoải mái thì tự đăng ký tài khoản mới.
+
+**Đổi mật khẩu và sửa hồ sơ** (`POST /api/me/password`, `PATCH /api/me`) **chỉ thử trên tài khoản tự đăng ký.** Lỡ đổi mật khẩu tài khoản demo thì người chạy backend gõ `npm run db:seed`: mọi tài khoản demo về lại mật khẩu `123456` (dữ liệu và số dư giữ nguyên).
+
+### Làm mới dữ liệu demo trước buổi demo
+
+Phiên demo hết giờ dần theo thời gian thật. Khoảng 10 phút trước buổi demo, ở thư mục backend:
+
+```bash
+npm run db:seed:live -- --extend     # bảo đảm 9 phiên đang diễn ra, đẩy giờ kết thúc ra đủ thời lượng
+npm run dev
+```
+
+- Danh sách phiên trong app (`GET /api/auctions?status=live`) sẽ có 9 phiên demo đủ 3 danh mục, đều có ảnh bìa (`coverUrl`) và 2 ảnh trong chi tiết. Một phiên kết thúc sau **khoảng 3 phút** để thử chống chốt phút chót (đặt giá trong 30 giây cuối thì phiên được gia hạn); muốn có lại phiên này thì chạy `npm run db:seed:live` lần nữa.
+- Muốn thấy giá nhảy theo thời gian thực trên app (đăng nhập `minhanh@gmail.com`), mở thêm một terminal: `npm run demo:bidbot -- --auction <id> --only-outbid` (id lấy từ danh sách phiên). Bot chỉ dùng 3 tài khoản `bot*@bidvibe.demo`; chi tiết tuỳ chọn ở README.
 
 ## 3. Màn hình nào gọi endpoint nào
 
@@ -65,9 +114,10 @@ Ký hiệu: → gọi theo thứ tự; (socket) cần Socket.io.
 | Đơn hàng (người mua) | [`GET /api/orders/mine`](api.md#get-apiordersmine) → [`GET /api/orders/:id`](api.md#get-apiordersid) → [`POST /api/orders/:id/pay`](api.md#post-apiordersidpay) | Đếm ngược tới `paymentDeadline` (24 giờ) |
 | Chọn địa chỉ | [`GET /api/addresses`](api.md#get-apiaddresses) (chưa có thì [`POST /api/addresses`](api.md#post-apiaddresses)) → [`POST /api/orders/:id/shipping-address`](api.md#post-apiordersidshipping-address) | Nên làm ngay sau khi thắng / thanh toán; kho không gửi được đơn chưa có địa chỉ |
 | Theo dõi giao hàng | [`GET /api/orders/:id/tracking`](api.md#get-apiordersidtracking) → [`POST /api/orders/:id/confirm-delivery`](api.md#post-apiordersidconfirm-delivery) | Hiện `stage`, `events`; nút "Đã nhận hàng" khi `stage == delivered`. Có vấn đề → [`POST /api/disputes`](api.md#post-apidisputes) |
-| Thông báo | [`GET /api/notifications`](api.md#get-apinotifications), [`POST /api/notifications/:id/read`](api.md#post-apinotificationsidread) | Badge = `unreadCount`; thông báo mới qua (socket) `notification:new`. Bấm vào thông báo: mở màn theo `data` ([mục 5b](#5b-bấm-thông-báo-mở-đúng-màn)) |
-| Seller: tạo tin | [`GET /api/categories`](api.md#get-apicategories) → [`POST /api/ai/suggest-price`](api.md#post-apiaisuggest-price) → [`POST /api/listings`](api.md#post-apilistings) → [`POST /api/listings/:id/photos`](api.md#post-apilistingsidphotos) → [`POST /api/listings/:id/submit`](api.md#post-apilistingsidsubmit) | Ảnh: tải lên nơi khác trước, gửi URL |
-| Seller: tin của tôi | [`GET /api/listings/mine`](api.md#get-apilistingsmine) → khi `needs_info`: [`PATCH /api/listings/:id`](api.md#patch-apilistingsid), thêm ảnh, [`POST /api/listings/:id/resubmit`](api.md#post-apilistingsidresubmit) | Lý do ở `lastAppraisal.reason` |
+| Thông báo | [`GET /api/notifications`](api.md#get-apinotifications), [`POST /api/notifications/:id/read`](api.md#post-apinotificationsidread), [`POST /api/notifications/read-all`](api.md#post-apinotificationsread-all) | Badge = `unreadCount`; thông báo mới qua (socket) `notification:new`. Bấm vào thông báo: mở màn theo `data` ([mục 5b](#5b-bấm-thông-báo-mở-đúng-màn)). Mở app / kéo để làm mới thì tải lại danh sách |
+| Hồ sơ | [`GET /api/me`](api.md#get-apime) → [`PATCH /api/me`](api.md#patch-apime) (họ tên, số điện thoại, ảnh đại diện; Seller thêm tên gian hàng), [`POST /api/me/password`](api.md#post-apimepassword) | Ảnh đại diện: [tải ảnh](#5c-tải-ảnh) với `purpose=avatar` rồi gửi `avatarUrl` |
+| Seller: tạo tin | [`GET /api/categories`](api.md#get-apicategories) → [`POST /api/ai/suggest-price`](api.md#post-apiaisuggest-price) → [`POST /api/listings`](api.md#post-apilistings) → [`POST /api/uploads/images`](api.md#post-apiuploadsimages) → [`POST /api/listings/:id/photos`](api.md#post-apilistingsidphotos) → [`POST /api/listings/:id/submit`](api.md#post-apilistingsidsubmit) | Ảnh trong máy: tải lên trước, gửi `urls` nhận được ([mục 5c](#5c-tải-ảnh)) |
+| Seller: tin của tôi | [`GET /api/listings/mine`](api.md#get-apilistingsmine) → khi `draft` / `needs_info`: [`PATCH /api/listings/:id`](api.md#patch-apilistingsid), thêm / [xoá ảnh](api.md#delete-apilistingsidphotosphotoid), [`POST /api/listings/:id/resubmit`](api.md#post-apilistingsidresubmit) | Lý do ở `lastAppraisal.reason` |
 | Seller: đơn đã bán | [`GET /api/orders/selling`](api.md#get-apiordersselling) → [`POST /api/orders/:id/ship-to-warehouse`](api.md#post-apiordersidship-to-warehouse) → [`GET /api/orders/:id/tracking`](api.md#get-apiordersidtracking) | Báo gửi kho khi `stage == awaiting_seller_shipment` |
 | Hàng chờ thẩm định | [`GET /api/appraisals/queue`](api.md#get-apiappraisalsqueue) → [`GET /api/appraisals/:listingId`](api.md#get-apiappraisalslistingid) → [`POST /api/appraisals/:listingId/decision`](api.md#post-apiappraisalslistingiddecision) | Duyệt là mở phiên ngay |
 | Kho | [`GET /api/warehouse/orders?stage=...`](api.md#get-apiwarehouseorders) → [`receive`](api.md#post-apiwarehouseordersidreceive) → [`inspect`](api.md#post-apiwarehouseordersidinspect) → [`pack`](api.md#post-apiwarehouseordersidpack) → [`ship`](api.md#post-apiwarehouseordersidship) → [`deliver`](api.md#post-apiwarehouseordersiddeliver) | Mỗi tab một `stage`. `ship` lỗi `ORDER_NO_ADDRESS` khi người mua chưa chọn địa chỉ |
@@ -129,7 +179,7 @@ Danh sách đầy đủ: [`api.md` mục 19](api.md#19-mã-lỗi-nghiệp-vụ).
 | Sự kiện (server → app) | Khi nào | Làm gì |
 |---|---|---|
 | `auction:update` | `reason: "bid"` có lượt giá mới; `"paused"` / `"resumed"` Admin tạm dừng / tiếp tục | Cập nhật giá, số lượt, `endsAt` / `remainingSeconds`, trạng thái dừng |
-| `auction:ended` | Phiên hết giờ (`hasWinner`) hoặc bị huỷ (`cancelled: true`) | Gọi lại [`GET /api/auctions/:id`](api.md#get-apiauctionsid) để biết `won` |
+| `auction:ended` | Phiên hết giờ (`hasWinner`) hoặc bị huỷ (`cancelled: true`) | Gọi lại [`GET /api/auctions/:id`](api.md#get-apiauctionsid) để biết `won`. Server đóng phiên trong vòng 5 giây sau giờ kết thúc; nếu đồng hồ về 0 mà chưa nhận sự kiện (mất mạng, chưa vào phòng) thì vài giây sau tự gọi lại `GET /api/auctions/:id` |
 | `notification:new` | Có thông báo mới (`outbid`, `win`, `order`...) | Tăng badge, hiện snackbar |
 | `account:disconnected` | Admin khoá tài khoản (ngay trước khi server ngắt) | Hiện `message`, đăng xuất, **không** tự kết nối lại |
 
@@ -192,11 +242,59 @@ Future<void> onNotificationTap(Map<String, dynamic> n, String role) async {
 }
 ```
 
-Hiện các thông báo do phần đấu giá tạo (`outbid`, `win`, `address_reminder`, `refund` hoàn cọc, `sold`, `warn` quá hạn thanh toán) còn `data: null`; với các loại này app tạm mở danh sách tương ứng (ví dụ `win`, `address_reminder` → danh sách đơn của tôi; `outbid` → phiên của tôi `status=joined`).
+Các thông báo do phần đấu giá tạo cũng đã có `data` (`outbid` / `refund` hoàn cọc → `{ auctionId }`; `win` / `sold` → `{ auctionId, orderId }`; `address_reminder` / `warn` quá hạn thanh toán → `{ orderId, auctionId }`). Chỉ thông báo tạo trước migration `008` có `data: null`: với các thông báo này app chỉ đánh dấu đã đọc (hoặc tạm mở danh sách đơn / phiên của tôi).
+
+## 5c. Tải ảnh
+
+Ảnh chọn / chụp trên điện thoại đi qua hai bước:
+1. Gửi file lên [`POST /api/uploads/images`](api.md#post-apiuploadsimages): `multipart/form-data`, trường `files`, 1–8 ảnh, mỗi ảnh tối đa 5 MB, chỉ JPEG / PNG / WEBP. Server trả `urls` theo đúng thứ tự gửi.
+2. Gửi `urls` đó vào [`POST /api/listings/:id/photos`](api.md#post-apilistingsidphotos), hoặc dùng làm `avatarUrl` trong [`PATCH /api/me`](api.md#patch-apime) (tải với `?purpose=avatar`).
+
+Gói cần: `http`, `image_picker`.
+
+```dart
+import 'dart:convert';
+import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
+
+// Bước 1: tải ảnh lên, nhận URL public. purpose: 'listing' | 'avatar'.
+Future<List<String>> uploadImages(String baseUrl, String token, List<XFile> images,
+    {String purpose = 'listing'}) async {
+  final req = http.MultipartRequest('POST', Uri.parse('$baseUrl/api/uploads/images?purpose=$purpose'))
+    ..headers['Authorization'] = 'Bearer $token';
+  for (final img in images) {
+    req.files.add(await http.MultipartFile.fromPath('files', img.path)); // mọi ảnh cùng tên trường "files"
+  }
+  final res = await http.Response.fromStream(await req.send());
+  final body = jsonDecode(res.body) as Map<String, dynamic>;
+  if (body['success'] != true) {
+    // INVALID_FILE_TYPE (400), FILE_TOO_LARGE (413), TOO_MANY_FILES (400),
+    // UPLOAD_FAILED (502), UPLOAD_NOT_CONFIGURED (503): hiện body['error']['message']
+    throw Exception(body['error']['message']);
+  }
+  return (body['data']['urls'] as List).cast<String>();
+}
+
+// Bước 2: Seller chọn ảnh trong máy rồi gắn vào tin (tin đang draft / needs_info).
+Future<void> addPhotosFromGallery(String baseUrl, String token, String listingId) async {
+  // Nén bớt ngay trên máy: ảnh camera thường > 5 MB.
+  final picked = await ImagePicker().pickMultiImage(imageQuality: 85, maxWidth: 1920);
+  if (picked.isEmpty) return;
+  final urls = await uploadImages(baseUrl, token, picked.take(8).toList());
+  final res = await http.post(Uri.parse('$baseUrl/api/listings/$listingId/photos'),
+      headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
+      body: jsonEncode({'urls': urls}));
+  // 201: data là tin đăng với photos mới (photos[].id là chuỗi; xoá ảnh: DELETE /api/listings/:id/photos/:photoId)
+}
+```
+
+- Chụp ảnh thay vì chọn: `ImagePicker().pickImage(source: ImageSource.camera, imageQuality: 85, maxWidth: 1920)`.
+- `MultipartFile.fromPath` không dùng được trên Web. Bản Web dùng `MultipartFile.fromBytes('files', await img.readAsBytes(), filename: img.name)`.
+- Server chưa cấu hình Storage thì trả `503 UPLOAD_NOT_CONFIGURED`. Lúc đó vẫn thêm ảnh được bằng URL có sẵn (`POST /api/listings/:id/photos` với `urls`).
 
 ## 6. Những điểm cần lưu ý
 
-- **Id là chuỗi** (`"12"`). Ngoại lệ đã biết: `photos[].id` trong tin đăng của Seller là số. So sánh id nên ép về chuỗi.
+- **Id là chuỗi** (`"12"`), kể cả `photos[].id`. So sánh id nên ép về chuỗi.
 - **Tiền là số nguyên VND**; tự định dạng hiển thị (`1.250.000 ₫`).
 - **Đặt giá chỉ gửi một trong hai**: `amount` (giá tuyệt đối) **hoặc** `increment` (cộng thêm vào giá hiện tại). Gửi cả hai hoặc không gửi → `400`.
 - **Chống chốt phút chót 30 giây**: đặt giá khi còn ≤ 30 giây thì phiên còn đúng 30 giây (`extended: true`); luôn cập nhật đồng hồ theo `endsAt` mới.
@@ -204,9 +302,11 @@ Hiện các thông báo do phần đấu giá tạo (`outbid`, `win`, `address_r
 - **Cọc** = 10 phần trăm giá khởi điểm (`depositRequired`). Phải cọc trước khi đặt giá. Thua phiên tự hoàn cọc.
 - **Thanh toán trong 24 giờ** sau khi thắng (`paymentDeadline`), quá hạn mất cọc. Số phải trả = `amountToPay` (đã trừ cọc).
 - **Sửa địa chỉ có thể tạo `id` mới** (khi địa chỉ đã được một đơn đã gửi dùng): luôn lấy `id` từ phản hồi. Xoá địa chỉ đang gắn với đơn chưa gửi thì đơn mất địa chỉ, phải chọn lại.
-- **Kho chỉ gửi đơn đã có địa chỉ**: nhắc người mua chọn địa chỉ sớm (backend chưa tự nhắc).
+- **Kho chỉ gửi đơn đã có địa chỉ**: thanh toán xong mà đơn chưa có địa chỉ thì backend gửi thông báo `address_reminder` (`data.orderId`). App nên mở thẳng màn chọn địa chỉ cho đơn đó.
 - **Tự giải ngân sau 72 giờ** kể từ lúc giao nếu người mua không xác nhận và không mở tranh chấp.
-- **Ảnh chỉ lưu URL**: app tự tải ảnh lên dịch vụ khác rồi gửi URL `http(s)`. Chưa có API xoá ảnh.
+- **Ảnh**: ảnh trong máy tải lên bằng [`POST /api/uploads/images`](#5c-tải-ảnh) rồi gửi URL; URL `http(s)` có sẵn thì gửi thẳng. Xoá ảnh khi tin còn `draft` / `needs_info`: `DELETE /api/listings/:id/photos/:photoId`.
+- **Đồng hồ phiên về 0**: chờ vài giây rồi gọi lại `GET /api/auctions/:id`; server đóng phiên trong vòng 5 giây và có thể đã gia hạn nếu có người đặt giá phút chót.
+- **Thông báo**: mỗi lần mở app hoặc kéo để làm mới thì tải lại `GET /api/notifications`. Socket chỉ đẩy thông báo lúc đang kết nối, nên thông báo đến khi app tắt sẽ không qua socket.
 - **Thời gian** là ISO 8601 UTC; một số trường lồng trả dạng `+00:00`. Dùng `DateTime.parse(...).toLocal()`.
 - Tài khoản `ops` (thẩm định / kho / admin) không có thông báo, ví, địa chỉ, chatbot.
 
@@ -274,4 +374,4 @@ curl -s $BASE/api/orders/$ORDER_ID/tracking -H "Authorization: Bearer $BUYER" | 
 
 Bước 4 phải chờ phiên hết giờ thật (ít nhất 1 giờ, vì `durationHours` tối thiểu là 1). Muốn thử nhanh luồng sau khi thắng, dùng tài khoản demo `minhanh@gmail.com` đã có sẵn đơn hàng ở nhiều giai đoạn (`GET /api/orders/mine`).
 
-Tài khoản tạo ra ở trên có email `test_be2_curl_*`, nằm lại trong database dùng chung cho tới lần chạy `npm run test:be2` kế tiếp (lệnh này tự xoá mọi tài khoản `test_be2_*` và dữ liệu đi kèm).
+Tài khoản tạo ra ở trên có email `test_be2_curl_*`, nằm lại trong database dùng chung. Sau 1 giờ, dọn bằng `npm run test:clean` (xoá tài khoản `test_be2_*` cũ hơn 1 giờ và dữ liệu đi kèm; `npm run test:clean -- --dry-run` để xem trước). `npm run test:be2` không xoá các tài khoản này, vì mỗi lần chạy chỉ dọn dữ liệu của chính nó.

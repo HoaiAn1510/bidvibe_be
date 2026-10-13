@@ -1,9 +1,10 @@
 # Socket.io — sự kiện real-time của BidVibe
 
-> Cập nhật: 2026-10-12. REST API xem [`api.md`](api.md); hướng dẫn nối nhanh xem [`fe-quickstart.md`](fe-quickstart.md).
+> Cập nhật: 2026-10-13. REST API xem [`api.md`](api.md); hướng dẫn nối nhanh xem [`fe-quickstart.md`](fe-quickstart.md).
 
 Tài liệu cho người nối app Flutter. Nguồn sự thật là code: `src/sockets/auction_socket.js` (kết nối, phòng),
-`src/sockets/index.js` (`disconnectAccount`), `src/sockets/pause_listener.js` (`auction:update` khi tạm dừng / tiếp tục),
+`src/sockets/index.js` (`disconnectAccount`), `src/sockets/pause_listener.js` (`auction:update` khi tạm dừng / tiếp tục, nghe sự kiện từ backend khác),
+`src/sockets/broadcast.js` (phát cho mọi backend cùng database, [mục 8](#8-nhiều-backend-cùng-một-database)),
 `src/services/auction_engine.js` (`auction:update` khi đặt giá, `auction:ended`), `src/services/notification_service.js`
 (`notification:new`). **Tên sự kiện đã chốt, không đổi.**
 
@@ -153,10 +154,10 @@ socket.on('auction:update', (u) {
 ```json
 { "id": "2354", "type": "listing_approved", "title": "Tin đăng \"Máy nghe nhạc cassette 1988\" đã được duyệt, phiên đấu giá đã mở.",
   "createdAt": "2026-10-12T02:15:50.277Z", "data": { "auctionId": "841", "listingId": "849" } }
-{ "id": "57", "type": "outbid", "title": "Bạn đã bị vượt giá · Giày retro ... · 1.250.000đ", "createdAt": "2026-10-10T08:29:41.200Z", "data": null }
+{ "id": "57", "type": "outbid", "title": "Bạn đã bị vượt giá · Giày retro ... · 1.250.000đ", "createdAt": "2026-10-10T08:29:41.200Z", "data": { "auctionId": "12" } }
 ```
 
-`data` (từ migration `008`): id liên quan để app mở đúng màn khi bấm thông báo (`auctionId`, `orderId`, `listingId`, `disputeId`, giá trị là chuỗi), hoặc `null`. Trùng với trường `data` của `GET /api/notifications`. Bảng khoá theo từng loại: [`api.md` mục 15](api.md#trường-data--mở-đúng-màn-khi-bấm-thông-báo). Các loại do BE1 tạo (`outbid`, `win`, `address_reminder`, `refund` hoàn cọc, `sold`, `warn` quá hạn thanh toán) hiện gửi `data: null`.
+`data` (từ migration `008`): id liên quan để app mở đúng màn khi bấm thông báo (`auctionId`, `orderId`, `listingId`, `disputeId`, giá trị là chuỗi), hoặc `null`. Trùng với trường `data` của `GET /api/notifications`. Bảng khoá theo từng loại: [`api.md` mục 15](api.md#trường-data--mở-đúng-màn-khi-bấm-thông-báo). Các loại do BE1 tạo đã truyền `data`: `outbid` `{ auctionId }`, `win` `{ auctionId, orderId }`, `address_reminder` `{ orderId, auctionId }`, `refund` hoàn cọc `{ auctionId }`, `sold` `{ auctionId, orderId }`, `warn` quá hạn thanh toán `{ orderId, auctionId }`. Chỉ thông báo tạo trước migration `008` mới có `data: null`.
 
 | `type` | Khi nào | Người nhận |
 |---|---|---|
@@ -198,14 +199,13 @@ await disconnectAccount(accountId, { reason: 'Vi phạm điều khoản' }); // 
 | Vị trí | `src/sockets/index.js`, xuất cùng `require('../sockets')` |
 | Tham số 1 `accountId` | Id tài khoản (chuỗi hoặc số). `null` / `undefined` → không làm gì |
 | Tham số 2 `options` (tuỳ chọn) | `kind`: `'account'` (mặc định, bảng `accounts`) hoặc `'ops'` (bảng `ops_accounts`) — bắt buộc truyền `'ops'` cho tài khoản nội bộ vì hai bảng có thể trùng id. `reason`: chuỗi hiện cho người dùng, mặc định `'Tài khoản đã bị tạm khoá'` |
-| Việc làm | Gửi `account:disconnected` `{ code: 'ACCOUNT_SUSPENDED', message }` tới mọi kết nối của tài khoản, rồi đóng tất cả |
-| Trả về | `Promise<number>` — số kết nối đã đóng; `0` nếu tài khoản không online hoặc server socket chưa khởi tạo (script, test không chạy server) |
+| Việc làm | Gửi `account:disconnected` `{ code: 'ACCOUNT_SUSPENDED', message }` tới mọi kết nối của tài khoản ở server này, rồi đóng tất cả; đồng thời gửi lệnh qua kênh `bidvibe_events` để các backend khác cùng database làm y như vậy ([mục 8](#8-nhiều-backend-cùng-một-database)) |
+| Trả về | `Promise<number>` — số kết nối đã đóng **ở riêng tiến trình này**; `0` nếu tài khoản không online ở đây hoặc server socket chưa khởi tạo (script, test không chạy server). Kết nối ở backend khác không được đếm |
 | Lỗi | Không ném lỗi trong trường hợp bình thường |
 | Gọi khi nào | **Sau COMMIT** việc đổi `status = 'suspended'`; gọi trước COMMIT thì kết nối lại ngay có thể vẫn lọt nếu giao dịch chưa chốt |
 
-Không cần gọi khi **mở khoá**: tài khoản `active` kết nối lại bình thường. Hàm chỉ đóng kết nối trên **server đang chạy**
-(chưa dùng Redis adapter); nếu nhiều máy chạy server cùng lúc, kết nối nằm ở máy khác không bị đóng ngay nhưng cũng không
-kết nối lại được nữa.
+Không cần gọi khi **mở khoá**: tài khoản `active` kết nối lại bình thường. Kết nối của tài khoản ở backend khác cùng
+database cũng bị đóng (qua `pg_notify`), không cần Redis adapter.
 
 ## 6. Đối chiếu với tên trong tài liệu cũ
 
@@ -225,4 +225,22 @@ Một số bản bàn giao trước đây dùng tên khác. Code **không** phá
   sau 5 giây nếu rớt). Trong lúc rớt, sự kiện bị lỡ; trạng thái thật vẫn đúng trong `GET /api/auctions/:id`.
 - Ngắt tài khoản bị khoá chỉ có hiệu lực ngay lập tức nếu BE2 gọi `disconnectAccount` sau khi khoá (mục 5). Nếu chưa gọi,
   socket đang mở vẫn nhận sự kiện tới khi tự ngắt, nhưng không kết nối lại được và REST đã trả `403 ACCOUNT_SUSPENDED`.
-- Chỉ một server: `disconnectAccount` và các sự kiện chỉ tới client nối vào chính server đó (chưa dùng Redis adapter).
+- Nhiều backend cùng một database: sự kiện và `disconnectAccount` tới được client nối vào backend khác qua `pg_notify` ([mục 8](#8-nhiều-backend-cùng-một-database)). Backend dùng database **khác** thì không liên thông.
+
+## 8. Nhiều backend cùng một database
+
+Cả nhóm mỗi người chạy một `npm run dev` riêng nhưng cùng trỏ một database Supabase. Socket.io chỉ phát cho socket nối
+vào **chính tiến trình** tạo ra sự kiện, nên nếu không làm gì thêm thì đặt giá qua server A, người đang nối server B sẽ
+không thấy. Backend xử lý việc này bằng `pg_notify` của Postgres, app **không phải làm gì**:
+
+| Bước | Ở đâu |
+|---|---|
+| Mọi sự kiện (`auction:update` khi đặt giá, `auction:ended`, `notification:new`) đi qua `broadcast(room, event, payload)`: phát ngay cho socket của tiến trình này, đồng thời `pg_notify('bidvibe_events', { origin, room, event, payload })`. Luôn gọi **sau COMMIT**; NOTIFY lỗi chỉ ghi log, không làm hỏng request | `src/sockets/broadcast.js` |
+| Mỗi tiến trình `LISTEN bidvibe_events` trên **cùng kết nối** LISTEN của `pause_listener` (không mở thêm kết nối). Tin có `origin` khác thì `io.to(room).emit(event, payload)`; tin do chính mình gửi (origin trùng) thì bỏ qua, nên không bị phát hai lần | `src/sockets/pause_listener.js` |
+| `disconnectAccount` ngắt socket ở tiến trình này và gửi lệnh `disconnect` qua kênh: tiến trình khác gửi `account:disconnected` rồi ngắt socket của tài khoản đó | `src/sockets/index.js` |
+| `auction:update` khi tạm dừng / tiếp tục vẫn đi kênh riêng `auction_pause` (trigger migration `007`), vốn đã tới mọi tiến trình | `src/sockets/pause_listener.js` |
+
+- Payload của `pg_notify` phải dưới 8000 byte. Sự kiện lớn hơn (không có sự kiện nào hiện tại gần mức này) chỉ phát trong tiến trình tạo ra nó và ghi cảnh báo `[realtime]`.
+- Mỗi tiến trình dùng **pool** (`DB_POOL_MAX`, mặc định 10) **+ 1 kết nối LISTEN**. Supabase session pooler cho 15 kết nối cho cả database.
+- Kết nối LISTEN rớt thì tự nối lại sau 5 giây. Sự kiện từ backend khác trong lúc rớt bị lỡ; trạng thái thật vẫn đúng qua REST.
+- Đã kiểm thử trong `test:be1`: khởi 2 server con, client nối server B, thao tác REST qua server A, B vẫn nhận đủ sự kiện.

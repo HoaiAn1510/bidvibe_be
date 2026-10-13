@@ -24,8 +24,22 @@ npm run dev
 | `NODE_ENV` | `production` thì lỗi 5xx chỉ trả "Lỗi hệ thống". |
 | `DATABASE_URL` | Chuỗi kết nối Postgres. Với Supabase dùng chuỗi **Session pooler** (host `*.pooler.supabase.com`, cổng 5432, username dạng `postgres.<mã project>`). **Không** dùng Direct connection: nó chỉ có IPv6 nên nhiều mạng không kết nối được. |
 | `DB_SSL` | `true` khi dùng Supabase. |
+| `DB_POOL_MAX` | Tuỳ chọn, số kết nối tối đa của pool (bỏ trống thì 10; `.env.example` đặt 4). Session pooler của Supabase chỉ cho **15 kết nối cho cả database**, cộng dồn mọi bản đang chạy: `npm run dev` của từng người, `test:be1`, `test:be2` (hai bộ test tự dùng 4), mỗi tiến trình thêm 1 kết nối riêng cho `LISTEN` của `pause_listener`. Vượt giới hạn thì gặp lỗi `EMAXCONNSESSION`. Không đổi sang transaction pooler (cổng 6543) vì `LISTEN` không chạy qua đó. **Người làm app (FE) tự chạy backend riêng để thử: đặt `DB_POOL_MAX=2`.** |
 | `JWT_SECRET` | Khoá ký token đăng nhập. Bắt buộc, không có giá trị mặc định. |
 | `AUTO_PAYOUT_ENABLED` | `false` để tắt job tự giải ngân sau 72 giờ (mặc định bật). |
+| `SUPABASE_URL` | Tuỳ chọn, dùng cho tải ảnh (`POST /api/uploads/images`). Dạng `https://<project-ref>.supabase.co` (dán cả đuôi `/rest/v1` cũng được, backend chỉ lấy phần gốc). |
+| `SUPABASE_SERVICE_KEY` | Tuỳ chọn, khoá để backend ghi vào Storage: **Secret key** (`sb_secret_...`) hoặc khoá legacy **service_role** (`eyJ...`). Khoá này có toàn quyền trên project: chỉ đặt trong `.env` của backend, không đưa vào app, không commit, không dán vào log hay chat. |
+| `STORAGE_BUCKET` | Tuỳ chọn, tên bucket chứa ảnh (mặc định `listing-photos`). Chưa có thì backend tự tạo bucket public, giới hạn 5 MB, chỉ nhận JPEG / PNG / WEBP. |
+
+Thiếu `SUPABASE_URL` hoặc `SUPABASE_SERVICE_KEY` thì server vẫn chạy bình thường, chỉ route tải ảnh trả `503 UPLOAD_NOT_CONFIGURED` (app vẫn thêm ảnh được bằng URL có sẵn).
+
+**Lấy key Storage**: Supabase Dashboard → chọn project → **Project Settings → API Keys**.
+- Tab "API Keys": bấm tạo / hiện **Secret key** (`sb_secret_...`).
+- Hoặc tab "Legacy API Keys": khoá **service_role**.
+- Không dùng **Publishable** / **anon** key: hai khoá này không có quyền ghi Storage.
+- `SUPABASE_URL`: Project Settings → **Data API** → Project URL.
+
+Backend chỉ gửi header `apikey` với khoá `sb_secret_`, và thêm `Authorization: Bearer` khi khoá là JWT (`eyJ...`).
 
 File `.env` chứa mật khẩu nên **không được đưa lên git** (đã có trong `.gitignore`). Mỗi người tự tạo `.env` của mình.
 
@@ -33,46 +47,71 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 
 | Lệnh | Việc |
 |---|---|
-| `npm run dev` | Chạy server, tự khởi động lại khi sửa code |
+| `npm run dev` | Chạy server, tự khởi động lại khi sửa `src/` hoặc `.env` (`nodemon.json`). Khi khởi động in địa chỉ cho máy này, Android Emulator (`10.0.2.2`) và điện thoại thật (IP LAN); Ctrl+C trả kết nối database ngay |
 | `npm start` | Chạy server (không tự khởi động lại) |
 | `npm run db:migrate` | Chạy các file trong `migrations/` chưa được áp dụng |
-| `npm run db:seed` | Thêm dữ liệu demo (BE1 + BE2), chạy lại nhiều lần không bị trùng. Mật khẩu demo `123456` |
+| `npm run db:seed` | Thêm dữ liệu demo (BE1 + BE2), chạy lại nhiều lần không bị trùng. Mật khẩu demo `123456`: tài khoản demo đã có mà bị đổi mật khẩu thì được đặt lại về `123456` (chỉ tài khoản demo và 3 bot; số dư ví giữ nguyên). **Thử đổi mật khẩu / sửa hồ sơ (`POST /api/me/password`, `PATCH /api/me`) chỉ trên tài khoản tự đăng ký**, không dùng tài khoản demo |
 | `npm run test:be1` | Kiểm thử end-to-end phần đấu giá/ví/tạm dừng/gian lận trên DB dùng chung (tài khoản `test_be1_*`, tự dọn) |
-| `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_*`, tự dọn) |
+| `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_<mã lần chạy>_*`, tự dọn) |
 | `npm test` | Chạy cả `test:be1` và `test:be2` |
+| `npm run test:clean [-- --dry-run]` | Dọn dữ liệu `test_be2_` bỏ sót từ lần chạy bị ngắt (chỉ lần chạy bắt đầu hơn 1 giờ trước; in danh sách trước khi xoá). Chỉ chạy khi cần |
 | `npm run docs:check` | So route đăng ký trong `src/routes/` với `docs/api.md` (báo route thiếu / thừa). Chạy sau khi thêm hoặc sửa route |
-| `npm run demo:bidbot -- --auction <id>` | Giả lập người mua demo trả giá một phiên để demo giá nhảy real-time (xem bên dưới) |
+| `npm run db:seed:live [-- --extend]` | Bảo đảm 9 phiên demo đang diễn ra trước buổi demo (xem bên dưới) |
+| `npm run demo:bidbot -- --auction <id>` | 3 tài khoản bot trả giá một phiên để demo giá nhảy real-time (xem bên dưới) |
 
 #### Chạy kiểm thử trên database dùng chung
 
 Cả hai bộ test chạy trên Supabase dùng chung nên được viết để **không đụng dữ liệu thật**:
 
-- Mọi dữ liệu test có tiền tố riêng: `test_be1_*` (BE1: email `test_be1_<tên>_<số>@be1test.local`, tin đăng `test_be1_item`) và `test_be2_*` (BE2).
-- Test chỉ ghi/xoá các dòng đi ra từ những tài khoản có tiền tố đó. Cuối mỗi lần chạy (kể cả khi test lỗi) và đầu lần chạy kế tiếp, các dòng này được xoá sạch; dữ liệu seed và dữ liệu của đồng đội không bị sửa hay xoá.
-- Chạy được lúc đồng đội đang chạy server: scheduler của họ có thể đóng phiên test của bạn, test BE1 đã chờ DB về đúng trạng thái. Nếu vẫn lỗi lặt vặt thì chạy lại.
-- Nếu test bị ngắt giữa chừng (Ctrl+C), cứ chạy lại là dọn được phần dở. Kiểm tra còn sót không: `SELECT count(*) FROM accounts WHERE email LIKE 'test\_be1\_%'`.
+- Mọi dữ liệu test có tiền tố riêng: `test_be1_*` (BE1: email `test_be1_<mã lần chạy>_<tên>_<số>@be1test.local`, tin đăng `test_be1_<mã lần chạy>_item`) và `test_be2_*` (BE2: email `test_be2_<mã lần chạy>_<tên>@example.com`; họ tên, tên gian hàng, tiêu đề tin cũng bắt đầu bằng `test_be2_<mã lần chạy>_`).
+- Test chỉ ghi/xoá các dòng đi ra từ những tài khoản có tiền tố đó; dữ liệu seed và dữ liệu của đồng đội không bị sửa hay xoá. Test BE1: cuối mỗi lần chạy (kể cả khi lỗi) chỉ dọn dữ liệu của **chính lần chạy đó** (theo mã lần chạy), đầu lần chạy chỉ dọn dữ liệu `test_be1_` bỏ dở từ hơn 30 phút trước — nên hai người chạy `test:be1` cùng lúc không xoá dữ liệu của nhau. Test BE2: cuối mỗi lần chạy (kể cả khi lỗi) cũng chỉ dọn dữ liệu của chính lần chạy đó; đầu lần chạy không dọn gì. Mọi thứ test BE2 cần ghi (tài khoản, tin, phiên, đơn, tranh chấp, cờ) đều tạo mới; job tự giải ngân trong test chỉ xét đơn của lần chạy đó. Hai `test:be2`, hoặc `test:be2` cùng `test:be1`, chạy song song được.
+- Chạy được lúc đồng đội đang chạy server: scheduler của họ có thể đóng phiên test của bạn, test BE1 và BE2 đã chờ DB về đúng trạng thái. Nếu vẫn lỗi lặt vặt thì chạy lại.
+- Nếu test bị ngắt giữa chừng (Ctrl+C), phần dở của test BE1 được dọn ở lần chạy `test:be1` đầu tiên sau 30 phút. Kiểm tra còn sót không: `SELECT count(*) FROM accounts WHERE email LIKE 'test\_be1\_%'`. Phần dở của test BE2 không tự dọn: chạy `npm run test:clean` (xem trước bằng `npm run test:clean -- --dry-run`).
 - Cần database đã chạy `npm run db:migrate` (test BE1 cần migration `006`, `007`).
+
+#### Làm mới dữ liệu demo trước buổi demo (`db:seed:live`)
+
+```bash
+npm run db:seed                      # lần đầu: tài khoản demo, Seller, Thẩm định viên, 3 bot
+npm run db:seed:live                 # bảo đảm 9 phiên demo đang diễn ra (tạo bù phiên thiếu)
+npm run db:seed:live -- --extend     # ... và đẩy giờ kết thúc các phiên demo đang chạy ra đủ thời lượng
+```
+
+- Bộ mẫu 9 phiên (`scripts/seed_live.js`): đủ 3 danh mục, giá khởi điểm và bước giá khác nhau, kết thúc sau ~3 phút (thử chống chốt phút chót), 2 / 4 / 6 / 10 / 20 giờ, 28 / 36 / 48 giờ. Mỗi tin 2 ảnh (Wikimedia Commons), người bán là Seller demo.
+- Phiên đi đúng đường như phiên thật: tin chờ thẩm định → Thẩm định viên demo duyệt → `createAuctionForListing`.
+- Chạy lại nhiều lần không tạo trùng: mỗi mẫu tối đa một phiên đang chạy, chỉ tạo bù mẫu đang thiếu (ví dụ phiên ~3 phút đã hết giờ). Không sửa / xoá phiên đã kết thúc, đơn, cọc hay giao dịch. Từ chối chạy khi `NODE_ENV=production`.
 
 #### Giả lập người đấu giá khi demo (`demo:bidbot`)
 
-Cho 3 người mua demo phụ (`viet.tran@gmail.com`, `chau.le@outlook.com`, `hung.pham@gmail.com`, do `db:seed` tạo) lần lượt trả giá một phiên, để màn hình app (đăng nhập `minhanh@gmail.com`) thấy giá nhảy qua Socket.io:
+Cho 3 tài khoản **bot riêng** (`bot1@bidvibe.demo`, `bot2@bidvibe.demo`, `bot3@bidvibe.demo`, mật khẩu `123456`, ví nạp sẵn 50.000.000đ, tạo bởi `db:seed` / `db:seed:live`) lần lượt trả giá một phiên, để màn hình app thấy giá nhảy qua Socket.io:
 
 ```bash
-npm run dev                                                   # terminal 1
-npm run demo:bidbot -- --auction 13 --interval 5 --max 10     # terminal 2; Ctrl+C để dừng
+npm run dev                                                            # terminal 1
+npm run demo:bidbot -- --auction 871 --interval 5 --max 10             # terminal 2; Ctrl+C để dừng
+npm run demo:bidbot -- --auction 871 --only-outbid --stop-before 120   # chỉ vượt giá khi người khác dẫn đầu
 ```
 
-- `--interval` giây giữa hai lượt (mặc định 5), `--max` số lượt tối đa (mặc định 10), `--base` địa chỉ server (mặc định `http://localhost:5000`). Id phiên lấy từ `GET /api/auctions?status=live`.
-- Đi qua API thật (đăng nhập, đặt cọc nếu chưa cọc, `POST /api/bids` với `increment` = bước giá), in ra từng bước. Dừng khi đủ `--max` lượt, phiên hết giờ, không bot nào đủ tiền, hoặc Ctrl+C.
-- Chỉ trả giá khi số dư còn đủ trả đơn nếu thắng (giá + phí 5% + vận chuyển − cọc). Từ chối chạy khi `NODE_ENV=production`.
-- Lưu ý dữ liệu dùng chung: lượt giá và tiền cọc của bot là thật trên phiên demo. Bot thắng thì có đơn chờ thanh toán; quá 24 giờ không trả thì mất cọc như người thật.
+| Tuỳ chọn | Mặc định | Ý nghĩa |
+|---|---|---|
+| `--auction <id>` | bắt buộc | Id phiên, lấy từ `GET /api/auctions?status=live` |
+| `--interval <giây>` | 5 | Khoảng cách giữa hai lượt |
+| `--max <n>` | 10 | Số lượt tối đa |
+| `--stop-before <giây>` | 60 | Không trả giá khi phiên còn ít hơn chừng này giây (hạn chế bot thắng) |
+| `--only-outbid` | tắt | Chỉ trả giá khi **người khác** (không phải bot) đang dẫn đầu |
+| `--bots a,b` | cả 3 bot | Chọn bớt bot; chỉ nhận email bot, email khác → từ chối |
+| `--base <url>` | `http://localhost:5000` | Địa chỉ server |
+
+- **Chỉ dùng 3 tài khoản bot**, không bao giờ dùng tài khoản demo của người dùng; thiếu tài khoản bot thì từ chối (chạy `npm run db:seed:live` để tạo).
+- Đi qua API thật (đăng nhập, đặt cọc nếu chưa cọc, `POST /api/bids` với `increment` = bước giá), in ra từng bước. Dừng khi đủ `--max` lượt, phiên hết giờ hoặc còn dưới `--stop-before` giây, không bot nào đủ tiền, hoặc Ctrl+C. Từ chối chạy khi `NODE_ENV=production`.
+- Chỉ trả giá khi số dư còn đủ trả đơn nếu thắng (giá + phí 5% + vận chuyển − cọc), nên không vượt số dư.
+- **Bot vẫn có thể thắng** nếu đang dẫn đầu lúc phiên kết thúc (ví dụ không ai vượt lại): bot có đơn chờ thanh toán, quá 24 giờ thì mất cọc (chỉ ví bot bị trừ). Dùng `--only-outbid` để bot chỉ "đẩy giá" khi người thật đang dẫn đầu.
 
 ## Cấu trúc thư mục
 
 ```
 migrations/        # file SQL tạo/đổi cấu trúc database (001 ... 008)
-scripts/           # migrate, seed (seed_demo.js BE1, seed.js BE2), test_be1, test_be2, docs_check
-docs/              # tài liệu (xem mục Tài liệu), docs/archive/ là bản lưu trữ
+scripts/           # migrate, seed (seed_demo.js BE1, seed.js BE2), test_be1, test_be2 (+ test_be2_clean), docs_check
+docs/              # tài liệu (xem mục Tài liệu)
 src/
 ├── config/        # kết nối DB (db.js), biến môi trường (env.js)
 ├── middleware/    # auth (requireAuth, requireRole), error handler
@@ -141,8 +180,7 @@ Hai domain nối nhau qua các điểm sau, cần tôn trọng:
 | [`docs/mainflow.md`](docs/mainflow.md) | Cả nhóm, giảng viên | Luồng nghiệp vụ từ đăng ký đến giải ngân, sơ đồ, luồng tiền, luồng thời gian, việc còn thiếu |
 | [`docs/architecture.md`](docs/architecture.md) | Backend | Quy ước, phân chia BE1 / BE2 theo file, hàm hai bên gọi nhau, quyết định thiết kế |
 | [`docs/test-be2.md`](docs/test-be2.md) | Backend | Kết quả kiểm thử BE2 (sinh tự động bởi `node scripts/test_be2.js --report docs/test-be2.md`) |
-| [`docs/bidvibe.postman_collection.json`](docs/bidvibe.postman_collection.json), [`docs/bidvibe.postman_environment.json`](docs/bidvibe.postman_environment.json) | App, backend | Bộ request Postman cho 60 route; đăng nhập tự lưu token |
-| [`docs/archive/handoff.md`](docs/archive/handoff.md) | — | Bản bàn giao cũ, chỉ để tra cứu lịch sử |
+| [`docs/bidvibe.postman_collection.json`](docs/bidvibe.postman_collection.json), [`docs/bidvibe.postman_environment.json`](docs/bidvibe.postman_environment.json) | App, backend | Bộ request Postman cho 65 route; đăng nhập tự lưu token |
 
 ## Quy ước Git
 

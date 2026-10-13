@@ -2,11 +2,15 @@
 // auction:{id} khi phiên bị tạm dừng / tiếp tục. Trigger gửi thông báo sau COMMIT, dù
 // ai đổi cờ (Admin của BE2 hay máy chủ khác cùng trỏ vào DB), nên BE2 không phải gọi gì.
 // Dùng một kết nối riêng (LISTEN cần giữ phiên): Supabase Session pooler hỗ trợ việc này.
+// Cùng kết nối đó LISTEN thêm kênh 'bidvibe_events' (sockets/broadcast.js): sự kiện do backend khác
+// cùng database phát (auction:update, auction:ended, notification:new, lệnh ngắt tài khoản) được
+// phát lại cho socket của tiến trình này. Mỗi tiến trình: pool + đúng 1 kết nối LISTEN.
 const { Client } = require('pg');
 const env = require('../config/env');
 const { pool } = require('../config/db');
 const auctionModel = require('../models/auction.model');
 const registerSockets = require('./index');
+const realtime = require('./broadcast');
 
 const CHANNEL = 'auction_pause';
 const RETRY_MS = 5000;
@@ -33,7 +37,23 @@ async function buildPauseUpdate(auctionId) {
   };
 }
 
+// Tin từ backend khác: phát lại vào phòng, hoặc chạy lệnh ngắt tài khoản. Tin của chính mình bỏ qua.
+async function onEvent(text) {
+  try {
+    const m = JSON.parse(text);
+    if (m.origin === realtime.ORIGIN) return;
+    if (m.command === 'disconnect') {
+      await registerSockets.disconnectLocal(m.accountId, { kind: m.kind, reason: m.reason || undefined });
+      return;
+    }
+    if (m.room && m.event) realtime.emitLocal(m.room, m.event, m.payload);
+  } catch (err) {
+    console.error('[realtime]', err.message);
+  }
+}
+
 async function onNotification(msg) {
+  if (msg.channel === realtime.CHANNEL) return onEvent(msg.payload);
   if (msg.channel !== CHANNEL) return;
   try {
     const { auctionId } = JSON.parse(msg.payload);
@@ -60,8 +80,10 @@ async function connect() {
   c.on('end', () => { if (client === c) client = null; scheduleReconnect(); });
   await c.connect();
   await c.query(`LISTEN ${CHANNEL}`);
+  await c.query(`LISTEN ${realtime.CHANNEL}`);
   if (stopped) { await c.end(); return; }
   client = c;
+  console.log('[realtime] đang nghe sự kiện từ các backend khác cùng database');
 }
 
 // Gọi khi server bắt đầu lắng nghe (app.js). Trả về Promise khi đã LISTEN xong.

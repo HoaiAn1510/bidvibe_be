@@ -22,6 +22,10 @@ router.post('/:id/photos', async (req, res) => {
   ok(res, await listingService.addPhotos(req.user.id, idParam(req.params.id), req.body || {}), 201);
 });
 
+router.delete('/:id/photos/:photoId', async (req, res) => {
+  ok(res, await listingService.removePhoto(req.user.id, idParam(req.params.id), idParam(req.params.photoId, 'photoId')));
+});
+
 router.post('/:id/submit', async (req, res) => {
   ok(res, await listingService.submit(req.user.id, idParam(req.params.id)));
 });

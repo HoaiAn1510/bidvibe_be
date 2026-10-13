@@ -8,7 +8,7 @@
 // BE1 đang gọi createNotification / emitNotification: giữ nguyên chữ ký hai hàm này.
 const { pool } = require('../config/db');
 const { AppError } = require('../middleware/errorHandler');
-const registerSockets = require('../sockets');
+const { broadcast } = require('../sockets/broadcast');
 
 // `data` (tuỳ chọn, migration 008): id liên quan để app mở đúng màn, ví dụ { orderId, auctionId }.
 // Giá trị đổi về chuỗi như id trong API; khoá rỗng bị bỏ; không có khoá nào thì lưu NULL.
@@ -32,12 +32,12 @@ async function createNotification(executor, { accountId, type, title, data }) {
   return { accountId: String(accountId), ...rows[0] };
 }
 
-// Phát tới phòng riêng của người nhận; không ai trong phòng (offline) thì không có gì xảy ra,
-// thông báo vẫn nằm trong DB để lần sau GET /api/notifications.
+// Phát tới phòng riêng của người nhận, ở tiến trình này và mọi backend khác cùng database
+// (sockets/broadcast.js); không ai trong phòng (offline) thì không có gì xảy ra, thông báo vẫn
+// nằm trong DB để lần sau GET /api/notifications.
 function emitNotification(notification) {
-  const io = registerSockets.getIo();
-  if (!io || !notification) return;
-  io.to(`user:${notification.accountId}`).emit('notification:new', {
+  if (!notification) return;
+  broadcast(`user:${notification.accountId}`, 'notification:new', {
     id: notification.id,
     type: notification.type,
     title: notification.title,
@@ -96,6 +96,16 @@ async function markRead(user, notificationId) {
   return { id: rows[0].id, isRead: rows[0].is_read };
 }
 
+// Đánh dấu mọi thông báo chưa đọc của tài khoản là đã đọc; trả số dòng đã đổi.
+async function markAllRead(user) {
+  assertAccountUser(user);
+  const { rowCount } = await pool.query(
+    'UPDATE notifications SET is_read = true WHERE account_id = $1 AND is_read = false',
+    [user.id],
+  );
+  return { updated: rowCount };
+}
+
 module.exports = {
-  createNotification, emitNotification, notify, listForAccount, markRead,
+  createNotification, emitNotification, notify, listForAccount, markRead, markAllRead,
 };

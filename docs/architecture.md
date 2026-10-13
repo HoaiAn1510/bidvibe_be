@@ -1,6 +1,6 @@
 # Kiến trúc & Quy ước — BidVibe Backend
 
-> Cập nhật: 2026-10-10.
+> Cập nhật: 2026-10-13.
 
 Tài liệu cho người viết backend. API cho app xem [`api.md`](api.md), Socket.io xem [`socket.md`](socket.md).
 
@@ -24,11 +24,11 @@ Mọi endpoint trả về theo format thống nhất (theo đúng `middleware/er
 - `models/auction.model.js`, `models/bid.model.js`, `models/wallet.model.js`
 - `routes/auction.routes.js`, `routes/bid.routes.js`, `routes/wallet.routes.js`, `routes/order.routes.js`
 - `services/auction_engine.js`, `services/wallet_service.js`, `services/fraud_detection.js`, `services/scheduler.js`
-- `sockets/auction_socket.js`, `sockets/index.js`, `sockets/pause_listener.js`
+- `sockets/auction_socket.js`, `sockets/index.js`, `sockets/pause_listener.js`, `sockets/broadcast.js`
 
 ### BE2 — Marketplace Operations
-- `routes/auth.routes.js`, `routes/listing.routes.js`, `routes/appraisal.routes.js`, `routes/ai.routes.js`, `routes/address.routes.js`, `routes/fulfilment.routes.js`, `routes/warehouse.routes.js`, `routes/dispute.routes.js`, `routes/admin.routes.js`, `routes/notification.routes.js`, `routes/chat.routes.js`
-- `services/auth_service.js`, `services/listing_service.js`, `services/appraisal_service.js`, `services/ai_price_suggestion.js`, `services/address_service.js`, `services/fulfilment_service.js`, `services/payout_service.js`, `services/dispute_service.js`, `services/admin_service.js`, `services/notification_service.js`, `services/chat_service.js`
+- `routes/auth.routes.js`, `routes/listing.routes.js`, `routes/appraisal.routes.js`, `routes/ai.routes.js`, `routes/address.routes.js`, `routes/fulfilment.routes.js`, `routes/warehouse.routes.js`, `routes/dispute.routes.js`, `routes/admin.routes.js`, `routes/notification.routes.js`, `routes/chat.routes.js`, `routes/upload.routes.js`
+- `services/auth_service.js`, `services/listing_service.js`, `services/appraisal_service.js`, `services/ai_price_suggestion.js`, `services/address_service.js`, `services/fulfilment_service.js`, `services/payout_service.js`, `services/dispute_service.js`, `services/admin_service.js`, `services/notification_service.js`, `services/chat_service.js`, `services/upload_service.js`
 - `utils/validate.js`
 
 BE2 không có thư mục model riêng: truy vấn nằm trong service.
@@ -87,15 +87,26 @@ Tạm dừng / tiếp tục phiên: BE2 chỉ cần đổi `flagged_auctions.sta
 
 - `notify(client, accountId, type, title)` — trong giao dịch thì chỉ ghi DB, nơi gọi phải `emitNotification(n)` **sau COMMIT**; gọi với `pool` (ngoài giao dịch) thì tự đẩy ngay.
 - `createNotification(executor, { accountId, type, title })` / `emitNotification(n)` — giữ nguyên chữ ký vì BE1 đang dùng.
-- Real-time: sự kiện `notification:new` gửi vào phòng `user:<accountId>` (socket tự vào phòng này khi kết nối bằng JWT tài khoản). `io` lấy qua `registerSockets.getIo()`, không cần truyền qua tham số.
+- Real-time: sự kiện `notification:new` gửi vào phòng `user:<accountId>` (socket tự vào phòng này khi kết nối bằng JWT tài khoản) qua `broadcast()` (xem mục Real-time bên dưới).
 - Chỉ tài khoản Bidder/Seller có thông báo; tài khoản nội bộ (ops) gọi API thông báo nhận `403 FORBIDDEN`.
+
+## Real-time khi nhiều backend cùng một database
+
+Mỗi người chạy một `npm run dev` nhưng cùng trỏ một database. Socket.io chỉ phát trong tiến trình tạo ra sự kiện, nên:
+
+- **Không gọi `io.to(...).emit` trực tiếp** trong service. Dùng `broadcast(room, event, payload)` của `sockets/broadcast.js` (`auction_engine.emit` và `emitNotification` đã dùng). Hàm này phát cho socket của tiến trình này rồi `pg_notify('bidvibe_events', { origin, room, event, payload })`. Gọi **sau COMMIT**. NOTIFY lỗi chỉ ghi log. Payload ≥ 8000 byte thì chỉ phát cục bộ kèm cảnh báo.
+- `sockets/pause_listener.js` LISTEN cả `auction_pause` (trigger migration `007`) và `bidvibe_events` trên **một** kết nối. Tin có `origin` khác thì phát lại cho socket của tiến trình này; tin của chính mình thì bỏ qua.
+- `disconnectAccount` ngắt cục bộ (`disconnectLocal`) và gửi lệnh `{ command: 'disconnect', accountId, kind, reason }` để tiến trình khác cũng ngắt. Giá trị trả về vẫn là số kết nối ngắt ở tiến trình này.
+- **Kết nối database của mỗi tiến trình: pool (`DB_POOL_MAX`) + 1 kết nối LISTEN.** Session pooler của Supabase giới hạn 15 kết nối cho cả database.
+- Khi tắt server: `broadcast.drain()` chờ NOTIFY đang gửi rồi mới `pool.end()`.
+- Kiểm thử: `test:be1` mục "Real-time giữa nhiều backend" khởi 2 server con (cổng ngẫu nhiên, `DB_POOL_MAX=2`).
 
 ## Quyết định mặc định cho các câu hỏi còn mở
 
 Ghi lại để cả nhóm làm theo; đổi thì cập nhật mục này trước.
 
 1. **Giải ngân cho Seller chỉ đổi `orders.payout_status`** (`pending` → `released`). Chưa có ví Seller, nên không cộng tiền vào đâu; tiền coi như nền tảng chuyển khoản cho người bán ngoài hệ thống.
-2. **Ảnh tin đăng chỉ lưu URL** trong `listing_photos` (`url`, `order_index`). Backend không nhận file upload; app tự tải ảnh lên nơi khác rồi gửi URL. Seed dùng ảnh mẫu `picsum.photos`.
+2. **Ảnh tin đăng lưu URL** trong `listing_photos` (`url`, `order_index`); file ảnh nằm ở Supabase Storage. `POST /api/uploads/images` nhận multipart, kiểm magic bytes, tải lên bucket public bằng REST của Storage (`fetch`, không dùng SDK), trả URL public; app gửi URL đó vào `POST /api/listings/:id/photos`. Khoá `SUPABASE_SERVICE_KEY` chỉ nằm ở backend. Thiếu cấu hình thì route trả `503`, phần còn lại không phụ thuộc Storage. Seed dùng ảnh mẫu `picsum.photos` / Wikimedia.
 3. **AI gợi ý giá và chatbot dùng nội dung soạn sẵn**, chưa gọi mô hình thật (chưa có biến môi trường cho khoá AI). Giữ nguyên chữ ký hàm để sau này thay bằng lời gọi mô hình mà không đổi API.
 4. **Chống chốt phút chót là 30 giây**, đúng như code BE1 (`SNIPE_WINDOW_MS`).
 5. **Duyệt tin:** BE2 đặt `listings.status = 'approved'` rồi gọi `createAuctionForListing` (BE1) trong cùng giao dịch; hàm đó chuyển tin sang `live`. Vì vậy sau khi duyệt, tin luôn ở `live`, còn `approved` chỉ tồn tại bên trong giao dịch.

@@ -38,12 +38,15 @@ const ORDER_FOR_PAYOUT = `
 // Job nền: đơn đã giao, quá payout_deadline mà người mua chưa xác nhận và không có tranh chấp.
 // Tắt bằng AUTO_PAYOUT_ENABLED=false. Chỉ chạy khi scheduler được start (src/app.js khi chạy
 // server trực tiếp), không chạy khi require app trong test.
-async function releaseOverduePayouts() {
+// orderIds (tuỳ chọn): chỉ xét các đơn này; test dùng để không giải ngân đơn của người khác.
+async function releaseOverduePayouts({ orderIds } = {}) {
   if (!env.autoPayoutEnabled) return [];
   const { rows } = await pool.query(
     `SELECT id FROM orders
      WHERE payout_status = 'pending' AND payout_deadline < now() AND delivered_confirmed_at IS NULL
+       AND ($1::bigint[] IS NULL OR id = ANY($1))
      ORDER BY payout_deadline`,
+    [orderIds ?? null],
   );
   const released = [];
   for (const { id } of rows) {

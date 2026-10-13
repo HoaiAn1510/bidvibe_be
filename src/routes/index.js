@@ -2,11 +2,23 @@ const express = require('express');
 const { requireAuth } = require('../middleware/auth');
 const authService = require('../services/auth_service');
 const listingService = require('../services/listing_service');
+const { pool } = require('../config/db');
 
 const router = express.Router();
 
-router.get('/health', (req, res) => {
-  res.json({ success: true, data: { status: 'ok', uptime: process.uptime() }, error: null });
+// Kiểm tra sống: db = 'ok' khi SELECT 1 trả lời trong 3 giây, ngược lại 'error' và mã 503.
+router.get('/health', async (req, res) => {
+  let timer;
+  const db = await Promise.race([
+    pool.query('SELECT 1').then(() => 'ok', () => 'error'),
+    new Promise((resolve) => { timer = setTimeout(() => resolve('error'), 3000); }),
+  ]);
+  clearTimeout(timer);
+  const data = { status: db === 'ok' ? 'ok' : 'degraded', db, uptime: process.uptime() };
+  if (db === 'ok') return res.json({ success: true, data, error: null });
+  return res.status(503).json({
+    success: false, data, error: { code: 'DB_UNAVAILABLE', message: 'Không kết nối được database' },
+  });
 });
 
 router.use('/auth', require('./auth.routes'));
@@ -20,7 +32,17 @@ router.get('/me', requireAuth, async (req, res, next) => {
   }
 });
 
+// BE2 thêm: sửa hồ sơ, đổi mật khẩu (không đổi hành vi GET /me ở trên, ngoài storeName của Seller).
+router.patch('/me', requireAuth, async (req, res) => {
+  res.json({ success: true, data: await authService.updateMe(req.user, req.body || {}), error: null });
+});
+
+router.post('/me/password', requireAuth, async (req, res) => {
+  res.json({ success: true, data: await authService.changePassword(req.user, req.body || {}), error: null });
+});
+
 router.use('/notifications', require('./notification.routes'));
+router.use('/uploads', require('./upload.routes'));
 
 // ---- BE2: Marketplace Operations ----
 router.get('/categories', requireAuth, async (req, res) => {

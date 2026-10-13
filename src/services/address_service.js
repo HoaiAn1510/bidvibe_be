@@ -9,18 +9,10 @@ const { inTransaction } = require('./auction_engine');
 const validate = require('../utils/validate');
 
 const MAX_ADDRESSES = 10;
-const PHONE_RE = /^\+?[0-9\s.()-]{8,20}$/;
 
 const notFound = () => new AppError('Không tìm thấy địa chỉ', 404, 'NOT_FOUND');
 
-function phone(value) {
-  const v = validate.text(value, 'Số điện thoại', { max: 20 });
-  const digits = v.replace(/\D/g, '');
-  if (!PHONE_RE.test(v) || digits.length < 9 || digits.length > 15) {
-    throw validate.invalid('Số điện thoại không hợp lệ');
-  }
-  return v;
-}
+const phone = (value) => validate.phone(value);
 
 const FIELDS = {
   recipientName: ['recipient_name', (v) => validate.text(v, 'Tên người nhận', { max: 100 })],
