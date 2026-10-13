@@ -161,9 +161,21 @@ const FLAGS = [
 
 // ---------- Helpers ----------
 
+// Tài khoản demo đã có mà mật khẩu không còn là mật khẩu demo (ai đó đổi qua POST /api/me/password)
+// thì đặt lại. Chỉ chạm đúng dòng của email demo. Trả true nếu đã đặt lại.
+async function resetDemoPassword(client, table, email, hash) {
+  const { rows } = await client.query(`SELECT id, password_hash FROM ${table} WHERE lower(email) = $1`, [email]);
+  if (!rows[0] || (rows[0].password_hash && await bcrypt.compare(PASSWORD, rows[0].password_hash))) return false;
+  await client.query(`UPDATE ${table} SET password_hash = $2 WHERE id = $1`, [rows[0].id, hash]);
+  return true;
+}
+
 async function ensureAccount(client, hash, { fullName, email, phone, role, shop, rating }) {
   const found = await client.query('SELECT id FROM accounts WHERE lower(email) = $1', [email]);
-  if (found.rows[0]) return { id: found.rows[0].id, created: false };
+  if (found.rows[0]) {
+    const reset = await resetDemoPassword(client, 'accounts', email, hash);
+    return { id: found.rows[0].id, created: false, reset };
+  }
   const { rows } = await client.query(
     'INSERT INTO accounts (full_name, email, phone, password_hash) VALUES ($1, $2, $3, $4) RETURNING id',
     [fullName, email, phone, hash],
@@ -429,7 +441,7 @@ async function addTimeline(client, disputeId, entries) {
 async function main() {
   const stats = {
     accounts: 0, ops: 0, pipeline: 0, sold: 0, flags: 0, approvals: 0, sellerDisputes: 0,
-    addresses: 0, linkedOrders: 0, skipped: [],
+    addresses: 0, linkedOrders: 0, passwordResets: 0, skipped: [],
   };
 
   await inTransaction(async (client) => {
@@ -438,6 +450,7 @@ async function main() {
 
     for (const [fullName, email, phone] of BIDDERS) {
       const r = await ensureAccount(client, hash, { fullName, email, phone, role: 'bidder' });
+      if (r.reset) stats.passwordResets += 1;
       if (r.created) {
         stats.accounts += 1;
         await walletService.topUp(client, { bidderId: r.id, amount: 20_000_000 });
@@ -447,6 +460,7 @@ async function main() {
     for (const [fullName, email, phone, shop, rating] of SELLERS) {
       const r = await ensureAccount(client, hash, { fullName, email, phone, role: 'seller', shop, rating });
       if (r.created) stats.accounts += 1;
+      if (r.reset) stats.passwordResets += 1;
       ctx.accounts[email] = r.id;
     }
     for (const [name, email, role, status, load] of OPS) {
@@ -456,11 +470,8 @@ async function main() {
         [name, email, role, status, load, hash],
       );
       if (ins.rows[0]) stats.ops += 1;
-      // Tài khoản ops tạo trước migration 003 có thể chưa có mật khẩu.
-      await client.query(
-        'UPDATE ops_accounts SET password_hash = $2 WHERE lower(email) = $1 AND password_hash IS NULL',
-        [email, hash],
-      );
+      // Chưa có mật khẩu (tạo trước migration 003) hoặc đã bị đổi: đặt lại mật khẩu demo.
+      else if (await resetDemoPassword(client, 'ops_accounts', email, hash)) stats.passwordResets += 1;
       const { rows } = await client.query('SELECT id FROM ops_accounts WHERE lower(email) = $1', [email]);
       ctx.ops[email] = rows[0].id;
     }
@@ -575,6 +586,7 @@ async function main() {
 
   console.log('Seed BE2 xong (chỉ thêm phần còn thiếu):');
   console.log(`  tài khoản mới: ${stats.accounts}, tài khoản nội bộ mới: ${stats.ops}`);
+  console.log(`  tài khoản demo được đặt lại mật khẩu ${PASSWORD}: ${stats.passwordResets}`);
   console.log(`  tin đăng chờ thẩm định/bổ sung/từ chối/nháp: ${stats.pipeline}`);
   console.log(`  lịch sử duyệt thêm cho phiên đang diễn ra: ${stats.approvals}`);
   console.log(`  phiên đã bán + đơn hàng: ${stats.sold} (tranh chấp từ người bán: ${stats.sellerDisputes})`);
