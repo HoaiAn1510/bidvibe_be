@@ -1,6 +1,6 @@
 # Nối app Flutter với backend BidVibe — hướng dẫn nhanh
 
-> Cập nhật: 2026-10-12.
+> Cập nhật: 2026-10-13.
 
 Đọc một lần là nối được. Chi tiết từng endpoint ở [`api.md`](api.md), sự kiện real-time ở [`socket.md`](socket.md).
 
@@ -82,6 +82,8 @@ Tạo bằng `npm run db:seed` (chạy lại nhiều lần không bị trùng; c
 | admin | `admin@bidvibe.vn`, `trang.dang@bidvibe.vn`, `tuan.vo@bidvibe.vn` | `POST /api/auth/ops/login` | Có cờ gian lận và tranh chấp đang mở |
 
 Database dùng chung cả nhóm: thao tác trên tài khoản demo (đặt giá, thanh toán...) sẽ đổi dữ liệu người khác cũng thấy. Muốn thử thoải mái thì tự đăng ký tài khoản mới.
+
+**Đổi mật khẩu và sửa hồ sơ** (`POST /api/me/password`, `PATCH /api/me`) **chỉ thử trên tài khoản tự đăng ký.** Lỡ đổi mật khẩu tài khoản demo thì người chạy backend gõ `npm run db:seed`: mọi tài khoản demo về lại mật khẩu `123456` (dữ liệu và số dư giữ nguyên).
 
 ### Làm mới dữ liệu demo trước buổi demo
 

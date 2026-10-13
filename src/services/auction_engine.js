@@ -7,7 +7,7 @@ const auctionModel = require('../models/auction.model');
 const bidModel = require('../models/bid.model');
 const walletService = require('./wallet_service');
 const { createNotification, emitNotification } = require('./notification_service');
-const registerSockets = require('../sockets');
+const { broadcast } = require('../sockets/broadcast');
 
 const DEFAULT_BID_STEP = 50_000;
 const SNIPE_WINDOW_MS = 30_000;       // đặt giá trong 30 giây cuối thì gia hạn thêm 30 giây
@@ -53,9 +53,10 @@ async function inTransaction(fn) {
   }
 }
 
+// Phát cho socket của tiến trình này và cho các backend khác cùng database (sockets/broadcast.js).
+// Mọi chỗ gọi đều sau COMMIT.
 function emit(room, event, payload) {
-  const io = registerSockets.getIo();
-  if (io) io.to(room).emit(event, payload);
+  broadcast(room, event, payload);
 }
 
 // ---------- Tạo phiên (BE2 gọi khi Thẩm định duyệt tin đăng) ----------

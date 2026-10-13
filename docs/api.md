@@ -1,6 +1,6 @@
 # API BidVibe
 
-> Cập nhật: 2026-10-12. Ví dụ phản hồi lấy từ các lần gọi thật vào server `npm run dev` (dữ liệu demo + tài khoản tạm, đã che token và rút gọn mảng).
+> Cập nhật: 2026-10-13. Ví dụ phản hồi lấy từ các lần gọi thật vào server `npm run dev` (dữ liệu demo + tài khoản tạm, đã che token và rút gọn mảng).
 
 Một file duy nhất cho toàn bộ REST API của backend. Sự kiện real-time xem [`socket.md`](socket.md). Hướng dẫn nối nhanh cho app Flutter xem [`fe-quickstart.md`](fe-quickstart.md).
 
@@ -319,7 +319,7 @@ Lỗi: `404 NOT_FOUND`, `409 INVALID_STATE` ("Không thể sửa khi tin đăng 
 { "code": "UPLOAD_NOT_CONFIGURED", "message": "Máy chủ chưa cấu hình nơi lưu ảnh (Supabase Storage)" }
 ```
 
-URL có dạng `{SUPABASE_URL}/storage/v1/object/public/{bucket}/{purpose}/{accountId}/{thời điểm}-{ngẫu nhiên}.{jpg|png|webp}`. Ví dụ `201` ở trên chỉ minh hoạ dạng URL (lúc viết tài liệu chưa có key Storage thật); `503` là phản hồi thật. Code Dart: [`fe-quickstart.md`](fe-quickstart.md#5c-tải-ảnh).
+URL có dạng `{SUPABASE_URL}/storage/v1/object/public/{bucket}/{purpose}/{accountId}/{thời điểm}-{ngẫu nhiên}.{jpg|png|webp}`. Dạng URL ở ví dụ `201` đã kiểm với Supabase Storage thật (`npm run test:be2` tải lên, `GET` URL public trả 200, rồi xoá); mã project được che thành `<project-ref>`. `SUPABASE_URL` dán cả đuôi `/rest/v1` (RESTful endpoint) vẫn chạy: backend chỉ lấy phần gốc. Code Dart: [`fe-quickstart.md`](fe-quickstart.md#5c-tải-ảnh).
 
 Lỗi: `400 INVALID_FILE_TYPE` ("Ảnh thứ 2 không phải JPEG, PNG hoặc WEBP"), `413 FILE_TOO_LARGE` ("Mỗi ảnh tối đa 5 MB"), `400 TOO_MANY_FILES` ("Tối đa 8 ảnh mỗi lần"), `400 VALIDATION_ERROR` (không có file, sai tên trường, `purpose` sai), `403 FORBIDDEN`, `502 UPLOAD_FAILED` (Storage trả lỗi / không kết nối được), `503 UPLOAD_NOT_CONFIGURED`.
 

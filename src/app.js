@@ -42,6 +42,7 @@ function shutdown(signal) {
     await require('./sockets/pause_listener').stop().catch(() => {});
     await new Promise((resolve) => io.close(() => resolve()));
     await new Promise((resolve) => server.close(() => resolve()));
+    await require('./sockets/broadcast').drain(); // NOTIFY đang gửi cho backend khác
     await require('./config/db').pool.end().catch(() => {});
   })().finally(() => {
     // nodemon chờ tiến trình thoát bằng chính SIGUSR2 để khởi động lại.

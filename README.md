@@ -27,7 +27,7 @@ npm run dev
 | `DB_POOL_MAX` | Tuỳ chọn, số kết nối tối đa của pool (bỏ trống thì 10; `.env.example` đặt 4). Session pooler của Supabase chỉ cho **15 kết nối cho cả database**, cộng dồn mọi bản đang chạy: `npm run dev` của từng người, `test:be1`, `test:be2` (hai bộ test tự dùng 4), mỗi tiến trình thêm 1 kết nối riêng cho `LISTEN` của `pause_listener`. Vượt giới hạn thì gặp lỗi `EMAXCONNSESSION`. Không đổi sang transaction pooler (cổng 6543) vì `LISTEN` không chạy qua đó. **Người làm app (FE) tự chạy backend riêng để thử: đặt `DB_POOL_MAX=2`.** |
 | `JWT_SECRET` | Khoá ký token đăng nhập. Bắt buộc, không có giá trị mặc định. |
 | `AUTO_PAYOUT_ENABLED` | `false` để tắt job tự giải ngân sau 72 giờ (mặc định bật). |
-| `SUPABASE_URL` | Tuỳ chọn, dùng cho tải ảnh (`POST /api/uploads/images`). Dạng `https://<project-ref>.supabase.co`. |
+| `SUPABASE_URL` | Tuỳ chọn, dùng cho tải ảnh (`POST /api/uploads/images`). Dạng `https://<project-ref>.supabase.co` (dán cả đuôi `/rest/v1` cũng được, backend chỉ lấy phần gốc). |
 | `SUPABASE_SERVICE_KEY` | Tuỳ chọn, khoá để backend ghi vào Storage: **Secret key** (`sb_secret_...`) hoặc khoá legacy **service_role** (`eyJ...`). Khoá này có toàn quyền trên project: chỉ đặt trong `.env` của backend, không đưa vào app, không commit, không dán vào log hay chat. |
 | `STORAGE_BUCKET` | Tuỳ chọn, tên bucket chứa ảnh (mặc định `listing-photos`). Chưa có thì backend tự tạo bucket public, giới hạn 5 MB, chỉ nhận JPEG / PNG / WEBP. |
 
@@ -50,7 +50,7 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 | `npm run dev` | Chạy server, tự khởi động lại khi sửa `src/` hoặc `.env` (`nodemon.json`). Khi khởi động in địa chỉ cho máy này, Android Emulator (`10.0.2.2`) và điện thoại thật (IP LAN); Ctrl+C trả kết nối database ngay |
 | `npm start` | Chạy server (không tự khởi động lại) |
 | `npm run db:migrate` | Chạy các file trong `migrations/` chưa được áp dụng |
-| `npm run db:seed` | Thêm dữ liệu demo (BE1 + BE2), chạy lại nhiều lần không bị trùng. Mật khẩu demo `123456` |
+| `npm run db:seed` | Thêm dữ liệu demo (BE1 + BE2), chạy lại nhiều lần không bị trùng. Mật khẩu demo `123456`: tài khoản demo đã có mà bị đổi mật khẩu thì được đặt lại về `123456` (chỉ tài khoản demo và 3 bot; số dư ví giữ nguyên). **Thử đổi mật khẩu / sửa hồ sơ (`POST /api/me/password`, `PATCH /api/me`) chỉ trên tài khoản tự đăng ký**, không dùng tài khoản demo |
 | `npm run test:be1` | Kiểm thử end-to-end phần đấu giá/ví/tạm dừng/gian lận trên DB dùng chung (tài khoản `test_be1_*`, tự dọn) |
 | `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_<mã lần chạy>_*`, tự dọn) |
 | `npm test` | Chạy cả `test:be1` và `test:be2` |

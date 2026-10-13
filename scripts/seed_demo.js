@@ -24,7 +24,7 @@ const bcrypt = require('bcrypt');
 const { pool } = require('../src/config/db');
 const walletService = require('../src/services/wallet_service');
 const { depositFor, inTransaction } = require('../src/services/auction_engine');
-const { ensureBotAccounts } = require('./demo_bots');
+const { ensureBotAccounts, BOT_EMAILS } = require('./demo_bots');
 
 const PASSWORD = '123456';
 const H = 3600_000;
@@ -113,9 +113,22 @@ async function ensurePhotos(client, listingId, urls = []) {
   return added;
 }
 
+// Tài khoản demo đã có mà mật khẩu không còn là mật khẩu demo (ai đó đổi qua POST /api/me/password)
+// thì đặt lại. Chỉ chạm đúng dòng của email demo; không đổi số dư hay dữ liệu khác.
+let passwordResets = 0;
+async function resetDemoPassword(client, table, email) {
+  const { rows } = await client.query(`SELECT id, password_hash FROM ${table} WHERE lower(email) = $1`, [email]);
+  if (!rows[0] || (rows[0].password_hash && await bcrypt.compare(PASSWORD, rows[0].password_hash))) return;
+  await client.query(`UPDATE ${table} SET password_hash = $2 WHERE id = $1`, [rows[0].id, await bcrypt.hash(PASSWORD, 10)]);
+  passwordResets += 1;
+}
+
 async function ensureAccount(client, [fullName, email, phone], role, extra) {
   const found = await client.query('SELECT id FROM accounts WHERE lower(email) = $1', [email]);
-  if (found.rows[0]) return { id: found.rows[0].id, created: false };
+  if (found.rows[0]) {
+    await resetDemoPassword(client, 'accounts', email);
+    return { id: found.rows[0].id, created: false };
+  }
   const hash = await bcrypt.hash(PASSWORD, 10);
   const { rows } = await client.query(
     'INSERT INTO accounts (full_name, email, phone, password_hash) VALUES ($1, $2, $3, $4) RETURNING id',
@@ -141,6 +154,8 @@ async function main() {
     // Tài khoản riêng cho bot đấu giá demo (bot1..3@bidvibe.demo), xem scripts/demo_bots.js
     const bots = await ensureBotAccounts(client);
     if (bots) console.log(`  + ${bots} tài khoản bot đấu giá`);
+    // Bot đã có: chỉ đặt lại mật khẩu, giữ nguyên số dư ví.
+    for (const email of BOT_EMAILS) await resetDemoPassword(client, 'accounts', email);
     const sellers = [];
     for (const [name, email, shop, rating] of SELLERS) {
       sellers.push((await ensureAccount(client, [name, email, null], 'seller', { shop, rating })).id);
@@ -152,6 +167,7 @@ async function main() {
          ON CONFLICT (email) DO NOTHING`,
         [name, email, role, hash],
       );
+      await resetDemoPassword(client, 'ops_accounts', email);
     }
 
     const cats = Object.fromEntries((await client.query('SELECT code, id FROM categories')).rows.map((r) => [r.code, r.id]));
@@ -209,6 +225,7 @@ async function main() {
       console.log(`  + ${a.title}`);
     }
   });
+  if (passwordResets) console.log(`  ↻ đặt lại mật khẩu ${PASSWORD} cho ${passwordResets} tài khoản demo`);
   console.log(`\nXong. Đăng nhập thử: minhanh@gmail.com / ${PASSWORD} (người mua, ví 20.000.000đ)`);
 }
 
