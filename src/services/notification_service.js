@@ -8,7 +8,7 @@
 // BE1 đang gọi createNotification / emitNotification: giữ nguyên chữ ký hai hàm này.
 const { pool } = require('../config/db');
 const { AppError } = require('../middleware/errorHandler');
-const registerSockets = require('../sockets');
+const { broadcast } = require('../sockets/broadcast');
 
 // `data` (tuỳ chọn, migration 008): id liên quan để app mở đúng màn, ví dụ { orderId, auctionId }.
 // Giá trị đổi về chuỗi như id trong API; khoá rỗng bị bỏ; không có khoá nào thì lưu NULL.
@@ -32,12 +32,12 @@ async function createNotification(executor, { accountId, type, title, data }) {
   return { accountId: String(accountId), ...rows[0] };
 }
 
-// Phát tới phòng riêng của người nhận; không ai trong phòng (offline) thì không có gì xảy ra,
-// thông báo vẫn nằm trong DB để lần sau GET /api/notifications.
+// Phát tới phòng riêng của người nhận, ở tiến trình này và mọi backend khác cùng database
+// (sockets/broadcast.js); không ai trong phòng (offline) thì không có gì xảy ra, thông báo vẫn
+// nằm trong DB để lần sau GET /api/notifications.
 function emitNotification(notification) {
-  const io = registerSockets.getIo();
-  if (!io || !notification) return;
-  io.to(`user:${notification.accountId}`).emit('notification:new', {
+  if (!notification) return;
+  broadcast(`user:${notification.accountId}`, 'notification:new', {
     id: notification.id,
     type: notification.type,
     title: notification.title,

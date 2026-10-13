@@ -1049,6 +1049,114 @@ async function main() {
     }
   }
 
+  console.log('Real-time giữa nhiều backend cùng một database (pg_notify kênh bidvibe_events)');
+  {
+    const { spawn } = require('child_process');
+    const net = require('net');
+    const path = require('path');
+    const jwt = require('jsonwebtoken');
+    const env = require('../src/config/env');
+    const { io: ioClient } = require('socket.io-client');
+    const tok = (id, kind, role) => jwt.sign({ sub: String(id), kind, role }, env.jwtSecret, { expiresIn: '5m' });
+    const freePort = () => new Promise((resolve, reject) => {
+      const s = net.createServer().once('error', reject).listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
+    });
+    // Server con chạy `node src/app.js` như npm run dev của một người khác: cổng riêng, cùng DB, pool 2.
+    const children = [];
+    const startServer = async (name) => {
+      const port = await freePort();
+      const child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'app.js')], {
+        cwd: path.join(__dirname, '..'),
+        env: { ...process.env, PORT: String(port), DB_POOL_MAX: '2', NODE_ENV: 'development' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      children.push(child);
+      let out = '';
+      child.stdout.on('data', (d) => { out += d; });
+      child.stderr.on('data', (d) => { out += d; });
+      // Sẵn sàng khi đã lắng nghe cổng VÀ đã LISTEN kênh bidvibe_events.
+      for (const end = Date.now() + 20_000; !(out.includes('đang chạy tại') && out.includes('[realtime] đang nghe')); await sleep(200)) {
+        if (child.exitCode !== null) throw new Error(`server ${name} thoát sớm: ${out.slice(-300)}`);
+        if (Date.now() > end) throw new Error(`server ${name} không sẵn sàng sau 20 giây`);
+      }
+      return `http://127.0.0.1:${port}`;
+    };
+    const sockets = [];
+    const connect = (url, token) => new Promise((resolve, reject) => {
+      const s = ioClient(url, { auth: { token }, transports: ['websocket'], reconnection: false, forceNew: true });
+      sockets.push(s);
+      s.once('connect', () => resolve(s));
+      s.once('connect_error', (e) => { s.close(); reject(e); });
+    });
+    const waitFor = (s, event, pred = () => true, ms = 8000) => new Promise((resolve) => {
+      const timer = setTimeout(() => { s.off(event, h); resolve(null); }, ms);
+      function h(data) { if (pred(data)) { clearTimeout(timer); s.off(event, h); resolve(data ?? true); } }
+      s.on(event, h);
+    });
+    const rest = async (url, method, p, token, body) => {
+      const r = await fetch(url + p, {
+        method, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      const j = await r.json();
+      assert.strictEqual(r.status < 300, true, `${method} ${p}: ${r.status} ${JSON.stringify(j.error)}`);
+      return j.data;
+    };
+
+    try {
+      const [urlA, urlB] = [await startServer('A'), await startServer('B')];
+      const S = await mkAccount('seller', 'MultiSel');
+      const [P, Q] = [await mkAccount('bidder', 'MultiP'), await mkAccount('bidder', 'MultiQ')];
+      for (const id of [P, Q]) await tx((c) => walletService.topUp(c, { bidderId: id, amount: 5_000_000 }));
+      const { auctionId: am } = await mkAuction(S);
+      await engine.joinAuction({ bidderId: P, auctionId: am });
+      await engine.joinAuction({ bidderId: Q, auctionId: am });
+      const sP = await connect(urlB, tok(P, 'account', 'bidder')); // P nối server B
+      sP.emit('auction:join', String(am));
+      await sleep(300);
+
+      await step('đặt giá qua REST server A -> client nối server B nhận auction:update (đúng một lần)', async () => {
+        const updates = [];
+        sP.on('auction:update', (u) => { if (u.auctionId === String(am)) updates.push(u); });
+        const got = waitFor(sP, 'auction:update', (u) => u.auctionId === String(am) && u.reason === 'bid');
+        const bid = await rest(urlA, 'POST', '/api/bids', tok(P, 'account', 'bidder'), { auctionId: String(am), increment: 50_000 });
+        const u = await got;
+        assert.ok(u, 'server B không phát auction:update của lượt giá đặt ở server A');
+        assert.strictEqual(u.currentPrice, bid.currentPrice);
+        await sleep(800);
+        assert.strictEqual(updates.length, 1, `nhận ${updates.length} lần auction:update (mong 1)`);
+        sP.off('auction:update');
+      });
+      await step('bị vượt giá (đặt qua server A) -> client nối server B nhận notification:new outbid có data', async () => {
+        const got = waitFor(sP, 'notification:new', (n) => n.type === 'outbid');
+        await rest(urlA, 'POST', '/api/bids', tok(Q, 'account', 'bidder'), { auctionId: String(am), increment: 50_000 });
+        const n = await got;
+        assert.ok(n, 'server B không phát notification:new');
+        assert.deepStrictEqual(n.data, { auctionId: String(am) });
+        assert.ok(['id', 'type', 'title', 'createdAt', 'data'].every((k) => k in n));
+      });
+      await step('Admin khoá tài khoản qua server A -> client nối server B nhận account:disconnected rồi bị ngắt', async () => {
+        const adminId = (await pool.query(
+          `INSERT INTO ops_accounts (name, email, role) VALUES ($1, $2, 'admin') RETURNING id`,
+          [`${PREFIX}multi_admin`, `${RUN}multi_admin_${Math.floor(Math.random() * 1e6)}${DOMAIN}`])).rows[0].id;
+        const notice = waitFor(sP, 'account:disconnected');
+        const gone = new Promise((resolve) => sP.once('disconnect', resolve));
+        await rest(urlA, 'PATCH', `/api/admin/accounts/${P}`, tok(adminId, 'ops', 'admin'), { status: 'suspended' });
+        assert.deepStrictEqual(await notice, { code: 'ACCOUNT_SUSPENDED', message: 'Tài khoản đã bị khoá' });
+        const reason = await Promise.race([gone, sleep(8000).then(() => null)]);
+        assert.ok(reason, 'server B không ngắt socket của tài khoản bị khoá');
+      });
+    } finally {
+      sockets.forEach((s) => s.close());
+      // Luôn tắt server con, kể cả khi bước nào đó lỗi.
+      await Promise.all(children.map((c) => new Promise((resolve) => {
+        if (c.exitCode !== null) return resolve();
+        c.once('exit', resolve);
+        c.kill();
+      })));
+    }
+  }
+
   console.log(`\nTất cả ${passed} bước đạt.`);
 }
 
