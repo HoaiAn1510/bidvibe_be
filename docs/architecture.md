@@ -1,6 +1,6 @@
 # Kiến trúc & Quy ước — BidVibe Backend
 
-> Cập nhật: 2026-10-12.
+> Cập nhật: 2026-10-13.
 
 Tài liệu cho người viết backend. API cho app xem [`api.md`](api.md), Socket.io xem [`socket.md`](socket.md).
 
@@ -24,7 +24,7 @@ Mọi endpoint trả về theo format thống nhất (theo đúng `middleware/er
 - `models/auction.model.js`, `models/bid.model.js`, `models/wallet.model.js`
 - `routes/auction.routes.js`, `routes/bid.routes.js`, `routes/wallet.routes.js`, `routes/order.routes.js`
 - `services/auction_engine.js`, `services/wallet_service.js`, `services/fraud_detection.js`, `services/scheduler.js`
-- `sockets/auction_socket.js`, `sockets/index.js`, `sockets/pause_listener.js`
+- `sockets/auction_socket.js`, `sockets/index.js`, `sockets/pause_listener.js`, `sockets/broadcast.js`
 
 ### BE2 — Marketplace Operations
 - `routes/auth.routes.js`, `routes/listing.routes.js`, `routes/appraisal.routes.js`, `routes/ai.routes.js`, `routes/address.routes.js`, `routes/fulfilment.routes.js`, `routes/warehouse.routes.js`, `routes/dispute.routes.js`, `routes/admin.routes.js`, `routes/notification.routes.js`, `routes/chat.routes.js`, `routes/upload.routes.js`
@@ -87,8 +87,19 @@ Tạm dừng / tiếp tục phiên: BE2 chỉ cần đổi `flagged_auctions.sta
 
 - `notify(client, accountId, type, title)` — trong giao dịch thì chỉ ghi DB, nơi gọi phải `emitNotification(n)` **sau COMMIT**; gọi với `pool` (ngoài giao dịch) thì tự đẩy ngay.
 - `createNotification(executor, { accountId, type, title })` / `emitNotification(n)` — giữ nguyên chữ ký vì BE1 đang dùng.
-- Real-time: sự kiện `notification:new` gửi vào phòng `user:<accountId>` (socket tự vào phòng này khi kết nối bằng JWT tài khoản). `io` lấy qua `registerSockets.getIo()`, không cần truyền qua tham số.
+- Real-time: sự kiện `notification:new` gửi vào phòng `user:<accountId>` (socket tự vào phòng này khi kết nối bằng JWT tài khoản) qua `broadcast()` (xem mục Real-time bên dưới).
 - Chỉ tài khoản Bidder/Seller có thông báo; tài khoản nội bộ (ops) gọi API thông báo nhận `403 FORBIDDEN`.
+
+## Real-time khi nhiều backend cùng một database
+
+Mỗi người chạy một `npm run dev` nhưng cùng trỏ một database. Socket.io chỉ phát trong tiến trình tạo ra sự kiện, nên:
+
+- **Không gọi `io.to(...).emit` trực tiếp** trong service. Dùng `broadcast(room, event, payload)` của `sockets/broadcast.js` (`auction_engine.emit` và `emitNotification` đã dùng). Hàm này phát cho socket của tiến trình này rồi `pg_notify('bidvibe_events', { origin, room, event, payload })`. Gọi **sau COMMIT**. NOTIFY lỗi chỉ ghi log. Payload ≥ 8000 byte thì chỉ phát cục bộ kèm cảnh báo.
+- `sockets/pause_listener.js` LISTEN cả `auction_pause` (trigger migration `007`) và `bidvibe_events` trên **một** kết nối. Tin có `origin` khác thì phát lại cho socket của tiến trình này; tin của chính mình thì bỏ qua.
+- `disconnectAccount` ngắt cục bộ (`disconnectLocal`) và gửi lệnh `{ command: 'disconnect', accountId, kind, reason }` để tiến trình khác cũng ngắt. Giá trị trả về vẫn là số kết nối ngắt ở tiến trình này.
+- **Kết nối database của mỗi tiến trình: pool (`DB_POOL_MAX`) + 1 kết nối LISTEN.** Session pooler của Supabase giới hạn 15 kết nối cho cả database.
+- Khi tắt server: `broadcast.drain()` chờ NOTIFY đang gửi rồi mới `pool.end()`.
+- Kiểm thử: `test:be1` mục "Real-time giữa nhiều backend" khởi 2 server con (cổng ngẫu nhiên, `DB_POOL_MAX=2`).
 
 ## Quyết định mặc định cho các câu hỏi còn mở
 
