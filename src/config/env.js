@@ -25,4 +25,8 @@ module.exports = {
   storageBucket: process.env.STORAGE_BUCKET || 'listing-photos',
   // Job tự giải ngân sau 72 giờ (mặc định bật). Đặt AUTO_PAYOUT_ENABLED=false để tắt.
   autoPayoutEnabled: process.env.AUTO_PAYOUT_ENABLED !== 'false',
+  // API /api/dev cho FE test nhanh (rút ngắn phiên, cho đơn quá hạn). Mặc định tắt; KHÔNG bật trên máy chạy
+  // buổi demo. devToolsEnabled = bật VÀ không phải production: production thì /api/dev không tồn tại (404).
+  devTools: process.env.DEV_TOOLS === 'true',
+  devToolsEnabled: process.env.DEV_TOOLS === 'true' && process.env.NODE_ENV !== 'production',
 };

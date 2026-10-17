@@ -3,7 +3,8 @@ const env = require('../config/env');
 const { pool } = require('../config/db');
 
 // Sự kiện server -> client (chi tiết: docs/socket.md):
-//   auction:update        lượt giá mới (reason 'bid') hoặc tạm dừng / tiếp tục (reason 'paused' | 'resumed')
+//   auction:update        lượt giá mới (reason 'bid'), tạm dừng / tiếp tục (reason 'paused' | 'resumed'), hoặc đổi giờ kết thúc
+//                         bằng API dev (reason 'dev_time', chỉ khi DEV_TOOLS=true)
 //   auction:ended         { auctionId, hasWinner, cancelled? }
 //   notification:new      { id, type, title, createdAt }   (phòng user:<id>)
 //   account:disconnected  { code, message }  ngay trước khi server ngắt kết nối (disconnectAccount)

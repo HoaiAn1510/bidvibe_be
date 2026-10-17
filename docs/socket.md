@@ -1,6 +1,6 @@
 # Socket.io — sự kiện real-time của BidVibe
 
-> Cập nhật: 2026-10-13. REST API xem [`api.md`](api.md); hướng dẫn nối nhanh xem [`fe-quickstart.md`](fe-quickstart.md).
+> Cập nhật: 2026-10-17. REST API xem [`api.md`](api.md); hướng dẫn nối nhanh xem [`fe-quickstart.md`](fe-quickstart.md).
 
 Tài liệu cho người nối app Flutter. Nguồn sự thật là code: `src/sockets/auction_socket.js` (kết nối, phòng),
 `src/sockets/index.js` (`disconnectAccount`), `src/sockets/pause_listener.js` (`auction:update` khi tạm dừng / tiếp tục, nghe sự kiện từ backend khác),
@@ -82,6 +82,7 @@ Cùng một tên sự kiện cho hai loại thay đổi; phân biệt bằng tr�
 | `bid` | Có lượt giá mới | `auctionId`, `currentPrice`, `bidCount`, `endsAt`, `bid` |
 | `paused` | Admin tạm dừng phiên để kiểm tra | `auctionId`, `status`, `paused`, `pausedAt`, `endsAt`, `remainingSeconds`, `currentPrice`, `bidCount` |
 | `resumed` | Admin cho phiên chạy lại | như `paused` |
+| `dev_time` | Chỉ khi server bật `DEV_TOOLS=true`: dev gọi `POST /api/dev/auctions/:id/end-soon` để rút ngắn phiên | như `paused` (`paused: false`) |
 
 **Lượt giá mới** (`reason: "bid"`):
 
@@ -99,6 +100,15 @@ Cùng một tên sự kiện cho hai loại thay đổi; phân biệt bằng tr�
 - `endsAt` có thể **lùi về sau** khi đặt trong 30 giây cuối (chống chốt phút chót) — luôn cập nhật đồng hồ theo giá trị này.
 - `bid.who` là tên đã che. Muốn biết lượt đó có phải của mình / mình có đang dẫn đầu không: gọi lại `GET /api/auctions/:id`
   (trả `leading`, `myBid`), hoặc so `currentPrice` với giá mình vừa đặt.
+
+**Đổi giờ kết thúc để test** (`reason: "dev_time"`) — các trường như `paused` / `resumed`; `endsAt` và `remainingSeconds` là giá trị mới, đồng hồ cập nhật theo đó. App cũ chưa biết `reason` này vẫn chạy bình thường vì mọi trường cũ giữ nguyên. Hướng dẫn: [`fe-quickstart.md` mục 6b](fe-quickstart.md#6b-test-nhanh-thắng-phiên-và-quá-hạn-thanh-toán).
+
+```json
+{
+  "auctionId": "12", "reason": "dev_time", "status": "active", "paused": false, "pausedAt": null,
+  "endsAt": "2026-10-17T03:00:15.000Z", "remainingSeconds": 10, "currentPrice": 1250000, "bidCount": 6
+}
+```
 
 **Tạm dừng** (`reason: "paused"`) — đồng hồ đứng yên, không nhận cọc / lượt giá (`409 AUCTION_PAUSED`):
 
@@ -134,6 +144,7 @@ socket.on('auction:update', (u) {
     case 'bid':     applyBid(u); break;
     case 'paused':  setPaused(true, remaining: u['remainingSeconds']); break;
     case 'resumed': setPaused(false, endsAt: DateTime.parse(u['endsAt'])); break;
+    case 'dev_time': setEndsAt(DateTime.parse(u['endsAt'])); break; // chỉ khi dev bật DEV_TOOLS
   }
 });
 ```
