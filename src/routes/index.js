@@ -3,6 +3,7 @@ const { requireAuth } = require('../middleware/auth');
 const authService = require('../services/auth_service');
 const listingService = require('../services/listing_service');
 const { pool } = require('../config/db');
+const env = require('../config/env');
 
 const router = express.Router();
 
@@ -65,5 +66,9 @@ router.use('/auctions', require('./auction.routes'));
 router.use('/bids', require('./bid.routes'));
 router.use('/wallet', require('./wallet.routes'));
 router.use('/orders', require('./order.routes'));
+
+// Công cụ cho FE test nhanh (chỉ khi DEV_TOOLS=true và không phải production). Tắt thì không đăng ký:
+// đường dẫn /api/dev/* rơi xuống notFound như route không tồn tại.
+if (env.devToolsEnabled) router.use('/dev', require('./dev.routes'));
 
 module.exports = router;

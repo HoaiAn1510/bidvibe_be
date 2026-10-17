@@ -1,6 +1,6 @@
 # Nối app Flutter với backend BidVibe — hướng dẫn nhanh
 
-> Cập nhật: 2026-10-13.
+> Cập nhật: 2026-10-17.
 
 Đọc một lần là nối được. Chi tiết từng endpoint ở [`api.md`](api.md), sự kiện real-time ở [`socket.md`](socket.md).
 
@@ -106,7 +106,7 @@ Ký hiệu: → gọi theo thứ tự; (socket) cần Socket.io.
 | Đăng nhập | [`POST /api/auth/login`](api.md#post-apiauthlogin) (bidder / seller) hoặc [`POST /api/auth/ops/login`](api.md#post-apiauthopslogin) (thẩm định / kho / admin) → lưu `token`, `role` → [`GET /api/me`](api.md#get-apime) | `role` quyết định mở giao diện nào. Sau khi đăng nhập, mở Socket.io (socket) |
 | Đăng ký | [`POST /api/auth/register`](api.md#post-apiauthregister) | Trả token luôn, không cần đăng nhập lại |
 | Danh sách phiên | [`GET /api/categories`](api.md#get-apicategories), [`GET /api/auctions?status=live&sort=ending`](api.md#get-apiauctions) | Tab "Phiên của tôi": `status=joined` |
-| Chi tiết phiên | [`GET /api/auctions/:id`](api.md#get-apiauctionsid) → (socket) `auction:join` | Đếm ngược theo `remainingSeconds`; nghe `auction:update`, `auction:ended`; rời màn → `auction:leave` |
+| Chi tiết phiên | [`GET /api/auctions/:id`](api.md#get-apiauctionsid) → (socket) `auction:join` | Đếm ngược theo `endsAt` và độ lệch giờ server (`serverTime`, [xem mục 6c](#6c-đồng-hồ-đếm-ngược-đúng-dù-điện-thoại-lệch-giờ)), khi tạm dừng theo `remainingSeconds`; nghe `auction:update`, `auction:ended`; rời màn → `auction:leave` |
 | Đặt cọc | [`POST /api/auctions/:id/join`](api.md#post-apiauctionsidjoin) | Nút hiện khi `joined == false`. `402` → mở màn nạp ví |
 | Đặt giá | [`POST /api/bids`](api.md#post-apibids) | Gửi `amount` **hoặc** `increment`. Giá mới về qua (socket) `auction:update` |
 | Báo cáo phiên | [`POST /api/auctions/:id/report`](api.md#post-apiauctionsidreport) | |
@@ -178,7 +178,8 @@ Danh sách đầy đủ: [`api.md` mục 19](api.md#19-mã-lỗi-nghiệp-vụ).
 
 | Sự kiện (server → app) | Khi nào | Làm gì |
 |---|---|---|
-| `auction:update` | `reason: "bid"` có lượt giá mới; `"paused"` / `"resumed"` Admin tạm dừng / tiếp tục | Cập nhật giá, số lượt, `endsAt` / `remainingSeconds`, trạng thái dừng |
+| `auction:update` | `reason: "bid"` có lượt giá mới; `"paused"` / `"resumed"` Admin tạm dừng / tiếp tục; `"dev_time"` đổi giờ kết thúc bằng [API dev](#6b-test-nhanh-thắng-phiên-và-quá-hạn-thanh-toán) | Cập nhật giá, số lượt, `endsAt` / `remainingSeconds`, trạng thái dừng |
+| `auction:viewers` | Có người vào / rời / ngắt kết nối phòng phiên: `{ auctionId, viewers }` | Cập nhật "N người đang xem". Đếm theo tài khoản và theo từng backend ([`socket.md`](socket.md)); số ban đầu lấy từ `viewers` của `GET /api/auctions/:id` |
 | `auction:ended` | Phiên hết giờ (`hasWinner`) hoặc bị huỷ (`cancelled: true`) | Gọi lại [`GET /api/auctions/:id`](api.md#get-apiauctionsid) để biết `won`. Server đóng phiên trong vòng 5 giây sau giờ kết thúc; nếu đồng hồ về 0 mà chưa nhận sự kiện (mất mạng, chưa vào phòng) thì vài giây sau tự gọi lại `GET /api/auctions/:id` |
 | `notification:new` | Có thông báo mới (`outbid`, `win`, `order`...) | Tăng badge, hiện snackbar |
 | `account:disconnected` | Admin khoá tài khoản (ngay trước khi server ngắt) | Hiện `message`, đăng xuất, **không** tự kết nối lại |
@@ -206,7 +207,7 @@ void watchAuction(IO.Socket socket, String auctionId, void Function(Map) onUpdat
   socket.emit('auction:join', auctionId);
   socket.on('auction:update', (u) {
     if (u['auctionId'] != auctionId) return;
-    onUpdate(u); // reason: bid | paused | resumed; currentPrice, bidCount, endsAt, ...
+    onUpdate(u); // reason: bid | paused | resumed | dev_time; currentPrice, bidCount, endsAt, ...
   });
   socket.on('auction:ended', (e) { if (e['auctionId'] == auctionId) reloadAuction(); });
   socket.onReconnect((_) => socket.emit('auction:join', auctionId)); // vào lại phòng sau khi mất mạng
@@ -309,6 +310,85 @@ Future<void> addPhotosFromGallery(String baseUrl, String token, String listingId
 - **Thông báo**: mỗi lần mở app hoặc kéo để làm mới thì tải lại `GET /api/notifications`. Socket chỉ đẩy thông báo lúc đang kết nối, nên thông báo đến khi app tắt sẽ không qua socket.
 - **Thời gian** là ISO 8601 UTC; một số trường lồng trả dạng `+00:00`. Dùng `DateTime.parse(...).toLocal()`.
 - Tài khoản `ops` (thẩm định / kho / admin) không có thông báo, ví, địa chỉ, chatbot.
+
+## 6b. Test nhanh thắng phiên và quá hạn thanh toán
+
+Phiên thật chạy hàng giờ và đơn quá hạn sau 24 giờ, nên trước đây phải sửa tay database để test. Backend có sẵn hai API dev, mặc định **tắt**:
+
+| API | Việc |
+|---|---|
+| [`POST /api/dev/auctions/:id/end-soon`](api.md#post-apidevauctionsidend-soon) | Phiên còn `seconds` giây nữa (5–3600, mặc định 10) rồi kết thúc như thật |
+| [`POST /api/dev/orders/:id/expire-payment`](api.md#post-apidevordersidexpire-payment) | Đơn chưa thanh toán bị coi như quá 24 giờ, mất cọc như thật |
+
+Cả hai chỉ **dịch đồng hồ**; việc đóng phiên, chọn người thắng, tạo đơn, hoàn cọc người thua, tịch thu cọc, gửi thông báo đều do server làm như bình thường (job nền 5 giây một lần).
+
+**Bước 1. Bật trên máy bạn.** Trong `.env` của máy chạy backend thêm dòng (không commit `.env`):
+
+```
+DEV_TOOLS=true
+```
+
+Server (`npm run dev`) tự khởi động lại và in `[dev] DEV_TOOLS=true: đang mở /api/dev ...`. **Không bật trên máy chạy buổi demo.** Khi `NODE_ENV=production` hoặc không đặt `DEV_TOOLS`, `/api/dev/*` trả `404` như route không tồn tại.
+
+**Bước 2. Thắng một phiên.**
+
+1. Đăng nhập tài khoản Bidder, nạp ví đủ tiền cọc ([`POST /api/wallet/topup`](api.md#post-apiwallettopup)).
+2. Mở phiên đang diễn ra, đặt cọc, đặt giá để **đang dẫn đầu** (người dẫn đầu khi hết giờ mới là người thắng).
+3. Gọi `end-soon` với `id` của phiên (token của bất kỳ tài khoản nào):
+
+```bash
+curl -X POST http://localhost:5000/api/dev/auctions/<id phiên>/end-soon   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" -d '{"seconds":10}'
+# {"success":true,"data":{"auctionId":"355","endsAt":"...","remainingSeconds":10},"error":null}
+```
+
+4. Màn chi tiết phiên (đang `auction:join`) nhận `auction:update` có `reason: "dev_time"` với `endsAt` / `remainingSeconds` mới: **đồng hồ tự nhảy về 10 giây**, không cần tải lại.
+5. Hết giờ, trong vòng 5 giây app nhận `auction:ended` và `notification:new` loại `win`. `GET /api/orders/mine` có đơn mới (`paymentStatus: "awaiting_payment"`). Từ đây test màn thanh toán như bình thường ([`POST /api/orders/:id/pay`](api.md#post-apiordersidpay)).
+
+**Bước 3. Test quá hạn thanh toán.** Với đơn vừa tạo (chưa thanh toán):
+
+```bash
+curl -X POST http://localhost:5000/api/dev/orders/<id đơn>/expire-payment -H "Authorization: Bearer $TOKEN"
+# {"success":true,"data":{"orderId":"88","paymentDeadline":"..."},"error":null}
+```
+
+Trong vòng 5 giây: đơn thành `paymentStatus: "expired"`, cọc bị tịch thu (ví có giao dịch `deposit_forfeit`, `held` giảm), người mua nhận `notification:new` loại `warn`. Thanh toán đơn đó sau đó trả `409 PAYMENT_EXPIRED`.
+
+Lỗi thường gặp: `404` ở `/api/dev/...` là chưa bật `DEV_TOOLS=true` (hoặc server chưa khởi động lại); `409 AUCTION_ENDED` / `AUCTION_PAUSED` là phiên đã kết thúc / đang tạm dừng; `409 ALREADY_PAID` là đơn đã trả tiền.
+
+> Database dùng chung cả nhóm: `end-soon` đổi giờ kết thúc của phiên cho **mọi người đang xem phiên đó**. Chỉ dùng trên phiên bạn tự tạo hoặc tài khoản / dữ liệu thử của mình. Postman: thư mục "16 Công cụ dev" trong collection.
+
+## 6c. Đồng hồ đếm ngược đúng dù điện thoại lệch giờ
+
+Giờ trên điện thoại có thể lệch giờ server vài giây đến vài phút, nên đếm ngược kiểu `endsAt - DateTime.now()` sẽ sai. Server trả `serverTime` (ISO 8601 UTC, giờ server lúc trả) ở:
+
+- [`GET /api/auctions`](api.md#get-apiauctions) và [`GET /api/auctions/:id`](api.md#get-apiauctionsid): cấp `data`, không lặp trong từng phiên;
+- mọi sự kiện socket `auction:update` và `auction:ended` ([`socket.md`](socket.md)).
+
+Cách dùng:
+
+1. Mỗi lần nhận `serverTime` (REST hoặc socket): **lệch = serverTime − giờ máy lúc nhận**.
+2. Đếm ngược theo **`endsAt − (giờ máy + lệch)`**.
+3. Phiên đang tạm dừng (`paused: true`): đồng hồ đứng, hiển thị `remainingSeconds`, không dùng công thức trên.
+
+```dart
+Duration clockSkew = Duration.zero; // serverTime - giờ máy; cập nhật mỗi lần nhận serverTime
+
+void syncClock(Map data) {
+  final t = data['serverTime'];
+  if (t is String) clockSkew = DateTime.parse(t).difference(DateTime.now().toUtc());
+}
+
+// Gọi cho phản hồi REST của danh sách / chi tiết phiên và cho mọi auction:update, auction:ended
+// socket.on('auction:update', (u) { syncClock(u); ... });
+
+Duration remaining(DateTime endsAt) {
+  final now = DateTime.now().toUtc().add(clockSkew); // giờ server ước tính
+  final left = endsAt.difference(now);
+  return left.isNegative ? Duration.zero : left;
+}
+```
+
+Lệch này chưa tính thời gian truyền mạng (dưới một giây trên Wi-Fi); chấp nhận được cho đồng hồ đếm ngược. Server vẫn là bên đóng phiên, nên khi về 0 hãy chờ `auction:ended` hoặc gọi lại `GET /api/auctions/:id` như ở [mục 6](#6-những-điểm-cần-lưu-ý).
 
 ## 7. Chạy thử luồng chính bằng curl
 

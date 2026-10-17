@@ -1,6 +1,6 @@
 # Socket.io — sự kiện real-time của BidVibe
 
-> Cập nhật: 2026-10-13. REST API xem [`api.md`](api.md); hướng dẫn nối nhanh xem [`fe-quickstart.md`](fe-quickstart.md).
+> Cập nhật: 2026-10-17. REST API xem [`api.md`](api.md); hướng dẫn nối nhanh xem [`fe-quickstart.md`](fe-quickstart.md).
 
 Tài liệu cho người nối app Flutter. Nguồn sự thật là code: `src/sockets/auction_socket.js` (kết nối, phòng),
 `src/sockets/index.js` (`disconnectAccount`), `src/sockets/pause_listener.js` (`auction:update` khi tạm dừng / tiếp tục, nghe sự kiện từ backend khác),
@@ -48,7 +48,7 @@ socket.connect();
 |---|---|---|---|
 | `user:{accountId}` | Bidder / Seller (`kind = 'account'`) | **Tự động** khi kết nối | `notification:new` của chính mình, `account:disconnected` |
 | `ops:{opsId}` | Thẩm định / Kho / Admin (`kind = 'ops'`) | **Tự động** khi kết nối | `account:disconnected` |
-| `auction:{auctionId}` | Bất kỳ ai đã kết nối | Gửi `auction:join` | `auction:update`, `auction:ended` của phiên đó |
+| `auction:{auctionId}` | Bất kỳ ai đã kết nối | Gửi `auction:join` | `auction:update`, `auction:ended`, `auction:viewers` của phiên đó |
 
 `accounts.id` và `ops_accounts.id` là hai dãy số riêng (có thể trùng số), nên phòng có tiền tố khác nhau. Tài khoản nội
 bộ không có thông báo. Socket tự rời mọi phòng khi ngắt; sau khi kết nối lại phải gửi `auction:join` lại cho phiên đang xem.
@@ -82,6 +82,9 @@ Cùng một tên sự kiện cho hai loại thay đổi; phân biệt bằng tr�
 | `bid` | Có lượt giá mới | `auctionId`, `currentPrice`, `bidCount`, `endsAt`, `bid` |
 | `paused` | Admin tạm dừng phiên để kiểm tra | `auctionId`, `status`, `paused`, `pausedAt`, `endsAt`, `remainingSeconds`, `currentPrice`, `bidCount` |
 | `resumed` | Admin cho phiên chạy lại | như `paused` |
+| `dev_time` | Chỉ khi server bật `DEV_TOOLS=true`: dev gọi `POST /api/dev/auctions/:id/end-soon` để rút ngắn phiên | như `paused` (`paused: false`) |
+
+**`serverTime`** (chuỗi ISO 8601 UTC, giờ hiện tại của server lúc gửi) có mặt trong **mọi** `auction:update` (mọi `reason`) và `auction:ended`, ngoài các trường ở bảng trên và ở ví dụ dưới (các ví dụ rút gọn, không ghi `serverTime`). Nhận được thì cập nhật độ lệch đồng hồ ([`fe-quickstart.md`](fe-quickstart.md#6c-đồng-hồ-đếm-ngược-đúng-dù-điện-thoại-lệch-giờ)). Khi nhiều backend cùng database, `serverTime` là giờ của server mà client đang nối.
 
 **Lượt giá mới** (`reason: "bid"`):
 
@@ -99,6 +102,15 @@ Cùng một tên sự kiện cho hai loại thay đổi; phân biệt bằng tr�
 - `endsAt` có thể **lùi về sau** khi đặt trong 30 giây cuối (chống chốt phút chót) — luôn cập nhật đồng hồ theo giá trị này.
 - `bid.who` là tên đã che. Muốn biết lượt đó có phải của mình / mình có đang dẫn đầu không: gọi lại `GET /api/auctions/:id`
   (trả `leading`, `myBid`), hoặc so `currentPrice` với giá mình vừa đặt.
+
+**Đổi giờ kết thúc để test** (`reason: "dev_time"`) — các trường như `paused` / `resumed`; `endsAt` và `remainingSeconds` là giá trị mới, đồng hồ cập nhật theo đó. App cũ chưa biết `reason` này vẫn chạy bình thường vì mọi trường cũ giữ nguyên. Hướng dẫn: [`fe-quickstart.md` mục 6b](fe-quickstart.md#6b-test-nhanh-thắng-phiên-và-quá-hạn-thanh-toán).
+
+```json
+{
+  "auctionId": "12", "reason": "dev_time", "status": "active", "paused": false, "pausedAt": null,
+  "endsAt": "2026-10-17T03:00:15.000Z", "remainingSeconds": 10, "currentPrice": 1250000, "bidCount": 6
+}
+```
 
 **Tạm dừng** (`reason: "paused"`) — đồng hồ đứng yên, không nhận cọc / lượt giá (`409 AUCTION_PAUSED`):
 
@@ -134,15 +146,34 @@ socket.on('auction:update', (u) {
     case 'bid':     applyBid(u); break;
     case 'paused':  setPaused(true, remaining: u['remainingSeconds']); break;
     case 'resumed': setPaused(false, endsAt: DateTime.parse(u['endsAt'])); break;
+    case 'dev_time': setEndsAt(DateTime.parse(u['endsAt'])); break; // chỉ khi dev bật DEV_TOOLS
   }
+});
+```
+
+### `auction:viewers` — số người đang xem phiên (phòng `auction:{id}`)
+
+```json
+{ "auctionId": "12", "viewers": 3 }
+```
+
+Phát cho cả phòng mỗi khi có người vào (`auction:join`), rời (`auction:leave`) hoặc ngắt kết nối (mất mạng, đóng app). Người vừa vào phòng cũng nhận sự kiện này nên có ngay số hiện tại; muốn lấy số khi chưa vào phòng thì dùng trường `viewers` của [`GET /api/auctions/:id`](api.md#get-apiauctionsid).
+
+- Đếm theo **tài khoản**, không theo kết nối: một tài khoản mở nhiều kết nối (nhiều thiết bị, nhiều tab) chỉ tính 1. Tài khoản `ops` cũng được tính như một người xem.
+- **Đếm theo từng backend**: chỉ tính socket nối vào chính tiến trình đang chạy, không gom qua các backend khác cùng database (khác với `auction:update`, [mục 8](#8-nhiều-backend-cùng-một-database)). Khi mỗi người trong nhóm tự chạy một backend, số hiển thị chỉ là người xem nối vào backend của mình. Khi demo chỉ chạy **một** backend nên số là chính xác.
+- Sự kiện mới, app cũ không nghe vẫn chạy bình thường.
+
+```dart
+socket.on('auction:viewers', (v) {
+  if (v['auctionId'] == auctionId) setViewers(v['viewers']); // ví dụ "3 người đang xem"
 });
 ```
 
 ### `auction:ended` — phiên kết thúc (phòng `auction:{id}`)
 
 ```json
-{ "auctionId": "12", "hasWinner": true }
-{ "auctionId": "12", "hasWinner": false, "cancelled": true }
+{ "auctionId": "12", "hasWinner": true, "serverTime": "2026-10-10T08:30:00.412Z" }
+{ "auctionId": "12", "hasWinner": false, "cancelled": true, "serverTime": "2026-10-10T08:30:00.412Z" }
 ```
 
 - Hết giờ (job nền 5 giây/lần): `hasWinner` cho biết có người thắng; không có `cancelled`.
