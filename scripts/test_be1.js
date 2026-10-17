@@ -758,7 +758,15 @@ async function main() {
         await tx((c) => walletService.topUp(c, { bidderId: human, amount: 5_000_000 }));
         await engine.joinAuction({ bidderId: human, auctionId: ab });
         await engine.placeBid({ bidderId: human, auctionId: ab, increment: 50_000 });
-        r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 5, log, allowedEmails, onlyOutbid: true, stopSignal: stopAfter(800) });
+        // Chờ có vòng lặp thay vì ngủ cố định: kiểm tra mỗi 300 ms (tối đa 10 giây) tới khi bot đã vượt giá,
+        // rồi chờ thêm một nhịp để chắc bot không đặt lần hai (bot dẫn đầu thì phải chờ).
+        const sig = { stop: false };
+        const running = runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 5, log, allowedEmails, onlyOutbid: true, stopSignal: sig });
+        const bidCount = async () => (await pool.query('SELECT count(*)::int AS n FROM bids WHERE auction_id = $1', [ab])).rows[0].n;
+        for (let waited = 0; waited < 10_000 && (await bidCount()) < 2; waited += 300) await sleep(300);
+        await sleep(300);
+        sig.stop = true;
+        r = await running;
         assert.deepStrictEqual(r, { bids: 1, reason: 'dừng theo yêu cầu (Ctrl+C)' });
         const last = (await pool.query('SELECT amount::int AS a FROM bids WHERE auction_id = $1 ORDER BY id DESC LIMIT 1', [ab])).rows[0].a;
         assert.strictEqual(last, 1_100_000);
@@ -947,7 +955,10 @@ async function main() {
         assert.strictEqual(u.status, 'active');
         assert.ok(u.pausedAt);
         assert.strictEqual(new Date(u.endsAt).getTime(), new Date(before.ends_at).getTime());
-        assert.ok(u.remainingSeconds > 3500 && u.remainingSeconds <= 3600, `remainingSeconds ${u.remainingSeconds}`);
+        // endsAt = giờ máy chạy test + 1 giờ (createAuctionForListing) còn pausedAt là now() của DB, nên máy lệch
+        // DB khoảng 1 giây thì ra 3601. Cho sai số +2 giây, và kiểm tra thêm remainingSeconds khớp đúng hai mốc trong chính sự kiện.
+        assert.ok(u.remainingSeconds > 3500 && u.remainingSeconds <= 3602, `remainingSeconds ${u.remainingSeconds}`);
+        assert.strictEqual(u.remainingSeconds, Math.ceil((new Date(u.endsAt) - new Date(u.pausedAt)) / 1000));
         assert.strictEqual(typeof u.currentPrice, 'number');
 
         await sleep(1200);
