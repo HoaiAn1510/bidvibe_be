@@ -470,7 +470,8 @@ async function main() {
     const { auctionId: ap } = await mkAuction(seller);
     const rs = await Promise.allSettled(Array.from({ length: 5 }, () => fraud.reportAuction({ reporterId: A, auctionId: ap, reason: 'Spam' })));
     assert.strictEqual(rs.filter((r) => r.status === 'fulfilled').length, 1);
-    assert.ok(rs.filter((r) => r.status === 'rejected').every((r) => r.reason.code === 'ALREADY_REPORTED'));
+    assert.ok(rs.filter((r) => r.status === 'rejected').every((r) => r.reason.code === 'ALREADY_REPORTED'),
+      JSON.stringify(rs.map((r) => r.status === 'fulfilled' ? 'ok' : (r.reason.code || r.reason.message))));
     const f = await flagsOf(ap);
     assert.deepStrictEqual([f.length, f[0].evidence], [1, 1]);
   });
