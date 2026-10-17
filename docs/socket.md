@@ -84,6 +84,8 @@ Cùng một tên sự kiện cho hai loại thay đổi; phân biệt bằng tr�
 | `resumed` | Admin cho phiên chạy lại | như `paused` |
 | `dev_time` | Chỉ khi server bật `DEV_TOOLS=true`: dev gọi `POST /api/dev/auctions/:id/end-soon` để rút ngắn phiên | như `paused` (`paused: false`) |
 
+**`serverTime`** (chuỗi ISO 8601 UTC, giờ hiện tại của server lúc gửi) có mặt trong **mọi** `auction:update` (mọi `reason`) và `auction:ended`, ngoài các trường ở bảng trên và ở ví dụ dưới (các ví dụ rút gọn, không ghi `serverTime`). Nhận được thì cập nhật độ lệch đồng hồ ([`fe-quickstart.md`](fe-quickstart.md#6c-đồng-hồ-đếm-ngược-đúng-dù-điện-thoại-lệch-giờ)). Khi nhiều backend cùng database, `serverTime` là giờ của server mà client đang nối.
+
 **Lượt giá mới** (`reason: "bid"`):
 
 ```json
@@ -152,8 +154,8 @@ socket.on('auction:update', (u) {
 ### `auction:ended` — phiên kết thúc (phòng `auction:{id}`)
 
 ```json
-{ "auctionId": "12", "hasWinner": true }
-{ "auctionId": "12", "hasWinner": false, "cancelled": true }
+{ "auctionId": "12", "hasWinner": true, "serverTime": "2026-10-10T08:30:00.412Z" }
+{ "auctionId": "12", "hasWinner": false, "cancelled": true, "serverTime": "2026-10-10T08:30:00.412Z" }
 ```
 
 - Hết giờ (job nền 5 giây/lần): `hasWinner` cho biết có người thắng; không có `cancelled`.

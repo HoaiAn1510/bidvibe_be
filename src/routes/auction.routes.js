@@ -20,11 +20,13 @@ router.get('/', async (req, res) => {
     engine.listAuctions({ ...filters, sort, ...page }),
     engine.countAuctions(filters),
   ]);
-  ok(res, { auctions, total, ...page });
+  // serverTime: giờ server lúc trả, để app tính độ lệch đồng hồ (cấp data, không lặp trong từng phiên)
+  ok(res, { auctions, total, ...page, serverTime: new Date().toISOString() });
 });
 
 router.get('/:id', async (req, res) => {
-  ok(res, await engine.getAuction(idParam(req.params.id), viewerOf(req)));
+  const auction = await engine.getAuction(idParam(req.params.id), viewerOf(req));
+  ok(res, { ...auction, serverTime: new Date().toISOString() });
 });
 
 // Đặt cọc tham gia phiên

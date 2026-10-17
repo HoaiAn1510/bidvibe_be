@@ -58,8 +58,7 @@ async function onNotification(msg) {
   try {
     const { auctionId } = JSON.parse(msg.payload);
     const update = await buildPauseUpdate(auctionId);
-    const io = registerSockets.getIo();
-    if (update && io) io.to(`auction:${update.auctionId}`).emit('auction:update', update);
+    if (update) realtime.emitLocal(`auction:${update.auctionId}`, 'auction:update', update); // thêm serverTime
   } catch (err) {
     console.error('[pause-listener]', err.message);
   }

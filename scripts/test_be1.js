@@ -263,6 +263,15 @@ async function main() {
   const clock = async (auctionId) => (await pool.query(
     `SELECT ends_at, paused_at, status FROM auctions WHERE id = $1`, [auctionId])).rows[0];
   const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  // serverTime: ISO 8601 UTC đúng định dạng, gần giờ máy chạy test (cùng máy với server test nên lệch rất ít).
+  const assertServerTime = (obj, label = 'payload') => {
+    assert.ok(obj, `${label}: không có dữ liệu`);
+    const t = obj.serverTime;
+    assert.strictEqual(typeof t, 'string', `${label}: thiếu serverTime`);
+    assert.ok(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(t), `${label}: serverTime ${t}`);
+    assert.strictEqual(new Date(t).toISOString(), t);
+    assert.ok(Math.abs(Date.now() - Date.parse(t)) < 15_000, `${label}: serverTime ${t} lệch quá xa giờ hiện tại`);
+  };
   await step('tạm dừng rồi tiếp tục: ends_at dịch đúng bằng thời gian đã dừng', async () => {
     const { auctionId: ap } = await mkAuction(seller);
     await engine.joinAuction({ bidderId: A, auctionId: ap });
@@ -635,6 +644,17 @@ async function main() {
         assert.deepStrictEqual([d.joined, d.leading, d.myDeposit, d.minNextBid], [true, true, 100_000, 1_100_000]);
         assert.deepStrictEqual([d.bids[0].who, d.bids[0].me], ['T***', true]); // tên đã che: "test_be1_Hal" -> "T***"
       });
+      await step('serverTime: GET /api/auctions và /:id có serverTime ở cấp data, không lặp trong từng phiên', async () => {
+        const list = await get(`/auctions?q=${encodeURIComponent(RUN)}&limit=2`, tok(H, 'bidder'));
+        assertServerTime(list, 'GET /auctions');
+        assert.ok(list.auctions.length > 0 && list.auctions.every((x) => !('serverTime' in x)), 'serverTime không được lặp trong từng phiên');
+        const d = await get(`/auctions/${ap}`, tok(H, 'bidder'));
+        assertServerTime(d, 'GET /auctions/:id');
+        assert.ok(d.bids.every((b) => !('serverTime' in b)));
+        assert.ok(['id', 'currentPrice', 'endsAt', 'remainingSeconds', 'photos', 'bids'].every((k) => k in d), 'các trường cũ vẫn còn');
+        const d2 = await get(`/auctions/${ap}`, tok(H, 'bidder'));
+        assert.ok(Date.parse(d2.serverTime) >= Date.parse(d.serverTime), 'serverTime không được lùi');
+      });
       await step('GET /api/wallet/transactions: kindLabel tiếng Việt, total, phân trang', async () => {
         const d = await get('/wallet/transactions?limit=1&offset=0', tok(H, 'bidder'));
         const n = (await pool.query('SELECT count(*)::int AS n FROM wallet_transactions WHERE bidder_id = $1', [H])).rows[0].n;
@@ -987,6 +1007,27 @@ async function main() {
         assert.ok(u);
         assert.deepStrictEqual([u.currentPrice, u.bidCount, u.bid.amount], [1_050_000, 1, 1_050_000]);
         assert.strictEqual(await outside, null);
+      });
+      await step('serverTime: có trong auction:update (bid, paused, resumed) và auction:ended', async () => {
+        const { auctionId: as } = await mkAuction(seller);
+        const sA = await connect(tok(A, 'account', 'bidder'));
+        await joinRoom(sA, as);
+        await engine.joinAuction({ bidderId: B, auctionId: as });
+        const bid = waitFor(sA, 'auction:update', isFor(as, 'bid'));
+        await engine.placeBid({ bidderId: B, auctionId: as, increment: 50_000 });
+        assertServerTime(await bid, 'auction:update bid');
+        const paused = waitFor(sA, 'auction:update', isFor(as, 'paused'));
+        const f = await flag(as, 'paused');
+        assertServerTime(await paused, 'auction:update paused');
+        const resumed = waitFor(sA, 'auction:update', isFor(as, 'resumed'));
+        await pool.query(`UPDATE flagged_auctions SET status = 'safe' WHERE id = $1`, [f]);
+        assertServerTime(await resumed, 'auction:update resumed');
+        const ended = waitFor(sA, 'auction:ended', (e) => e.auctionId === String(as));
+        await expire(as);
+        await closedAuction(as);
+        const e = await ended;
+        assertServerTime(e, 'auction:ended');
+        assert.deepStrictEqual([e.auctionId, e.hasWinner], [String(as), true]); // các trường cũ giữ nguyên
       });
       await step('tạm dừng bị ROLLBACK thì không phát sự kiện; chấm dứt phiên đang dừng không phát "resumed"', async () => {
         const { auctionId: as } = await mkAuction(seller);
@@ -1348,6 +1389,7 @@ async function main() {
         const bid = await rest(urlA, 'POST', '/api/bids', tok(P, 'account', 'bidder'), { auctionId: String(am), increment: 50_000 });
         const u = await got;
         assert.ok(u, 'server B không phát auction:update của lượt giá đặt ở server A');
+        assertServerTime(u, 'auction:update qua server B'); // giờ của server B (nơi client nối), không phải server A
         assert.strictEqual(u.currentPrice, bid.currentPrice);
         await sleep(800);
         assert.strictEqual(updates.length, 1, `nhận ${updates.length} lần auction:update (mong 1)`);
