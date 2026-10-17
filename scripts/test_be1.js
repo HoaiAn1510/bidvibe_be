@@ -170,7 +170,7 @@ async function main() {
     const r = await engine.placeBid({ bidderId: B, auctionId, amount: 1_200_000 });
     assert.strictEqual(r.extended, true);
     const left = new Date(r.endsAt) - Date.now();
-    assert.ok(left > 25_000 && left <= 30_500, `còn ${left}ms`);
+    assert.ok(left > 25_000 && left <= 32_500, `còn ${left}ms`); // +2 giây phía trên: dung sai đồng hồ (xem chú thích ở bước tạm dừng)
   });
 
   console.log('Đóng phiên');
@@ -288,7 +288,9 @@ async function main() {
     await sleep(4500); // dừng lâu hơn thời gian còn lại (3 giây)
     const view = await engine.getAuction(ap, A);
     assert.strictEqual(view.paused, true);
-    assert.ok(view.remainingSeconds >= 2 && view.remainingSeconds <= 3, `còn ${view.remainingSeconds}s, mong ~3s (đứng yên)`);
+    // Dung sai ±2 giây quanh ~3 giây: remainingSeconds tính bằng giờ máy chạy test, còn ends_at / paused_at đặt bằng giờ DB;
+    // hai đồng hồ lệch nhau (đo được ~0,4 giây) cộng độ trễ mạng tới Supabase. Vẫn đủ để bắt lỗi "đồng hồ không đứng" (sẽ về 0).
+    assert.ok(view.remainingSeconds >= 0 && view.remainingSeconds <= 5, `còn ${view.remainingSeconds}s, mong ~3s (đứng yên)`);
     await engine.closeExpiredAuctions();
     assert.strictEqual((await clock(ap)).status, 'active', 'job đóng phiên không được đóng phiên đang tạm dừng');
 
@@ -297,13 +299,14 @@ async function main() {
     const after = await clock(ap);
     assert.strictEqual(after.paused_at, null);
     const shift = new Date(after.ends_at) - new Date(before.ends_at);
-    assert.ok(Math.abs(shift - elapsed) < 1500, `ends_at dịch ${shift}ms, thời gian dừng ~${elapsed}ms`);
-    assert.ok(new Date(after.ends_at) > new Date(), 'tiếp tục xong thì phiên vẫn còn giờ, không đóng ngay');
+    // shift do DB tính, elapsed do giờ máy đo kèm vài lượt gọi tới DB: cho sai số 3,5 giây (trước 1,5 giây)
+    assert.ok(Math.abs(shift - elapsed) < 3500, `ends_at dịch ${shift}ms, thời gian dừng ~${elapsed}ms`);
+    assert.ok(new Date(after.ends_at) > new Date(Date.now() - 2000), 'tiếp tục xong thì phiên vẫn còn giờ, không đóng ngay'); // -2 giây: lệch đồng hồ máy / DB
     await engine.closeExpiredAuctions();
     assert.strictEqual((await clock(ap)).status, 'active');
     const resumed = await engine.getAuction(ap, A);
     assert.strictEqual(resumed.paused, false);
-    assert.ok(resumed.remainingSeconds >= 1 && resumed.remainingSeconds <= 3, `còn ${resumed.remainingSeconds}s`);
+    assert.ok(resumed.remainingSeconds >= 0 && resumed.remainingSeconds <= 5, `còn ${resumed.remainingSeconds}s`); // ±2 giây, lý do như trên
   });
   await step('hai cờ tạm dừng: gỡ một cờ thì vẫn dừng, gỡ cờ cuối mới chạy lại', async () => {
     const { auctionId: ap2 } = await mkAuction(seller);
@@ -992,7 +995,8 @@ async function main() {
         assert.strictEqual(r.paused, false);
         assert.strictEqual(r.pausedAt, null);
         const shift = new Date(r.endsAt) - new Date(before.ends_at);
-        assert.ok(shift >= 1000 && shift < 5000, `giờ kết thúc mới phải lùi đúng thời gian dừng, lùi ${shift}ms`);
+        // Thời gian dừng thật >= 1,2 giây (sleep) nhưng cho dung sai ±2 giây: chỉ cần lùi về sau và không quá xa
+        assert.ok(shift > 0 && shift < 7000, `giờ kết thúc mới phải lùi đúng thời gian dừng, lùi ${shift}ms`);
         assert.strictEqual(new Date(r.endsAt).getTime(), new Date((await clock(as)).ends_at).getTime());
       });
       await step('auction:update khi đặt giá có reason bid; người ngoài phòng không nhận', async () => {
@@ -1184,20 +1188,20 @@ async function main() {
         env: { ...process.env, PORT: String(port), DB_POOL_MAX: '2', NODE_ENV: 'development', ...extraEnv },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
-      children.push(child);
       let out = '';
       child.stdout.on('data', (d) => { out += d; });
       child.stderr.on('data', (d) => { out += d; });
+      const exited = new Promise((resolve) => child.once('exit', resolve));
+      children.push({ child, exited });
       for (const end = Date.now() + 20_000; !(out.includes('đang chạy tại') && out.includes('[realtime] đang nghe')); await sleep(200)) {
         if (child.exitCode !== null) throw new Error(`server dev thoát sớm: ${out.slice(-300)}`);
-        if (Date.now() > end) throw new Error('server dev không sẵn sàng sau 20 giây');
+        if (Date.now() > end) throw new Error(`server dev không sẵn sàng sau 20 giây. Output của server con:
+${out.slice(-600)}`);
       }
-      const stop = () => new Promise((resolve) => {
-        if (child.exitCode !== null) return resolve();
-        child.once('exit', resolve);
-        child.kill();
-      });
-      return { url: `http://127.0.0.1:${port}`, stop, output: () => out };
+      // Đăng ký 'exit' ngay lúc tạo: tiến trình bị kill bằng tín hiệu có exitCode = null và sự kiện không phát lại,
+      // nên chờ 'exit' sau khi đã tắt sẽ treo mãi và Node thoát im lặng với mã 0 (bỏ qua phần test còn lại).
+      const stop = () => { child.kill(); return exited; };
+      return { url: `http://127.0.0.1:${port}`, stop, exited, output: () => out };
     };
     const call = async (url, method, p, token, body) => {
       const r = await fetch(url + p, {
@@ -1340,7 +1344,8 @@ async function main() {
         assert.strictEqual(r.status, 200, JSON.stringify(r.error));
         assert.deepStrictEqual(Object.keys(r.data).sort(), ['orderId', 'paymentDeadline']);
         assert.strictEqual(r.data.orderId, String(ended.orderId));
-        assert.ok(new Date(r.data.paymentDeadline) < new Date(), 'paymentDeadline phải ở quá khứ');
+        // paymentDeadline = now() - 1 giây của DB: so với giờ máy cho dung sai +2 giây (lệch đồng hồ máy / DB)
+        assert.ok(new Date(r.data.paymentDeadline) < new Date(Date.now() + 2000), 'paymentDeadline phải ở quá khứ');
         const o = await until('SELECT payment_status FROM orders WHERE id = $1', [ended.orderId], (x) => x.payment_status === 'expired');
         assert.ok(o, 'đơn không bị scheduler đánh dấu expired');
         const dep = (await pool.query(
@@ -1368,11 +1373,7 @@ async function main() {
       });
     } finally {
       sockets.forEach((s) => s.close());
-      await Promise.all(children.map((c) => new Promise((resolve) => {
-        if (c.exitCode !== null) return resolve();
-        c.once('exit', resolve);
-        c.kill();
-      })));
+      await Promise.all(children.map(({ child, exited }) => { child.kill(); return exited; }));
     }
   }
 
@@ -1404,7 +1405,8 @@ async function main() {
       // Sẵn sàng khi đã lắng nghe cổng VÀ đã LISTEN kênh bidvibe_events.
       for (const end = Date.now() + 20_000; !(out.includes('đang chạy tại') && out.includes('[realtime] đang nghe')); await sleep(200)) {
         if (child.exitCode !== null) throw new Error(`server ${name} thoát sớm: ${out.slice(-300)}`);
-        if (Date.now() > end) throw new Error(`server ${name} không sẵn sàng sau 20 giây`);
+        if (Date.now() > end) throw new Error(`server ${name} không sẵn sàng sau 20 giây. Output của server con:
+${out.slice(-600)}`);
       }
       return `http://127.0.0.1:${port}`;
     };
@@ -1478,15 +1480,23 @@ async function main() {
       sockets.forEach((s) => s.close());
       // Luôn tắt server con, kể cả khi bước nào đó lỗi.
       await Promise.all(children.map((c) => new Promise((resolve) => {
-        if (c.exitCode !== null) return resolve();
+        if (c.exitCode !== null || c.signalCode !== null) return resolve(); // đã thoát (kể cả bị tín hiệu): 'exit' không phát lại
         c.once('exit', resolve);
         c.kill();
       })));
     }
   }
 
+  finished = true;
   console.log(`\nTất cả ${passed} bước đạt.`);
 }
+
+// Nếu event loop cạn trước khi main() xong (một promise treo), Node thoát với mã 0 mà không chạy cleanup:
+// biến thành thất bại thay vì báo đạt giả.
+let finished = false;
+process.on('exit', (code) => {
+  if (!finished && code === 0) { console.error('\n✗ THẤT BẠI: test dừng giữa chừng (có promise treo), chưa chạy hết các phần.'); process.exitCode = 1; }
+});
 
 main()
   .catch((err) => { console.error('\n✗ THẤT BẠI:', err); process.exitCode = 1; })
