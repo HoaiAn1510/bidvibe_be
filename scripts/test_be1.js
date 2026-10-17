@@ -1029,6 +1029,62 @@ async function main() {
         assertServerTime(e, 'auction:ended');
         assert.deepStrictEqual([e.auctionId, e.hasWinner], [String(as), true]); // các trường cũ giữ nguyên
       });
+      await step('auction:viewers: đếm theo tài khoản (vào, rời, ngắt kết nối; hai kết nối cùng tài khoản tính 1) và GET /api/auctions/:id có viewers', async () => {
+        const { auctionId: av } = await mkAuction(seller);
+        const sA = await connect(tok(A, 'account', 'bidder'));
+        const sB = await connect(tok(B, 'account', 'bidder'));
+        const sA2 = await connect(tok(A, 'account', 'bidder')); // cùng tài khoản A, kết nối thứ hai
+        const viewersIs = (s, n) => waitFor(s, 'auction:viewers', (v) => v.auctionId === String(av) && v.viewers === n);
+        const restViewers = async () => {
+          const r = await fetch(`${url}/api/auctions/${av}`, { headers: { Authorization: `Bearer ${tok(A, 'account', 'bidder')}` } });
+          const body = await r.json();
+          assert.strictEqual(r.status, 200, JSON.stringify(body.error));
+          return body.data.viewers;
+        };
+        assert.strictEqual(await restViewers(), 0, 'chưa ai vào phòng');
+
+        let w = viewersIs(sA, 1);
+        sA.emit('auction:join', String(av));
+        const first = await w;
+        assert.deepStrictEqual(Object.keys(first).sort(), ['auctionId', 'viewers']); // payload đúng hai trường
+        assert.strictEqual(typeof first.viewers, 'number');
+
+        w = viewersIs(sA, 2);
+        const wB = viewersIs(sB, 2);
+        sB.emit('auction:join', av); // số (không phải chuỗi) vẫn vào đúng phòng
+        assert.ok(await w, 'A không nhận viewers = 2 khi B vào');
+        assert.ok(await wB, 'B không nhận viewers = 2 khi tự vào');
+        assert.strictEqual(await restViewers(), 2);
+
+        // Cùng tài khoản mở thêm kết nối: vẫn tính 1.
+        const dup = waitFor(sA, 'auction:viewers', (v) => v.auctionId === String(av), 1500);
+        sA2.emit('auction:join', String(av));
+        const d = await dup; // sự kiện vẫn được phát nhưng số không đổi
+        assert.ok(d && d.viewers === 2, `A mở 2 kết nối: mong viewers 2, nhận ${d && d.viewers}`);
+        assert.strictEqual(await restViewers(), 2);
+
+        w = viewersIs(sA, 1);
+        sB.emit('auction:leave', String(av));
+        assert.ok(await w, 'A không nhận viewers = 1 khi B rời');
+        assert.strictEqual(await restViewers(), 1);
+
+        // B vào lại rồi ngắt kết nối (đóng socket): các socket còn lại nhận số mới.
+        w = viewersIs(sA, 2);
+        sB.emit('auction:join', String(av));
+        assert.ok(await w);
+        w = viewersIs(sA, 1);
+        sB.close();
+        assert.ok(await w, 'A không nhận viewers = 1 khi B ngắt kết nối');
+        assert.strictEqual(await restViewers(), 1);
+
+        // A có hai kết nối: đóng một thì vẫn còn 1 người xem; đóng nốt thì 0.
+        sA.close();
+        await sleep(500);
+        assert.strictEqual(await restViewers(), 1, 'A còn một kết nối trong phòng');
+        sA2.close();
+        await sleep(500);
+        assert.strictEqual(await restViewers(), 0);
+      });
       await step('tạm dừng bị ROLLBACK thì không phát sự kiện; chấm dứt phiên đang dừng không phát "resumed"', async () => {
         const { auctionId: as } = await mkAuction(seller);
         const sA = await connect(tok(A, 'account', 'bidder'));
@@ -1043,8 +1099,9 @@ async function main() {
         assert.strictEqual(await none, null, 'giao dịch ROLLBACK không được phát auction:update');
         assert.strictEqual((await clock(as)).paused_at, null);
 
+        const pausedEv = waitFor(sA, 'auction:update', isFor(as, 'paused')); // đăng ký trước khi tạm dừng, kẻo lỡ sự kiện đến sớm
         const f = await flag(as, 'paused');
-        assert.ok(await waitFor(sA, 'auction:update', isFor(as, 'paused')));
+        assert.ok(await pausedEv);
         const resumed = waitFor(sA, 'auction:update', isFor(as, 'resumed'), 2000);
         const ended = waitFor(sA, 'auction:ended', (e) => e.auctionId === String(as));
         const done = await tx(async (cl) => {
@@ -1053,7 +1110,9 @@ async function main() {
           return d;
         });
         done.emit();
-        assert.deepStrictEqual(await ended, { auctionId: String(as), hasWinner: false, cancelled: true });
+        const { serverTime, ...endedFields } = await ended; // serverTime kiểm ở bước riêng; các trường cũ giữ nguyên
+        assertServerTime({ serverTime }, 'auction:ended huỷ phiên');
+        assert.deepStrictEqual(endedFields, { auctionId: String(as), hasWinner: false, cancelled: true });
         assert.strictEqual(await resumed, null);
       });
 

@@ -473,7 +473,7 @@ Mọi vai trò. Cùng cấu trúc như một phần tử ở trên, thêm `photo
 "bids": [ { "id": "23", "who": "V***", "amount": 4500000, "at": "2026-10-07T14:32:47.955Z", "me": false } ]
 ```
 
-Thêm `serverTime` ở cấp `data` (giờ server lúc trả, ISO 8601 UTC) như ở danh sách; cũng có trong mọi `auction:update` và `auction:ended` ([`socket.md`](socket.md)).
+Thêm `viewers`: số người đang xem phiên (số tài khoản khác nhau đang ở phòng Socket.io của phiên, một tài khoản nhiều kết nối chỉ tính 1; đếm trên backend nhận request, cùng cách đếm với sự kiện `auction:viewers` trong [`socket.md`](socket.md)). Và `serverTime` ở cấp `data` (giờ server lúc trả, ISO 8601 UTC) như ở danh sách; cũng có trong mọi `auction:update` và `auction:ended` ([`socket.md`](socket.md)).
 
 Màn chi tiết dùng: `photos`, `description`, `seller`, `bids`; cọc của mình: `joined`, `myDepositStatus`, `myDeposit`, `depositRequired`, `depositAffordable`; dẫn đầu: `leading`; giá nhỏ nhất đặt tiếp: `minNextBid`.
 

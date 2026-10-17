@@ -179,6 +179,7 @@ Danh sách đầy đủ: [`api.md` mục 19](api.md#19-mã-lỗi-nghiệp-vụ).
 | Sự kiện (server → app) | Khi nào | Làm gì |
 |---|---|---|
 | `auction:update` | `reason: "bid"` có lượt giá mới; `"paused"` / `"resumed"` Admin tạm dừng / tiếp tục; `"dev_time"` đổi giờ kết thúc bằng [API dev](#6b-test-nhanh-thắng-phiên-và-quá-hạn-thanh-toán) | Cập nhật giá, số lượt, `endsAt` / `remainingSeconds`, trạng thái dừng |
+| `auction:viewers` | Có người vào / rời / ngắt kết nối phòng phiên: `{ auctionId, viewers }` | Cập nhật "N người đang xem". Đếm theo tài khoản và theo từng backend ([`socket.md`](socket.md)); số ban đầu lấy từ `viewers` của `GET /api/auctions/:id` |
 | `auction:ended` | Phiên hết giờ (`hasWinner`) hoặc bị huỷ (`cancelled: true`) | Gọi lại [`GET /api/auctions/:id`](api.md#get-apiauctionsid) để biết `won`. Server đóng phiên trong vòng 5 giây sau giờ kết thúc; nếu đồng hồ về 0 mà chưa nhận sự kiện (mất mạng, chưa vào phòng) thì vài giây sau tự gọi lại `GET /api/auctions/:id` |
 | `notification:new` | Có thông báo mới (`outbid`, `win`, `order`...) | Tăng badge, hiện snackbar |
 | `account:disconnected` | Admin khoá tài khoản (ngay trước khi server ngắt) | Hiện `message`, đăng xuất, **không** tự kết nối lại |

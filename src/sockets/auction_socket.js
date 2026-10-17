@@ -1,11 +1,13 @@
 const jwt = require('jsonwebtoken');
 const env = require('../config/env');
 const { pool } = require('../config/db');
+const { emitViewers } = require('./viewers');
 
 // Sự kiện server -> client (chi tiết: docs/socket.md):
 //   auction:update        lượt giá mới (reason 'bid'), tạm dừng / tiếp tục (reason 'paused' | 'resumed'), hoặc đổi giờ kết thúc
 //                         bằng API dev (reason 'dev_time', chỉ khi DEV_TOOLS=true)
 //   auction:ended         { auctionId, hasWinner, cancelled? }
+//   auction:viewers       { auctionId, viewers }  số tài khoản đang xem phiên (khi có người vào / rời / ngắt)
 //   notification:new      { id, type, title, createdAt }   (phòng user:<id>)
 //   account:disconnected  { code, message }  ngay trước khi server ngắt kết nối (disconnectAccount)
 // Sự kiện client -> server:
@@ -45,8 +47,21 @@ module.exports = (io) => {
     // user:<id> nhận thông báo (bị vượt giá, thắng phiên...); ops:<id> chỉ để ngắt khi bị khoá.
     socket.join(accountRoom(kind, id));
 
-    socket.on('auction:join', (auctionId) => socket.join(`auction:${auctionId}`));
-    socket.on('auction:leave', (auctionId) => socket.leave(`auction:${auctionId}`));
+    // Vào / rời phòng phiên thì phát lại số người đang xem (auction:viewers) cho cả phòng.
+    socket.on('auction:join', async (auctionId) => {
+      await socket.join(`auction:${auctionId}`);
+      emitViewers(auctionId);
+    });
+    socket.on('auction:leave', async (auctionId) => {
+      await socket.leave(`auction:${auctionId}`);
+      emitViewers(auctionId);
+    });
+    // 'disconnecting' (chưa rời phòng) để biết socket đang ở những phòng phiên nào; loại chính nó khi đếm.
+    socket.on('disconnecting', () => {
+      for (const room of socket.rooms) {
+        if (room.startsWith('auction:')) emitViewers(room.slice('auction:'.length), { excludeSocketId: socket.id });
+      }
+    });
   });
 };
 

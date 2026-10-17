@@ -3,6 +3,7 @@ const { requireAuth, requireRole } = require('../middleware/auth');
 const engine = require('../services/auction_engine');
 const fraud = require('../services/fraud_detection');
 const validate = require('../utils/validate');
+const { countViewers } = require('../sockets/viewers');
 const { ok, idParam, pageParams } = require('./_http');
 
 const router = express.Router();
@@ -26,7 +27,8 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   const auction = await engine.getAuction(idParam(req.params.id), viewerOf(req));
-  ok(res, { ...auction, serverTime: new Date().toISOString() });
+  // viewers: số tài khoản đang xem phiên qua Socket.io (đếm trên backend này, như sự kiện auction:viewers)
+  ok(res, { ...auction, viewers: await countViewers(auction.id), serverTime: new Date().toISOString() });
 });
 
 // Đặt cọc tham gia phiên
