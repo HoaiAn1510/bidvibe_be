@@ -33,6 +33,14 @@ const fmtTime = (t) => {
   const p = Object.fromEntries(VN_TIME.formatToParts(new Date(t)).map((x) => [x.type, x.value]));
   return `${p.hour}:${p.minute} ${p.day}/${p.month}`;
 };
+// Có năm, cho mốc xa hơn vài ngày: "14:05 25/10/2026"
+const VN_FULL = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Ho_Chi_Minh', hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric', hourCycle: 'h23',
+});
+const fmtDateTime = (t) => {
+  const p = Object.fromEntries(VN_FULL.formatToParts(new Date(t)).map((x) => [x.type, x.value]));
+  return `${p.hour}:${p.minute} ${p.day}/${p.month}/${p.year}`;
+};
 
 // Nội dung thông báo cho người thắng (type 'win'). notifications chỉ có type + title nên mã đơn và
 // hạn thanh toán nằm trong title; app mở đơn qua GET /api/orders/mine.
@@ -121,6 +129,15 @@ async function joinAuction({ bidderId, auctionId }) {
     const a = await auctionModel.lockById(client, auctionId);
     if (!a) throw new AppError('Không tìm thấy phiên đấu giá', 404, 'NOT_FOUND');
     assertBiddable(a);
+
+    // Người hay bỏ đơn (2 cọc bị tịch thu trong 30 ngày) bị chặn đặt cọc phiên mới 7 ngày: xem wallet_service.JOIN_BLOCK.
+    const blockedUntil = await walletService.joinBlockedUntil(client, bidderId);
+    if (blockedUntil) {
+      throw new AppError(
+        `Bạn tạm thời không được tham gia phiên mới vì đã bỏ thanh toán nhiều lần. Bạn có thể tham gia lại từ ${fmtDateTime(blockedUntil)} (giờ Việt Nam).`,
+        403, 'JOIN_BLOCKED',
+      );
+    }
 
     const amount = Number(a.deposit_required);
     let deposit;

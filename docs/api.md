@@ -508,7 +508,7 @@ Chỉ `bidder`. Không có body. Đặt cọc tham gia phiên: giữ `depositReq
 { "depositId": "388", "deposit": 100000, "balanceAfter": 4900000 }
 ```
 
-Lỗi: `402 INSUFFICIENT_FUNDS`, `404 NOT_FOUND`, `409 ALREADY_JOINED`, `409 AUCTION_ENDED`, `409 AUCTION_PAUSED`.
+Lỗi: `402 INSUFFICIENT_FUNDS`, `403 JOIN_BLOCKED`, `404 NOT_FOUND`, `409 ALREADY_JOINED`, `409 AUCTION_ENDED`, `409 AUCTION_PAUSED`.
 
 Cọc được hoàn tự động khi thua phiên hoặc phiên bị huỷ; người thắng được trừ cọc vào số tiền thanh toán; quá hạn thanh toán 24 giờ thì mất cọc.
 
@@ -548,8 +548,10 @@ Chỉ `bidder`.
 
 ```json
 // 200 — balance: tiền dùng được; held: cọc đang giữ (không nằm trong balance); available = balance
-{ "balance": 19530000, "held": 0, "available": 19530000 }
+{ "balance": 19530000, "held": 0, "available": 19530000, "joinBlockedUntil": null }
 ```
+
+`joinBlockedUntil`: `null` nếu được tham gia bình thường; nếu người mua bị **tạm chặn đặt cọc tham gia phiên mới** thì là thời điểm được tham gia lại (ISO 8601 UTC), ví dụ `"2026-10-25T07:05:00.000Z"`. Luật phạt người hay bỏ đơn: từ **2 lần bị tịch thu cọc** (quá hạn thanh toán 24 giờ) trong **30 ngày** gần nhất thì bị chặn đến **7 ngày** sau lần tịch thu gần nhất; xem lỗi `403 JOIN_BLOCKED` ở [`POST /api/auctions/:id/join`](#post-apiauctionsidjoin). Chỉ chặn đặt cọc phiên mới; phiên đã cọc trước đó vẫn đặt giá được. Trường này cũng có trong phản hồi `POST /api/wallet/topup`.
 
 ### `GET /api/wallet/transactions`
 
@@ -1227,6 +1229,7 @@ Gom từ mọi `AppError` trong code. "Gợi ý hiển thị" khi muốn khác `
 | `INSUFFICIENT_FUNDS` | 402 | Ví không đủ tiền cọc / thanh toán | Gợi ý nạp tiền ([ví](#post-apiwallettopup)) |
 | `FORBIDDEN` | 403 | Sai vai trò, hoặc tài khoản `ops` dùng tính năng chỉ cho người dùng | Ẩn tính năng theo vai trò |
 | `ACCOUNT_SUSPENDED` | 403 | Tài khoản bị khoá | Đăng xuất, báo "Tài khoản đã bị khoá" |
+| `JOIN_BLOCKED` | 403 | Người mua bị tạm chặn đặt cọc phiên mới (từ 2 lần bị tịch thu cọc trong 30 ngày, chặn 7 ngày). `message` có ngày giờ được tham gia lại (giờ Việt Nam) | Hiện `message`; ẩn nút đặt cọc khi `joinBlockedUntil` của `GET /api/wallet` khác `null` |
 | `DEPOSIT_REQUIRED` | 403 | Đặt giá khi chưa cọc | Mở bước đặt cọc |
 | `NOT_FOUND` | 404 | Không tồn tại **hoặc không thuộc về bạn**; route sai | Quay lại danh sách |
 | `PAYLOAD_TOO_LARGE` | 413 | Body quá lớn | Lỗi lập trình |

@@ -8,14 +8,35 @@ const walletModel = require('../models/wallet.model');
 
 const MAX_TOPUP = 100_000_000;
 
+// Phạt người hay bỏ đơn: từ `minForfeits` lần bị tịch thu cọc (quá hạn thanh toán) trong `windowDays` ngày gần nhất thì
+// không được đặt cọc tham gia phiên mới đến `blockDays` ngày sau lần tịch thu gần nhất. Chặn lặp lại việc cọc rồi bỏ đơn.
+const JOIN_BLOCK = { minForfeits: 2, windowDays: 30, blockDays: 7 };
+
 const insufficient = (need, have) => new AppError(
   `Số dư chưa đủ (cần thêm ${need - have} VND)`, 402, 'INSUFFICIENT_FUNDS',
 );
 
+// Thời điểm được tham gia phiên mới trở lại (Date), hoặc null nếu không bị chặn. Mốc thời gian lấy từ
+// wallet_transactions loại 'deposit_forfeit' (created_at = lúc tịch thu): auction_deposits chỉ có created_at lúc đặt cọc
+// nên không biết lúc tịch thu. Mọi so sánh theo giờ DATABASE.
+async function joinBlockedUntil(executor, bidderId) {
+  const { rows } = await (executor || pool).query(
+    `SELECT count(*)::int AS n,
+            max(created_at) + ($3 * interval '1 day') AS until,
+            (max(created_at) + ($3 * interval '1 day')) > clock_timestamp() AS active
+     FROM wallet_transactions
+     WHERE bidder_id = $1 AND kind = 'deposit_forfeit'
+       AND created_at > clock_timestamp() - ($2 * interval '1 day')`,
+    [bidderId, JOIN_BLOCK.windowDays, JOIN_BLOCK.blockDays],
+  );
+  const r = rows[0];
+  return r.n >= JOIN_BLOCK.minForfeits && r.active ? new Date(r.until) : null;
+}
+
 async function getWallet(bidderId) {
   const w = await walletModel.getBalances(pool, bidderId);
   if (!w) throw new AppError('Không tìm thấy ví của người mua', 404, 'NOT_FOUND');
-  return { balance: w.balance, held: w.held, available: w.balance };
+  return { balance: w.balance, held: w.held, available: w.balance, joinBlockedUntil: await joinBlockedUntil(pool, bidderId) };
 }
 
 async function topUp(client, { bidderId, amount }) {
@@ -88,5 +109,5 @@ async function refund(client, { bidderId, amount, auctionId = null }) {
 }
 
 module.exports = {
-  getWallet, topUp, holdDeposit, releaseDeposit, forfeitDeposit, payOrder, refund,
+  JOIN_BLOCK, joinBlockedUntil, getWallet, topUp, holdDeposit, releaseDeposit, forfeitDeposit, payOrder, refund,
 };

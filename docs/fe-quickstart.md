@@ -110,7 +110,7 @@ Ký hiệu: → gọi theo thứ tự; (socket) cần Socket.io.
 | Đặt cọc | [`POST /api/auctions/:id/join`](api.md#post-apiauctionsidjoin) | Nút hiện khi `joined == false`. `402` → mở màn nạp ví |
 | Đặt giá | [`POST /api/bids`](api.md#post-apibids) | Gửi `amount` **hoặc** `increment`. Giá mới về qua (socket) `auction:update` |
 | Báo cáo phiên | [`POST /api/auctions/:id/report`](api.md#post-apiauctionsidreport) | |
-| Ví | [`GET /api/wallet`](api.md#get-apiwallet), [`GET /api/wallet/transactions`](api.md#get-apiwallettransactions), [`POST /api/wallet/topup`](api.md#post-apiwallettopup) | |
+| Ví | [`GET /api/wallet`](api.md#get-apiwallet) (có `joinBlockedUntil`: khác `null` thì hiện cảnh báo "Bạn bị tạm chặn tham gia phiên mới đến <ngày giờ>" và khoá nút đặt cọc), [`GET /api/wallet/transactions`](api.md#get-apiwallettransactions), [`POST /api/wallet/topup`](api.md#post-apiwallettopup) | |
 | Đơn hàng (người mua) | [`GET /api/orders/mine`](api.md#get-apiordersmine) → [`GET /api/orders/:id`](api.md#get-apiordersid) → [`POST /api/orders/:id/pay`](api.md#post-apiordersidpay) | Đếm ngược tới `paymentDeadline` (24 giờ) |
 | Chọn địa chỉ | [`GET /api/addresses`](api.md#get-apiaddresses) (chưa có thì [`POST /api/addresses`](api.md#post-apiaddresses)) → [`POST /api/orders/:id/shipping-address`](api.md#post-apiordersidshipping-address) | Nên làm ngay sau khi thắng / thanh toán; kho không gửi được đơn chưa có địa chỉ |
 | Theo dõi giao hàng | [`GET /api/orders/:id/tracking`](api.md#get-apiordersidtracking) → [`POST /api/orders/:id/confirm-delivery`](api.md#post-apiordersidconfirm-delivery) | Hiện `stage`, `events`; nút "Đã nhận hàng" khi `stage == delivered`. Có vấn đề → [`POST /api/disputes`](api.md#post-apidisputes) |
@@ -163,6 +163,7 @@ Lỗi hay gặp:
 | Gọi route sai vai trò | `FORBIDDEN` (403) | Lỗi giao diện: ẩn tính năng theo `role` |
 | Thao tác sai thứ tự (ví dụ sửa tin đang chờ thẩm định) | `INVALID_STATE` (409) | Hiện `message`, tải lại dữ liệu |
 | Đặt giá thấp | `BID_TOO_LOW` (400) | `message` có giá tối thiểu |
+| Người hay bỏ đơn bị chặn đặt cọc phiên mới | `JOIN_BLOCKED` (403) | Hiện `message` (đã có ngày giờ được tham gia lại, giờ Việt Nam) |
 | Đặt giá liên tiếp quá nhanh (dưới 1 giây sau lượt trước của cùng người) | `BID_TOO_FAST` (429) | Hiện `message`; khoá nút đặt giá khoảng 1 giây sau mỗi lần bấm để không dính lỗi này |
 | Phiên đang tạm dừng | `AUCTION_PAUSED` (409) | Tải lại phiên, đồng hồ đứng yên |
 | Kho gửi đơn chưa có địa chỉ | `ORDER_NO_ADDRESS` (409) | Màn kho: báo chờ người mua chọn địa chỉ |

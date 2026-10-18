@@ -1391,6 +1391,97 @@ async function main() {
     }
   }
 
+  console.log('Phạt người hay bỏ đơn (2 cọc bị tịch thu trong 30 ngày: chặn tham gia 7 ngày)');
+  {
+    const jwt = require('jsonwebtoken');
+    const env = require('../src/config/env');
+    const { server } = require('../src/app');
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    const base = `http://127.0.0.1:${server.address().port}/api`;
+    const tokOf = (id) => jwt.sign({ sub: String(id), kind: 'account', role: 'bidder' }, env.jwtSecret, { expiresIn: '5m' });
+    const walletApi = async (id) => {
+      const r = await fetch(`${base}/wallet`, { headers: { Authorization: `Bearer ${tokOf(id)}` } });
+      const body = await r.json();
+      assert.strictEqual(r.status, 200, JSON.stringify(body.error));
+      return body.data;
+    };
+    // Một lần bỏ đơn: cọc một phiên rồi bị tịch thu qua đúng luồng ví (deposit_forfeit) và đánh dấu cọc forfeited.
+    const forfeitOnce = async (id) => {
+      const { auctionId } = await mkAuction(seller);
+      const j = await engine.joinAuction({ bidderId: id, auctionId });
+      await pool.query(`UPDATE auction_deposits SET status = 'forfeited' WHERE auction_id = $1 AND bidder_id = $2`, [auctionId, id]);
+      await tx((c) => walletService.forfeitDeposit(c, { bidderId: id, auctionId, amount: j.deposit }));
+    };
+    const freshAuction = async () => (await mkAuction(seller)).auctionId;
+    const ageForfeits = (id, interval) => pool.query(
+      `UPDATE wallet_transactions SET created_at = clock_timestamp() - $2::interval WHERE bidder_id = $1 AND kind = 'deposit_forfeit'`, [id, interval]);
+    const latestForfeit = async (id) => new Date((await pool.query(
+      `SELECT max(created_at) AS t FROM wallet_transactions WHERE bidder_id = $1 AND kind = 'deposit_forfeit'`, [id])).rows[0].t);
+    // Giờ Việt Nam (UTC+7, không có giờ mùa hè) dạng "HH:mm dd/MM/yyyy" như trong message.
+    const vnText = (d) => {
+      const v = new Date(d.getTime() + 7 * 3600_000);
+      const z = (n) => String(n).padStart(2, '0');
+      return `${z(v.getUTCHours())}:${z(v.getUTCMinutes())} ${z(v.getUTCDate())}/${z(v.getUTCMonth() + 1)}/${v.getUTCFullYear()}`;
+    };
+    try {
+      const Z = await mkAccount('bidder', 'Skipper');
+      await tx((c) => walletService.topUp(c, { bidderId: Z, amount: 5_000_000 }));
+
+      await step('chưa bỏ đơn lần nào, và mới 1 lần bị tịch thu cọc: vẫn tham gia được, joinBlockedUntil = null', async () => {
+        assert.strictEqual((await walletApi(Z)).joinBlockedUntil, null);
+        await forfeitOnce(Z);
+        assert.strictEqual((await walletApi(Z)).joinBlockedUntil, null);
+        assert.ok((await engine.joinAuction({ bidderId: Z, auctionId: await freshAuction() })).depositId);
+      });
+      await step('2 lần tịch thu trong 30 ngày: 403 JOIN_BLOCKED, message có ngày giờ được tham gia lại (giờ Việt Nam); GET /api/wallet có joinBlockedUntil', async () => {
+        await forfeitOnce(Z);
+        const until = new Date((await latestForfeit(Z)).getTime() + 7 * 86400_000);
+        const target = await freshAuction();
+        const before = (await wallet(Z));
+        await assert.rejects(engine.joinAuction({ bidderId: Z, auctionId: target }), (e) => {
+          assert.strictEqual(e.code, 'JOIN_BLOCKED');
+          assert.strictEqual(e.statusCode, 403);
+          assert.ok(e.message.includes(vnText(until)), `${e.message} / ${vnText(until)}`);
+          return true;
+        });
+        assert.deepStrictEqual(await wallet(Z), before, 'bị chặn thì không giữ cọc');
+        assert.strictEqual((await pool.query('SELECT 1 FROM auction_deposits WHERE auction_id = $1 AND bidder_id = $2', [target, Z])).rowCount, 0);
+        const w = await walletApi(Z);
+        assert.strictEqual(new Date(w.joinBlockedUntil).getTime(), until.getTime());
+        assert.deepStrictEqual(Object.keys(w).sort(), ['available', 'balance', 'held', 'joinBlockedUntil']); // chỉ thêm trường mới
+      });
+      await step('hết 7 ngày kể từ lần tịch thu gần nhất thì tham gia lại được (lần tịch thu cách đây 8 ngày)', async () => {
+        await ageForfeits(Z, '8 days');
+        assert.strictEqual((await walletApi(Z)).joinBlockedUntil, null);
+        assert.ok((await engine.joinAuction({ bidderId: Z, auctionId: await freshAuction() })).depositId);
+      });
+      await step('lần tịch thu cũ hơn 30 ngày không tính: 1 cũ (40 ngày) + 1 mới thì không bị chặn', async () => {
+        const Z2 = await mkAccount('bidder', 'SkipperTwo');
+        await tx((c) => walletService.topUp(c, { bidderId: Z2, amount: 5_000_000 }));
+        await forfeitOnce(Z2);
+        await ageForfeits(Z2, '40 days');
+        await forfeitOnce(Z2);
+        assert.strictEqual((await walletApi(Z2)).joinBlockedUntil, null);
+        assert.ok((await engine.joinAuction({ bidderId: Z2, auctionId: await freshAuction() })).depositId);
+      });
+      await step('2 lần trong 30 ngày (29 ngày trước và hôm qua): bị chặn đến 7 ngày sau lần gần nhất', async () => {
+        const Z3 = await mkAccount('bidder', 'SkipperThree');
+        await tx((c) => walletService.topUp(c, { bidderId: Z3, amount: 5_000_000 }));
+        await forfeitOnce(Z3);
+        await ageForfeits(Z3, '29 days');
+        await forfeitOnce(Z3);
+        await pool.query(
+          `UPDATE wallet_transactions SET created_at = clock_timestamp() - interval '1 day'
+           WHERE id = (SELECT max(id) FROM wallet_transactions WHERE bidder_id = $1 AND kind = 'deposit_forfeit')`, [Z3]);
+        const until = new Date((await latestForfeit(Z3)).getTime() + 7 * 86400_000);
+        await rejects(engine.joinAuction({ bidderId: Z3, auctionId: await freshAuction() }), 'JOIN_BLOCKED');
+        assert.strictEqual(new Date((await walletApi(Z3)).joinBlockedUntil).getTime(), until.getTime());
+      });
+    } finally {
+      await new Promise((res) => server.close(res));
+    }
+  }
+
   console.log('API dev /api/dev (DEV_TOOLS): tắt thì 404, bật thì rút ngắn phiên và cho đơn quá hạn');
   {
     const { spawn } = require('child_process');
