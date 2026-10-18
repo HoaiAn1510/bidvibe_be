@@ -325,7 +325,7 @@ Giới hạn hiện tại:
 |---|---|---|---|
 | Thời lượng phiên | `listings.duration_hours` (1–336 giờ) | `createAuctionForListing` (BE1) | Có |
 | Chống chốt phút chót | Đặt giá khi còn ≤ 30 giây thì `ends_at` = lúc đặt + 30 giây | `SNIPE_WINDOW_MS`, `auction_engine.js` | Có |
-| Quét phiên hết giờ | Mỗi 5 giây, bỏ qua phiên đang tạm dừng | `scheduler.js` → `closeExpiredAuctions` (BE1) | Có |
+| Quét phiên hết giờ | Mỗi 5 giây, bỏ qua phiên đang tạm dừng. Nhiều backend cùng database: mỗi lượt lấy khoá advisory, chỉ backend lấy được mới làm | `scheduler.js` → `closeExpiredAuctions` (BE1) | Có |
 | Tạm dừng phiên | Đồng hồ đứng yên; tiếp tục thì `ends_at` += thời gian đã dừng | Trigger `sync_auction_pause` (migration 006), `auctions.paused_at` | Có |
 | Hạn thanh toán | Lúc thắng + 24 giờ | `PAYMENT_WINDOW_MS`, `auction_engine.js` | Có |
 | Quét đơn quá hạn thanh toán | Mỗi 5 giây | `scheduler.js` → `processPaymentTimeouts` (BE1) | Có |

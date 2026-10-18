@@ -169,6 +169,7 @@ Hai domain nối nhau qua các điểm sau, cần tôn trọng:
 - **Tạo phiên đấu giá:** khi Thẩm định duyệt một tin đăng, BE2 gọi một hàm do BE1 cung cấp để sinh `auctions`; BE2 không tự ghi vào bảng `auctions`.
 - **Đơn hàng (`orders`):** BE1 tạo khi phiên kết thúc; BE2 đọc và cập nhật phần kho, giao hàng, giải ngân. Địa chỉ giao hàng (`orders.shipping_address_id`) do người mua chọn qua API của BE2 (`POST /api/orders/:id/shipping-address`), luồng thanh toán của BE1 không đổi; kho không gửi được hàng khi đơn chưa có địa chỉ (`409 ORDER_NO_ADDRESS`).
 - **Đăng nhập:** `auth.*` do BE2 phụ trách. Bidder / Seller đăng nhập qua `accounts.password_hash`, Thẩm định / Kho vận / Admin qua `ops_accounts.password_hash` (thêm ở migration `003`); tài khoản ops do Admin tạo qua `POST /api/admin/ops-accounts`.
+- **Scheduler chỉ một backend làm việc tại một thời điểm:** mỗi lượt tick (5 giây) lấy khoá advisory `pg_try_advisory_lock(0x424944565343)` trên một client của pool; không lấy được (backend khác đang chạy lượt của họ) thì bỏ lượt, xong thì `pg_advisory_unlock` rồi trả client. Khoá phiên tự nhả khi kết nối đóng, nên backend giữ khoá bị tắt thì lượt sau backend khác làm tiếp. Log một dòng khi backend bắt đầu / thôi làm "scheduler chính" (không log mỗi 5 giây). Mỗi lượt tick tốn thêm 1 kết nối trong pool lúc chạy (người làm app đặt `DB_POOL_MAX=2` vẫn đủ).
 - **Tự giải ngân:** job của BE2 (`payout_service.releaseOverduePayouts`) chạy chung vòng `scheduler.js` của BE1, tắt bằng `AUTO_PAYOUT_ENABLED=false`.
 
 ## Tài liệu
