@@ -3,7 +3,8 @@ const { maskName } = require('./auction.model');
 
 async function insert(client, { auctionId, bidderId, amount }) {
   const { rows } = await client.query(
-    `INSERT INTO bids (auction_id, bidder_id, amount) VALUES ($1, $2, $3)
+    // created_at = giờ DB lúc ghi (không phải lúc BEGIN) để giới hạn tốc độ đặt giá tính đúng khoảng cách giữa hai lượt
+    `INSERT INTO bids (auction_id, bidder_id, amount, created_at) VALUES ($1, $2, $3, clock_timestamp())
      RETURNING id, created_at`,
     [auctionId, bidderId, amount],
   );

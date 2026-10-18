@@ -7,6 +7,10 @@ function maskName(fullName) {
   return `${last[0].toUpperCase()}***`;
 }
 
+// Phiên đang tạm dừng: có paused_at (trigger migration 006) hoặc còn cờ 'paused'.
+const PAUSED_SQL = `(a.paused_at IS NOT NULL
+           OR EXISTS (SELECT 1 FROM flagged_auctions f WHERE f.auction_id = a.id AND f.status = 'paused'))`;
+
 const SELECT_AUCTION = `
   SELECT a.id, a.listing_id, a.current_price, a.bid_step, a.deposit_required,
          a.starts_at, a.ends_at, a.status, a.winner_id, a.bid_count, a.paused_at,
@@ -14,8 +18,14 @@ const SELECT_AUCTION = `
          c.code AS category,
          s.store_name, s.rating, sa.full_name AS seller_full_name,
          (SELECT url FROM listing_photos p WHERE p.listing_id = l.id ORDER BY p.order_index, p.id LIMIT 1) AS cover_url,
-         (a.paused_at IS NOT NULL
-           OR EXISTS (SELECT 1 FROM flagged_auctions f WHERE f.auction_id = a.id AND f.status = 'paused')) AS paused,
+         ${PAUSED_SQL} AS paused,
+         -- Mọi mốc thời gian tính theo giờ DATABASE (clock_timestamp), không theo giờ máy chạy backend.
+         -- Đang tạm dừng thì đồng hồ đứng ở paused_at (ends_at được cộng bù khi tiếp tục).
+         CASE WHEN a.status = 'active'
+              THEN GREATEST(ceil(extract(epoch FROM (a.ends_at - CASE WHEN ${PAUSED_SQL} AND a.paused_at IS NOT NULL
+                                                                      THEN a.paused_at ELSE clock_timestamp() END)))::int, 0)
+              ELSE 0 END AS remaining_seconds,
+         (a.ends_at > clock_timestamp()) AS before_end,
          EXISTS (SELECT 1 FROM flagged_auctions f WHERE f.auction_id = a.id AND f.status = 'terminated') AS terminated,
          (SELECT b.bidder_id FROM bids b WHERE b.auction_id = a.id ORDER BY b.id DESC LIMIT 1) AS leader_id,
          (SELECT max(b.amount) FROM bids b WHERE b.auction_id = a.id AND b.bidder_id = $1::bigint) AS my_bid,
@@ -32,11 +42,7 @@ const SELECT_AUCTION = `
 
 function toView(r, viewerId) {
   const viewer = viewerId == null ? null : String(viewerId);
-  const now = Date.now();
-  const endsAtMs = new Date(r.ends_at).getTime();
-  // Đang tạm dừng thì đồng hồ đứng: còn lại = ends_at - lúc bắt đầu dừng (ends_at được cộng bù khi tiếp tục).
-  const clockMs = r.paused && r.paused_at ? new Date(r.paused_at).getTime() : now;
-  const live = r.status === 'active' && (r.paused || endsAtMs > now);
+  const live = r.status === 'active' && (r.paused || r.before_end);
   return {
     id: r.id,
     listingId: r.listing_id,
@@ -65,8 +71,8 @@ function toView(r, viewerId) {
     isLive: live && !r.paused,
     paused: r.paused,
     pausedAt: r.paused_at,
-    // Giây còn lại của phiên đang diễn ra; đứng yên khi tạm dừng. 0 nếu đã kết thúc.
-    remainingSeconds: r.status === 'active' ? Math.max(Math.ceil((endsAtMs - clockMs) / 1000), 0) : 0,
+    // Giây còn lại của phiên đang diễn ra; đứng yên khi tạm dừng. 0 nếu đã kết thúc. Tính trong SQL theo giờ DB.
+    remainingSeconds: r.remaining_seconds,
     terminated: r.terminated,
     winnerId: r.winner_id,
     // Thông tin riêng của người đang xem
@@ -143,9 +149,11 @@ async function listPhotos(executor, listingId) {
 // Khoá dòng phiên để đặt giá / tham gia / đóng phiên không đè nhau.
 async function lockById(client, auctionId, { skipLocked = false } = {}) {
   const { rows } = await client.query(
+    // expired / seconds_left theo giờ DATABASE (clock_timestamp): hết giờ, và còn bao nhiêu giây (cho chống chốt phút chót).
     `SELECT a.*, l.seller_id, l.title, l.id AS l_id,
-            (a.paused_at IS NOT NULL
-              OR EXISTS (SELECT 1 FROM flagged_auctions f WHERE f.auction_id = a.id AND f.status = 'paused')) AS paused
+            ${PAUSED_SQL} AS paused,
+            (a.ends_at <= clock_timestamp()) AS expired,
+            extract(epoch FROM (a.ends_at - clock_timestamp()))::float8 AS seconds_left
      FROM auctions a JOIN listings l ON l.id = a.listing_id
      WHERE a.id = $1
      FOR UPDATE OF a ${skipLocked ? 'SKIP LOCKED' : ''}`,
@@ -164,12 +172,13 @@ async function findExpiredIds(executor) {
   return rows.map((r) => r.id);
 }
 
-async function insertAuction(client, { listingId, currentPrice, bidStep, depositRequired, startsAt, endsAt }) {
+// startsAt null / bỏ trống: bắt đầu ngay theo giờ DATABASE (now()); ends_at = starts_at + durationHours.
+async function insertAuction(client, { listingId, currentPrice, bidStep, depositRequired, startsAt = null, durationHours }) {
   const { rows } = await client.query(
     `INSERT INTO auctions (listing_id, current_price, bid_step, deposit_required, starts_at, ends_at)
-     VALUES ($1, $2, $3, $4, $5, $6)
+     VALUES ($1, $2, $3, $4, COALESCE($5::timestamptz, now()), COALESCE($5::timestamptz, now()) + ($6 * interval '1 hour'))
      RETURNING id`,
-    [listingId, currentPrice, bidStep, depositRequired, startsAt, endsAt],
+    [listingId, currentPrice, bidStep, depositRequired, startsAt, durationHours],
   );
   return rows[0].id;
 }
