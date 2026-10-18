@@ -1482,6 +1482,90 @@ async function main() {
     }
   }
 
+  console.log('Đối soát ví (npm run wallet:check)');
+  {
+    const { spawnSync } = require('child_process');
+    const path = require('path');
+    const { checkWallets, parseArgs } = require('./wallet_check');
+    const bidders = {};
+    for (const n of ['ChkWin', 'ChkQr', 'ChkLose', 'ChkSkip']) {
+      bidders[n] = await mkAccount('bidder', n);
+      await tx((c) => walletService.topUp(c, { bidderId: bidders[n], amount: 5_000_000 }));
+    }
+    const ids = Object.values(bidders);
+    const closedWithWinner = async (winner, loser) => { // trả { auctionId, orderId }
+      const { auctionId } = await mkAuction(seller);
+      await engine.joinAuction({ bidderId: winner, auctionId });
+      if (loser) { await engine.joinAuction({ bidderId: loser, auctionId }); await engine.placeBid({ bidderId: loser, auctionId, increment: 50_000 }); }
+      await engine.placeBid({ bidderId: winner, auctionId, increment: 50_000 });
+      await expire(auctionId);
+      await closedAuction(auctionId);
+      return { auctionId, orderId: (await pool.query('SELECT id FROM orders WHERE auction_id = $1', [auctionId])).rows[0].id };
+    };
+    const probs = async (list = ids) => (await checkWallets({ bidderIds: list })).problems;
+    const cli = (list) => spawnSync(process.execPath, [path.join(__dirname, 'wallet_check.js'), `--bidder-ids=${list.join(',')}`],
+      { encoding: 'utf8', env: { ...process.env, DB_POOL_MAX: '1' } });
+
+    await step('đủ các loại giao dịch (nạp, giữ, hoàn, tịch thu, thanh toán bằng ví và bằng QR, hoàn tiền): không báo lệch', async () => {
+      const w1 = await closedWithWinner(bidders.ChkWin, bidders.ChkLose);            // người thua được hoàn cọc
+      await engine.payOrder({ bidderId: bidders.ChkWin, orderId: w1.orderId, method: 'wallet' });
+      const w2 = await closedWithWinner(bidders.ChkQr, null);
+      await engine.payOrder({ bidderId: bidders.ChkQr, orderId: w2.orderId, method: 'qr' }); // cổng ngoài: ví không bị trừ
+      const w3 = await closedWithWinner(bidders.ChkSkip, null);                       // thắng rồi bỏ đơn
+      await pool.query(`UPDATE orders SET payment_deadline = now() - interval '1 minute' WHERE id = $1`, [w3.orderId]);
+      await engine.processPaymentTimeouts();
+      for (let i = 0; i < 20; i += 1) { // có thể backend khác xử lý trước: chờ DB đúng trạng thái
+        if ((await pool.query('SELECT payment_status FROM orders WHERE id = $1', [w3.orderId])).rows[0].payment_status === 'expired') break;
+        await sleep(250);
+      }
+      await tx((c) => walletService.refund(c, { bidderId: bidders.ChkWin, amount: 70_000, auctionId: w1.auctionId }));
+      // Một cọc đang giữ và một đơn thắng chưa thanh toán (applied_to_payment + awaiting_payment) vẫn phải khớp.
+      const { auctionId: live } = await mkAuction(seller);
+      await engine.joinAuction({ bidderId: bidders.ChkLose, auctionId: live });
+      await closedWithWinner(bidders.ChkLose, null);
+      const r = await checkWallets({ bidderIds: ids });
+      assert.strictEqual(r.wallets, 4);
+      assert.deepStrictEqual(r.problems, []);
+    });
+
+    await step('phát hiện số dư lệch (wallet_balance +1), tiền giữ lệch (wallet_held +7), sổ giao dịch bị sửa (amount +1)', async () => {
+      const w = bidders.ChkWin;
+      await pool.query('UPDATE bidders SET wallet_balance = wallet_balance + 1 WHERE account_id = $1', [w]);
+      let p = await probs();
+      assert.deepStrictEqual([...new Set(p.map((x) => x.check))], ['balance']);
+      assert.ok(p.every((x) => x.bidderId === String(w) && x.diff === '1'), JSON.stringify(p));
+      await pool.query('UPDATE bidders SET wallet_balance = wallet_balance - 1 WHERE account_id = $1', [w]);
+
+      await pool.query('UPDATE bidders SET wallet_held = wallet_held + 7 WHERE account_id = $1', [w]);
+      p = await probs();
+      assert.deepStrictEqual([...new Set(p.map((x) => x.check))].sort(), ['held_deposits', 'held_ledger']);
+      await pool.query('UPDATE bidders SET wallet_held = wallet_held - 7 WHERE account_id = $1', [w]);
+
+      const tid = (await pool.query(`SELECT min(id) AS id FROM wallet_transactions WHERE bidder_id = $1 AND kind = 'topup'`, [w])).rows[0].id;
+      await pool.query('UPDATE wallet_transactions SET amount = amount + 1 WHERE id = $1', [tid]);
+      p = await probs();
+      assert.ok(p.some((x) => x.check === 'balance_chain' && x.detail.includes(`#${tid}`)), JSON.stringify(p));
+      await pool.query('UPDATE wallet_transactions SET amount = amount - 1 WHERE id = $1', [tid]);
+      assert.deepStrictEqual(await probs(), [], 'khôi phục xong thì khớp lại');
+    });
+
+    await step('lệnh wallet:check: exit 0 khi khớp, exit 1 và in bảng khi lệch; chỉ đọc (không sửa dữ liệu); tham số sai bị từ chối', async () => {
+      const ok = cli(ids);
+      assert.strictEqual(ok.status, 0, ok.stdout + ok.stderr);
+      assert.ok(ok.stdout.includes('Đối soát 4 ví: 4 khớp, 0 lệch'), ok.stdout);
+      const w = bidders.ChkQr;
+      await pool.query('UPDATE bidders SET wallet_balance = wallet_balance + 5 WHERE account_id = $1', [w]);
+      const before = (await wallet(w));
+      const bad = cli(ids);
+      assert.strictEqual(bad.status, 1, bad.stdout + bad.stderr);
+      assert.ok(bad.stdout.includes('balance') && bad.stdout.includes(String(w)) && bad.stdout.includes('1 lệch'), bad.stdout);
+      assert.deepStrictEqual(await wallet(w), before, 'wallet:check không được sửa dữ liệu');
+      await pool.query('UPDATE bidders SET wallet_balance = wallet_balance - 5 WHERE account_id = $1', [w]);
+      assert.throws(() => parseArgs(['--bidder-ids=abc']), /danh sách id số/);
+      assert.throws(() => parseArgs(['--sai']), /Tham số không hợp lệ/);
+    });
+  }
+
   console.log('API dev /api/dev (DEV_TOOLS): tắt thì 404, bật thì rút ngắn phiên và cho đơn quá hạn');
   {
     const { spawn } = require('child_process');

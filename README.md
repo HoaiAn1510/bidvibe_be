@@ -56,6 +56,7 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 | `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_<mã lần chạy>_*`, tự dọn) |
 | `npm test` | Chạy cả `test:be1` và `test:be2` |
 | `npm run test:clean [-- --dry-run]` | Dọn dữ liệu `test_be2_` bỏ sót từ lần chạy bị ngắt (chỉ lần chạy bắt đầu hơn 1 giờ trước; in danh sách trước khi xoá). Chỉ chạy khi cần |
+| `npm run wallet:check [-- --bidder-ids=1,2]` | Đối soát ví (CHỈ ĐỌC): so số dư và tiền đang giữ của từng ví với sổ `wallet_transactions` và các khoản cọc; in bảng ví lệch, có lệch thì thoát mã 1 (công thức ở dưới) |
 | `npm run docs:check` | So route đăng ký trong `src/routes/` với `docs/api.md` (báo route thiếu / thừa). Chạy sau khi thêm hoặc sửa route |
 | `npm run db:seed:live [-- --extend]` | Bảo đảm 9 phiên demo đang diễn ra trước buổi demo (xem bên dưới) |
 | `npm run demo:bidbot -- --auction <id>` | 3 tài khoản bot trả giá một phiên để demo giá nhảy real-time (xem bên dưới) |
@@ -169,6 +170,11 @@ Hai domain nối nhau qua các điểm sau, cần tôn trọng:
 - **Tạo phiên đấu giá:** khi Thẩm định duyệt một tin đăng, BE2 gọi một hàm do BE1 cung cấp để sinh `auctions`; BE2 không tự ghi vào bảng `auctions`.
 - **Đơn hàng (`orders`):** BE1 tạo khi phiên kết thúc; BE2 đọc và cập nhật phần kho, giao hàng, giải ngân. Địa chỉ giao hàng (`orders.shipping_address_id`) do người mua chọn qua API của BE2 (`POST /api/orders/:id/shipping-address`), luồng thanh toán của BE1 không đổi; kho không gửi được hàng khi đơn chưa có địa chỉ (`409 ORDER_NO_ADDRESS`).
 - **Đăng nhập:** `auth.*` do BE2 phụ trách. Bidder / Seller đăng nhập qua `accounts.password_hash`, Thẩm định / Kho vận / Admin qua `ops_accounts.password_hash` (thêm ở migration `003`); tài khoản ops do Admin tạo qua `POST /api/admin/ops-accounts`.
+- **Đối soát ví (`npm run wallet:check`)**, chỉ đọc, trong một giao dịch `READ ONLY` để mọi truy vấn thấy cùng một ảnh chụp dữ liệu. Công thức (chi tiết ở đầu `scripts/wallet_check.js`):
+  - Mỗi giao dịch có `amount` và `balance_after`. Đi dọc sổ giao dịch của từng người theo `id`, chênh lệch `balance_after` so với giao dịch liền trước phải là: `topup` / `deposit_release` / `refund` = `+amount`; `deposit_hold` = `-amount`; `deposit_forfeit` = `0`; `payment` = `0` (VietQR / thẻ) hoặc `-(amount - cọc)` (trả bằng ví). (`balance_chain`)
+  - `bidders.wallet_balance` = `balance_after` của giao dịch cuối, ví chưa có giao dịch thì 0. (`balance`)
+  - `bidders.wallet_held` = Σ `deposit_hold` − Σ `deposit_release` − Σ `deposit_forfeit` − Σ cọc đã trừ ở `payment`. (`held_ledger`)
+  - `bidders.wallet_held` = Σ `auction_deposits` đang giữ tiền: trạng thái `held` **và** `applied_to_payment` mà đơn còn `awaiting_payment` (người thắng chưa thanh toán nên tiền cọc vẫn nằm trong `held`). (`held_deposits`)
 - **Scheduler chỉ một backend làm việc tại một thời điểm:** mỗi lượt tick (5 giây) lấy khoá advisory `pg_try_advisory_lock(0x424944565343)` trên một client của pool; không lấy được (backend khác đang chạy lượt của họ) thì bỏ lượt, xong thì `pg_advisory_unlock` rồi trả client. Khoá phiên tự nhả khi kết nối đóng, nên backend giữ khoá bị tắt thì lượt sau backend khác làm tiếp. Log một dòng khi backend bắt đầu / thôi làm "scheduler chính" (không log mỗi 5 giây). Mỗi lượt tick tốn thêm 1 kết nối trong pool lúc chạy (người làm app đặt `DB_POOL_MAX=2` vẫn đủ).
 - **Tự giải ngân:** job của BE2 (`payout_service.releaseOverduePayouts`) chạy chung vòng `scheduler.js` của BE1, tắt bằng `AUTO_PAYOUT_ENABLED=false`.
 
