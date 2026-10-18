@@ -462,6 +462,8 @@ Mọi vai trò. Query (đều tuỳ chọn):
 | `depositRequired` | Tiền cọc = 10 phần trăm giá khởi điểm, làm tròn nghìn |
 | `depositAffordable` | Số dư ví (`balance`) của người xem có đủ `depositRequired` không. Chỉ có với tài khoản `bidder`; vai trò khác là `null` |
 | `joined`, `myDepositStatus`, `myDeposit`, `myBid`, `leading`, `won` | Riêng của người đang xem (tài khoản `ops` luôn rỗng) |
+| `myMaxBid` | Giá **cao nhất mình đã đặt** trong phiên; `null` nếu chưa đặt lần nào (`myBid` cũ vẫn trả `0` khi chưa đặt) |
+| `myState` | Trạng thái của mình trong phiên, tính sẵn để làm màn "Phiên của tôi" (`GET /api/auctions?status=joined`): `leading` đang dẫn đầu, `outbid` đã đặt giá nhưng bị vượt, `joined_no_bid` đã cọc chưa đặt giá, `won` đã kết thúc và mình thắng, `lost` đã kết thúc không thắng (người khác thắng, không ai thắng hoặc phiên bị huỷ), `null` không tham gia hoặc không phải người mua. `leading` / `outbid` / `joined_no_bid` chỉ khi phiên `active` |
 
 ### `GET /api/auctions/:id`
 

@@ -40,6 +40,23 @@ const SELECT_AUCTION = `
   LEFT JOIN bidders w ON w.account_id = $1::bigint
 `;
 
+// Trạng thái của người đang xem trong phiên, suy ra từ các cột đã có trong cùng một truy vấn (không truy vấn thêm từng phiên):
+//   null            không tham gia (chưa đặt cọc), hoặc người xem không phải người mua
+//   joined_no_bid   đã đặt cọc, phiên đang diễn ra, chưa đặt giá lần nào
+//   leading         phiên đang diễn ra và mình đang dẫn đầu
+//   outbid          phiên đang diễn ra, mình đã đặt giá nhưng người khác đang dẫn đầu
+//   won             phiên đã kết thúc và mình thắng
+//   lost            phiên đã kết thúc không thắng (người khác thắng, không ai thắng, hoặc phiên bị huỷ / chấm dứt)
+// "Đang diễn ra" = status 'active' (tối đa vài giây sau giờ kết thúc scheduler mới đóng phiên nên trạng thái vẫn là trạng thái cuối cùng của phiên đang chạy).
+function myStateOf(r, viewer) {
+  if (viewer == null || r.my_deposit_status == null) return null;
+  if (r.status === 'active') {
+    if (r.leader_id != null && String(r.leader_id) === viewer) return 'leading';
+    return r.my_bid == null ? 'joined_no_bid' : 'outbid';
+  }
+  return r.winner_id != null && String(r.winner_id) === viewer ? 'won' : 'lost';
+}
+
 function toView(r, viewerId) {
   const viewer = viewerId == null ? null : String(viewerId);
   const live = r.status === 'active' && (r.paused || r.before_end);
@@ -80,6 +97,9 @@ function toView(r, viewerId) {
     myDepositStatus: r.my_deposit_status,
     myDeposit: r.my_deposit == null ? 0 : Number(r.my_deposit),
     myBid: r.my_bid == null ? 0 : Number(r.my_bid),
+    // Giá cao nhất mình đã đặt trong phiên (null nếu chưa đặt lần nào) và trạng thái của mình (xem myStateOf)
+    myMaxBid: r.my_bid == null ? null : Number(r.my_bid),
+    myState: myStateOf(r, viewer),
     leading: viewer != null && r.leader_id != null && String(r.leader_id) === viewer,
     won: viewer != null && r.winner_id != null && String(r.winner_id) === viewer,
   };

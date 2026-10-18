@@ -1686,6 +1686,116 @@ async function main() {
     });
   }
 
+  console.log('Phiên của tôi: myMaxBid và myState');
+  {
+    const jwt = require('jsonwebtoken');
+    const env = require('../src/config/env');
+    const { server } = require('../src/app');
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    const base = `http://127.0.0.1:${server.address().port}/api`;
+    const tokOf = (id, role) => jwt.sign({ sub: String(id), kind: 'account', role }, env.jwtSecret, { expiresIn: '5m' });
+    const getApi = async (path, id, role = 'bidder') => {
+      const r = await fetch(base + path, { headers: { Authorization: `Bearer ${tokOf(id, role)}` } });
+      const body = await r.json();
+      assert.strictEqual(r.status, 200, JSON.stringify(body.error));
+      return body.data;
+    };
+    const mine = async (viewer, auctionId) => {
+      const v = await engine.getAuction(auctionId, viewer);
+      return [v.myState, v.myMaxBid];
+    };
+    try {
+      const P = await mkAccount('bidder', 'MineP');
+      const Q = await mkAccount('bidder', 'MineQ');
+      const R = await mkAccount('bidder', 'MineR');
+      for (const id of [P, Q, R]) await tx((c) => walletService.topUp(c, { bidderId: id, amount: 5_000_000 }));
+      const lastBid = async (id, who) => (await pool.query(
+        'SELECT max(amount)::int AS m FROM bids WHERE auction_id = $1 AND bidder_id = $2', [id, who])).rows[0].m;
+
+      const { auctionId: a1 } = await mkAuction(seller);
+      await step('myState / myMaxBid theo từng giai đoạn: không tham gia, đã cọc chưa đặt giá, dẫn đầu, bị vượt, dẫn đầu lại', async () => {
+        assert.deepStrictEqual(await mine(R, a1), [null, null], 'người chưa tham gia');
+        assert.deepStrictEqual(await mine(seller, a1), [null, null], 'người bán xem phiên của mình');
+        const anon = await engine.getAuction(a1, null);
+        assert.deepStrictEqual([anon.myState, anon.myMaxBid], [null, null], 'không có người xem (tài khoản ops)');
+
+        await engine.joinAuction({ bidderId: P, auctionId: a1 });
+        assert.deepStrictEqual(await mine(P, a1), ['joined_no_bid', null]);
+        assert.strictEqual((await engine.getAuction(a1, P)).myBid, 0, 'trường cũ myBid vẫn là 0 khi chưa đặt giá');
+
+        await engine.placeBid({ bidderId: P, auctionId: a1, increment: 50_000 });
+        assert.deepStrictEqual(await mine(P, a1), ['leading', 1_050_000]);
+
+        await engine.joinAuction({ bidderId: Q, auctionId: a1 });
+        await engine.placeBid({ bidderId: Q, auctionId: a1, increment: 50_000 });
+        assert.deepStrictEqual(await mine(P, a1), ['outbid', 1_050_000], 'bị vượt: myMaxBid vẫn là giá cao nhất CỦA MÌNH, không phải giá hiện tại');
+        assert.deepStrictEqual(await mine(Q, a1), ['leading', 1_100_000]);
+        assert.deepStrictEqual(await mine(R, a1), [null, null]);
+
+        await engine.placeBid({ bidderId: P, auctionId: a1, increment: 50_000 });
+        assert.deepStrictEqual(await mine(P, a1), ['leading', 1_150_000]);
+        assert.deepStrictEqual(await mine(Q, a1), ['outbid', 1_100_000]);
+        assert.strictEqual(await lastBid(a1, P), 1_150_000);
+      });
+
+      const states = {};
+      await step('phiên kết thúc: won (mình thắng), lost (người khác thắng / không ai đặt giá / phiên bị huỷ)', async () => {
+        const { auctionId: a2 } = await mkAuction(seller); // P đặt, Q vượt, Q thắng
+        await engine.joinAuction({ bidderId: P, auctionId: a2 });
+        await engine.joinAuction({ bidderId: Q, auctionId: a2 });
+        await engine.placeBid({ bidderId: P, auctionId: a2, increment: 50_000 });
+        await engine.placeBid({ bidderId: Q, auctionId: a2, increment: 50_000 });
+        await expire(a2);
+        await closedAuction(a2);
+        assert.deepStrictEqual(await mine(P, a2), ['lost', 1_050_000]);
+        assert.deepStrictEqual(await mine(Q, a2), ['won', 1_100_000]);
+
+        const { auctionId: a3 } = await mkAuction(seller); // P đặt và thắng
+        await engine.joinAuction({ bidderId: P, auctionId: a3 });
+        await engine.placeBid({ bidderId: P, auctionId: a3, increment: 50_000 });
+        await expire(a3);
+        await closedAuction(a3);
+        assert.deepStrictEqual(await mine(P, a3), ['won', 1_050_000]);
+
+        const { auctionId: a4 } = await mkAuction(seller); // phiên bị huỷ
+        await engine.joinAuction({ bidderId: P, auctionId: a4 });
+        const done = await tx((c) => engine.cancelAuction(c, a4));
+        done.emit();
+        assert.deepStrictEqual(await mine(P, a4), ['lost', null]);
+
+        const { auctionId: a5 } = await mkAuction(seller); // đã cọc nhưng không ai đặt giá, phiên kết thúc
+        await engine.joinAuction({ bidderId: P, auctionId: a5 });
+        await expire(a5);
+        await closedAuction(a5);
+        assert.deepStrictEqual(await mine(P, a5), ['lost', null]);
+        Object.assign(states, { [a1]: 'leading', [a2]: 'lost', [a3]: 'won', [a4]: 'lost', [a5]: 'lost' });
+      });
+
+      await step('GET /api/auctions?status=joined (một truy vấn cho cả danh sách) và GET /api/auctions/:id trả myState / myMaxBid; trường cũ giữ nguyên', async () => {
+        const list = await getApi('/auctions?status=joined&limit=50', P);
+        assert.strictEqual(list.total, 5);
+        const byId = Object.fromEntries(list.auctions.map((a) => [a.id, a]));
+        assert.deepStrictEqual(Object.fromEntries(Object.keys(states).map((id) => [id, byId[id].myState])), states);
+        assert.strictEqual(byId[Object.keys(states)[0]].myMaxBid, 1_150_000);
+        for (const a of list.auctions) {
+          for (const k of ['joined', 'myDepositStatus', 'myDeposit', 'myBid', 'leading', 'won']) assert.ok(k in a, `trường cũ ${k}`);
+          assert.ok('myState' in a && 'myMaxBid' in a);
+        }
+        const detail = await getApi(`/auctions/${a1}`, Q);
+        assert.deepStrictEqual([detail.myState, detail.myMaxBid], ['outbid', 1_100_000]);
+        // Người chưa tham gia / người bán không có myState.
+        assert.strictEqual((await getApi('/auctions?status=joined', R)).total, 0);
+        const asSeller = (await getApi(`/auctions/${a1}`, seller, 'seller'));
+        assert.deepStrictEqual([asSeller.myState, asSeller.myMaxBid], [null, null]);
+        // Danh sách chung (không lọc joined): phiên mình chưa tham gia có myState null.
+        const all = await getApi('/auctions?limit=100&sort=newest', R);
+        assert.ok(all.auctions.length > 0 && all.auctions.every((a) => a.myState === null && a.myMaxBid === null));
+      });
+    } finally {
+      await new Promise((res) => server.close(res));
+    }
+  }
+
   console.log('API dev /api/dev (DEV_TOOLS): tắt thì 404, bật thì rút ngắn phiên và cho đơn quá hạn');
   {
     const { spawn } = require('child_process');

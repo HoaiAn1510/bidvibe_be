@@ -105,7 +105,7 @@ Ký hiệu: → gọi theo thứ tự; (socket) cần Socket.io.
 |---|---|---|
 | Đăng nhập | [`POST /api/auth/login`](api.md#post-apiauthlogin) (bidder / seller) hoặc [`POST /api/auth/ops/login`](api.md#post-apiauthopslogin) (thẩm định / kho / admin) → lưu `token`, `role` → [`GET /api/me`](api.md#get-apime) | `role` quyết định mở giao diện nào. Sau khi đăng nhập, mở Socket.io (socket) |
 | Đăng ký | [`POST /api/auth/register`](api.md#post-apiauthregister) | Trả token luôn, không cần đăng nhập lại |
-| Danh sách phiên | [`GET /api/categories`](api.md#get-apicategories), [`GET /api/auctions?status=live&sort=ending`](api.md#get-apiauctions) | Tab "Phiên của tôi": `status=joined` |
+| Danh sách phiên | [`GET /api/categories`](api.md#get-apicategories), [`GET /api/auctions?status=live&sort=ending`](api.md#get-apiauctions) | Tab "Phiên của tôi": `status=joined`; nhãn theo `myState` ([gợi ý nhãn bên dưới](#nhãn-phiên-của-tôi-theo-mystate)) và hiện giá mình đặt cao nhất `myMaxBid` |
 | Chi tiết phiên | [`GET /api/auctions/:id`](api.md#get-apiauctionsid) → (socket) `auction:join` | Đếm ngược theo `endsAt` và độ lệch giờ server (`serverTime`, [xem mục 6c](#6c-đồng-hồ-đếm-ngược-đúng-dù-điện-thoại-lệch-giờ)), khi tạm dừng theo `remainingSeconds`; nghe `auction:update`, `auction:ended`; rời màn → `auction:leave` |
 | Đặt cọc | [`POST /api/auctions/:id/join`](api.md#post-apiauctionsidjoin) | Nút hiện khi `joined == false`. `402` → mở màn nạp ví |
 | Đặt giá | [`POST /api/bids`](api.md#post-apibids) | Gửi `amount` **hoặc** `increment`. Giá mới về qua (socket) `auction:update` |
@@ -312,6 +312,19 @@ Future<void> addPhotosFromGallery(String baseUrl, String token, String listingId
 - **Thông báo**: mỗi lần mở app hoặc kéo để làm mới thì tải lại `GET /api/notifications`. Socket chỉ đẩy thông báo lúc đang kết nối, nên thông báo đến khi app tắt sẽ không qua socket.
 - **Thời gian** là ISO 8601 UTC; một số trường lồng trả dạng `+00:00`. Dùng `DateTime.parse(...).toLocal()`.
 - Tài khoản `ops` (thẩm định / kho / admin) không có thông báo, ví, địa chỉ, chatbot.
+
+## Nhãn "Phiên của tôi" theo `myState`
+
+`GET /api/auctions` và `GET /api/auctions/:id` trả thêm `myState` và `myMaxBid` cho người mua đang đăng nhập (tính sẵn ở server, app không phải tự suy ra từ `leading` / `won` / `myBid`). Gợi ý nhãn:
+
+| `myState` | Nhãn gợi ý | Màu gợi ý | Ghi chú |
+|---|---|---|---|
+| `leading` | Bạn đang dẫn đầu | Xanh | Phiên đang diễn ra |
+| `outbid` | Bạn bị vượt giá | Đỏ | Có nút đặt giá lại; hiện `myMaxBid` là giá cao nhất của mình |
+| `joined_no_bid` | Đã đặt cọc | Xanh dương | Chưa đặt giá; `myMaxBid` là `null` |
+| `won` | Bạn đã thắng | Xanh đậm | Mở màn thanh toán / theo dõi đơn |
+| `lost` | Không thắng | Xám | Cọc đã hoàn về ví (hoặc phiên bị huỷ) |
+| `null` | (không nhãn) | | Chưa tham gia phiên này |
 
 ## 6b. Test nhanh thắng phiên và quá hạn thanh toán
 
