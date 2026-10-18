@@ -2764,6 +2764,92 @@
           }
         }
       ]
+    },
+    {
+      "name": "16 Công cụ dev (DEV_TOOLS)",
+      "item": [
+        {
+          "name": "POST /api/dev/auctions/:id/end-soon",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/dev/auctions/{{auction_id}}/end-soon",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "dev",
+                "auctions",
+                "{{auction_id}}",
+                "end-soon"
+              ]
+            },
+            "description": "Quyền: mọi vai trò. CHỈ chạy khi server bật DEV_TOOLS=true (và NODE_ENV khác production), tắt thì 404. Rút ngắn phiên đang diễn ra: seconds 5-3600 (mặc định 10). Chi tiết: docs/api.md mục 17, docs/fe-quickstart.md mục 6b.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_bidder}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"seconds\": 10\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /api/dev/orders/:id/expire-payment",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/dev/orders/{{order_id}}/expire-payment",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "dev",
+                "orders",
+                "{{order_id}}",
+                "expire-payment"
+              ]
+            },
+            "description": "Quyền: mọi vai trò. CHỈ chạy khi server bật DEV_TOOLS=true (và NODE_ENV khác production), tắt thì 404. Cho đơn chưa thanh toán quá hạn ngay; scheduler huỷ đơn và tịch thu cọc. Chi tiết: docs/api.md mục 17, docs/fe-quickstart.md mục 6b.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_bidder}}",
+                  "type": "string"
+                }
+              ]
+            }
+          }
+        }
+      ]
     }
   ]
 }

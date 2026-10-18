@@ -1,6 +1,6 @@
 # API BidVibe
 
-> Cập nhật: 2026-10-13. Ví dụ phản hồi lấy từ các lần gọi thật vào server `npm run dev` (dữ liệu demo + tài khoản tạm, đã che token và rút gọn mảng).
+> Cập nhật: 2026-10-17. Ví dụ phản hồi lấy từ các lần gọi thật vào server `npm run dev` (dữ liệu demo + tài khoản tạm, đã che token và rút gọn mảng).
 
 Một file duy nhất cho toàn bộ REST API của backend. Sự kiện real-time xem [`socket.md`](socket.md). Hướng dẫn nối nhanh cho app Flutter xem [`fe-quickstart.md`](fe-quickstart.md).
 
@@ -445,7 +445,7 @@ Mọi vai trò. Query (đều tuỳ chọn):
   "status": "active", "isLive": true, "paused": false, "pausedAt": null, "remainingSeconds": 13970,
   "terminated": false, "winnerId": null,
   "joined": false, "myDepositStatus": null, "myDeposit": 0, "myBid": 0, "leading": false, "won": false } ],
-  "total": 6, "limit": 50, "offset": 0 }
+  "total": 6, "limit": 50, "offset": 0, "serverTime": "2026-10-10T15:29:32.100Z" }
 ```
 
 | Trường | Ý nghĩa |
@@ -454,6 +454,7 @@ Mọi vai trò. Query (đều tuỳ chọn):
 | `isLive` | Đang nhận cọc và lượt giá (`active`, chưa hết giờ, không tạm dừng) |
 | `paused`, `pausedAt` | Admin tạm dừng để kiểm tra. Đồng hồ **đứng yên** khi dừng; khi tiếp tục `endsAt` được cộng thêm đúng thời gian đã dừng |
 | `remainingSeconds` | Giây còn lại do server tính (đứng yên khi `paused`). Dùng giá trị này để đếm ngược, không tự tính `endsAt - now` khi đang dừng |
+| `serverTime` | **Cấp `data`** (không lặp trong từng phiên): giờ hiện tại của server lúc trả, ISO 8601 UTC. Dùng để tính độ lệch đồng hồ điện thoại ([cách dùng](fe-quickstart.md#6c-đồng-hồ-đếm-ngược-đúng-dù-điện-thoại-lệch-giờ)) |
 | `total`, `limit`, `offset` | Tổng số phiên khớp bộ lọc (không tính phân trang) và phân trang đã áp dụng. Còn trang sau khi `offset + auctions.length < total` |
 | `coverUrl` | Ảnh bìa = ảnh đầu tiên của tin (`order_index` nhỏ nhất); `null` nếu tin chưa có ảnh |
 | `seller.name` | Tên hiển thị người bán: `storeName`, nếu người bán chưa đặt tên shop thì là họ tên |
@@ -471,6 +472,8 @@ Mọi vai trò. Cùng cấu trúc như một phần tử ở trên, thêm `photo
             { "id": "102", "url": "https://thumb.wikimedia.org/.../960px-Ornamental_jar...DSC05320.JPG", "orderIndex": 1 } ],
 "bids": [ { "id": "23", "who": "V***", "amount": 4500000, "at": "2026-10-07T14:32:47.955Z", "me": false } ]
 ```
+
+Thêm `viewers`: số người đang xem phiên (số tài khoản khác nhau đang ở phòng Socket.io của phiên, một tài khoản nhiều kết nối chỉ tính 1; đếm trên backend nhận request, cùng cách đếm với sự kiện `auction:viewers` trong [`socket.md`](socket.md)). Và `serverTime` ở cấp `data` (giờ server lúc trả, ISO 8601 UTC) như ở danh sách; cũng có trong mọi `auction:update` và `auction:ended` ([`socket.md`](socket.md)).
 
 Màn chi tiết dùng: `photos`, `description`, `seller`, `bids`; cọc của mình: `joined`, `myDepositStatus`, `myDeposit`, `depositRequired`, `depositAffordable`; dẫn đầu: `leading`; giá nhỏ nhất đặt tiếp: `minNextBid`.
 
@@ -1025,6 +1028,34 @@ Không cần đăng nhập. Kiểm tra server đang chạy và kết nối đư�
 
 Đường dẫn không tồn tại → `404 NOT_FOUND` ("Không tìm thấy route: GET /api/...").
 
+### `POST /api/dev/auctions/:id/end-soon`
+
+**Chỉ khi server chạy với `DEV_TOOLS=true` và `NODE_ENV` khác `production`.** Tắt thì cả `/api/dev/*` không tồn tại: `404 NOT_FOUND` như route sai. Mặc định tắt; **không bật trên máy chạy buổi demo**. Vai trò nào đăng nhập cũng gọi được. Để FE tự test thắng phiên mà không sửa tay database.
+
+Rút ngắn phiên đang diễn ra: đặt `endsAt = now() + seconds` (giờ DB). Việc đóng phiên, chọn người thắng, tạo đơn, hoàn cọc người thua do scheduler làm như thật (tối đa vài giây sau khi hết giờ). Sau khi lưu, phát `auction:update` với `reason: "dev_time"` vào phòng phiên để đồng hồ trên app tự cập nhật ([`socket.md`](socket.md)).
+
+| Trường | Kiểu | Bắt buộc | Ràng buộc |
+|---|---|---|---|
+| `seconds` | số nguyên | không | 5–3600, mặc định 10 |
+
+```json
+// 200
+{ "auctionId": "355", "endsAt": "2026-10-17T03:00:15.000Z", "remainingSeconds": 10 }
+```
+
+Lỗi: `400 VALIDATION_ERROR` (`seconds` ngoài khoảng / không phải số nguyên), `404 NOT_FOUND`, `409 AUCTION_ENDED` (phiên đã kết thúc, huỷ hoặc hết giờ), `409 AUCTION_PAUSED`.
+
+### `POST /api/dev/orders/:id/expire-payment`
+
+Cùng điều kiện bật như trên. Không có body. Đưa `paymentDeadline` của đơn đang chờ thanh toán về quá khứ; scheduler (vài giây sau) đánh dấu đơn `expired`, tịch thu cọc và gửi thông báo `warn` như khi quá 24 giờ thật.
+
+```json
+// 200
+{ "orderId": "88", "paymentDeadline": "2026-10-17T02:59:59.000Z" }
+```
+
+Lỗi: `404 NOT_FOUND`, `409 ALREADY_PAID` (đơn đã thanh toán), `409 PAYMENT_EXPIRED` (đơn đã quá hạn).
+
 ---
 
 ## 18. Giá trị trạng thái (enum)
@@ -1297,3 +1328,5 @@ Bảng này khớp 1-1 với route đăng ký trong `src/routes/` (kiểm tra b�
 | POST | `/api/chat/messages` | bidder, seller | [16](#post-apichatmessages) |
 | GET | `/api/chat/sessions/:id/messages` | bidder, seller | [16](#get-apichatsessionsidmessages) |
 | POST | `/api/ai/suggest-price` | seller, appraiser | [16](#post-apiaisuggest-price) |
+| POST | `/api/dev/auctions/:id/end-soon` | mọi vai trò (chỉ khi `DEV_TOOLS=true`) | [17](#post-apidevauctionsidend-soon) |
+| POST | `/api/dev/orders/:id/expire-payment` | mọi vai trò (chỉ khi `DEV_TOOLS=true`) | [17](#post-apidevordersidexpire-payment) |

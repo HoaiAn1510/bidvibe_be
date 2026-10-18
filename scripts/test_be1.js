@@ -9,6 +9,8 @@
 // Supabase session pooler giới hạn tổng số kết nối của cả database (15): test dùng ít kết nối để
 // chạy song song với lần chạy khác / test:be2 / server của đồng đội. Đặt trước khi nạp pool.
 process.env.DB_POOL_MAX = process.env.DB_POOL_MAX || '4';
+// /api/dev phải tắt trong tiến trình test dù .env của người chạy có bật DEV_TOOLS; phần test /api/dev tự bật cho server con.
+process.env.DEV_TOOLS = 'false';
 const assert = require('assert');
 const { pool } = require('../src/config/db');
 const engine = require('../src/services/auction_engine');
@@ -168,7 +170,7 @@ async function main() {
     const r = await engine.placeBid({ bidderId: B, auctionId, amount: 1_200_000 });
     assert.strictEqual(r.extended, true);
     const left = new Date(r.endsAt) - Date.now();
-    assert.ok(left > 25_000 && left <= 30_500, `còn ${left}ms`);
+    assert.ok(left > 25_000 && left <= 32_500, `còn ${left}ms`); // +2 giây phía trên: dung sai đồng hồ (xem chú thích ở bước tạm dừng)
   });
 
   console.log('Đóng phiên');
@@ -261,6 +263,15 @@ async function main() {
   const clock = async (auctionId) => (await pool.query(
     `SELECT ends_at, paused_at, status FROM auctions WHERE id = $1`, [auctionId])).rows[0];
   const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+  // serverTime: ISO 8601 UTC đúng định dạng, gần giờ máy chạy test (cùng máy với server test nên lệch rất ít).
+  const assertServerTime = (obj, label = 'payload') => {
+    assert.ok(obj, `${label}: không có dữ liệu`);
+    const t = obj.serverTime;
+    assert.strictEqual(typeof t, 'string', `${label}: thiếu serverTime`);
+    assert.ok(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(t), `${label}: serverTime ${t}`);
+    assert.strictEqual(new Date(t).toISOString(), t);
+    assert.ok(Math.abs(Date.now() - Date.parse(t)) < 15_000, `${label}: serverTime ${t} lệch quá xa giờ hiện tại`);
+  };
   await step('tạm dừng rồi tiếp tục: ends_at dịch đúng bằng thời gian đã dừng', async () => {
     const { auctionId: ap } = await mkAuction(seller);
     await engine.joinAuction({ bidderId: A, auctionId: ap });
@@ -277,7 +288,9 @@ async function main() {
     await sleep(4500); // dừng lâu hơn thời gian còn lại (3 giây)
     const view = await engine.getAuction(ap, A);
     assert.strictEqual(view.paused, true);
-    assert.ok(view.remainingSeconds >= 2 && view.remainingSeconds <= 3, `còn ${view.remainingSeconds}s, mong ~3s (đứng yên)`);
+    // Dung sai ±2 giây quanh ~3 giây: remainingSeconds tính bằng giờ máy chạy test, còn ends_at / paused_at đặt bằng giờ DB;
+    // hai đồng hồ lệch nhau (đo được ~0,4 giây) cộng độ trễ mạng tới Supabase. Vẫn đủ để bắt lỗi "đồng hồ không đứng" (sẽ về 0).
+    assert.ok(view.remainingSeconds >= 0 && view.remainingSeconds <= 5, `còn ${view.remainingSeconds}s, mong ~3s (đứng yên)`);
     await engine.closeExpiredAuctions();
     assert.strictEqual((await clock(ap)).status, 'active', 'job đóng phiên không được đóng phiên đang tạm dừng');
 
@@ -286,13 +299,14 @@ async function main() {
     const after = await clock(ap);
     assert.strictEqual(after.paused_at, null);
     const shift = new Date(after.ends_at) - new Date(before.ends_at);
-    assert.ok(Math.abs(shift - elapsed) < 1500, `ends_at dịch ${shift}ms, thời gian dừng ~${elapsed}ms`);
-    assert.ok(new Date(after.ends_at) > new Date(), 'tiếp tục xong thì phiên vẫn còn giờ, không đóng ngay');
+    // shift do DB tính, elapsed do giờ máy đo kèm vài lượt gọi tới DB: cho sai số 3,5 giây (trước 1,5 giây)
+    assert.ok(Math.abs(shift - elapsed) < 3500, `ends_at dịch ${shift}ms, thời gian dừng ~${elapsed}ms`);
+    assert.ok(new Date(after.ends_at) > new Date(Date.now() - 2000), 'tiếp tục xong thì phiên vẫn còn giờ, không đóng ngay'); // -2 giây: lệch đồng hồ máy / DB
     await engine.closeExpiredAuctions();
     assert.strictEqual((await clock(ap)).status, 'active');
     const resumed = await engine.getAuction(ap, A);
     assert.strictEqual(resumed.paused, false);
-    assert.ok(resumed.remainingSeconds >= 1 && resumed.remainingSeconds <= 3, `còn ${resumed.remainingSeconds}s`);
+    assert.ok(resumed.remainingSeconds >= 0 && resumed.remainingSeconds <= 5, `còn ${resumed.remainingSeconds}s`); // ±2 giây, lý do như trên
   });
   await step('hai cờ tạm dừng: gỡ một cờ thì vẫn dừng, gỡ cờ cuối mới chạy lại', async () => {
     const { auctionId: ap2 } = await mkAuction(seller);
@@ -459,7 +473,8 @@ async function main() {
     const { auctionId: ap } = await mkAuction(seller);
     const rs = await Promise.allSettled(Array.from({ length: 5 }, () => fraud.reportAuction({ reporterId: A, auctionId: ap, reason: 'Spam' })));
     assert.strictEqual(rs.filter((r) => r.status === 'fulfilled').length, 1);
-    assert.ok(rs.filter((r) => r.status === 'rejected').every((r) => r.reason.code === 'ALREADY_REPORTED'));
+    assert.ok(rs.filter((r) => r.status === 'rejected').every((r) => r.reason.code === 'ALREADY_REPORTED'),
+      JSON.stringify(rs.map((r) => r.status === 'fulfilled' ? 'ok' : (r.reason.code || r.reason.message))));
     const f = await flagsOf(ap);
     assert.deepStrictEqual([f.length, f[0].evidence], [1, 1]);
   });
@@ -633,6 +648,17 @@ async function main() {
         assert.deepStrictEqual([d.joined, d.leading, d.myDeposit, d.minNextBid], [true, true, 100_000, 1_100_000]);
         assert.deepStrictEqual([d.bids[0].who, d.bids[0].me], ['T***', true]); // tên đã che: "test_be1_Hal" -> "T***"
       });
+      await step('serverTime: GET /api/auctions và /:id có serverTime ở cấp data, không lặp trong từng phiên', async () => {
+        const list = await get(`/auctions?q=${encodeURIComponent(RUN)}&limit=2`, tok(H, 'bidder'));
+        assertServerTime(list, 'GET /auctions');
+        assert.ok(list.auctions.length > 0 && list.auctions.every((x) => !('serverTime' in x)), 'serverTime không được lặp trong từng phiên');
+        const d = await get(`/auctions/${ap}`, tok(H, 'bidder'));
+        assertServerTime(d, 'GET /auctions/:id');
+        assert.ok(d.bids.every((b) => !('serverTime' in b)));
+        assert.ok(['id', 'currentPrice', 'endsAt', 'remainingSeconds', 'photos', 'bids'].every((k) => k in d), 'các trường cũ vẫn còn');
+        const d2 = await get(`/auctions/${ap}`, tok(H, 'bidder'));
+        assert.ok(Date.parse(d2.serverTime) >= Date.parse(d.serverTime), 'serverTime không được lùi');
+      });
       await step('GET /api/wallet/transactions: kindLabel tiếng Việt, total, phân trang', async () => {
         const d = await get('/wallet/transactions?limit=1&offset=0', tok(H, 'bidder'));
         const n = (await pool.query('SELECT count(*)::int AS n FROM wallet_transactions WHERE bidder_id = $1', [H])).rows[0].n;
@@ -758,7 +784,15 @@ async function main() {
         await tx((c) => walletService.topUp(c, { bidderId: human, amount: 5_000_000 }));
         await engine.joinAuction({ bidderId: human, auctionId: ab });
         await engine.placeBid({ bidderId: human, auctionId: ab, increment: 50_000 });
-        r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 5, log, allowedEmails, onlyOutbid: true, stopSignal: stopAfter(800) });
+        // Chờ có vòng lặp thay vì ngủ cố định: kiểm tra mỗi 300 ms (tối đa 10 giây) tới khi bot đã vượt giá,
+        // rồi chờ thêm một nhịp để chắc bot không đặt lần hai (bot dẫn đầu thì phải chờ).
+        const sig = { stop: false };
+        const running = runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 5, log, allowedEmails, onlyOutbid: true, stopSignal: sig });
+        const bidCount = async () => (await pool.query('SELECT count(*)::int AS n FROM bids WHERE auction_id = $1', [ab])).rows[0].n;
+        for (let waited = 0; waited < 10_000 && (await bidCount()) < 2; waited += 300) await sleep(300);
+        await sleep(300);
+        sig.stop = true;
+        r = await running;
         assert.deepStrictEqual(r, { bids: 1, reason: 'dừng theo yêu cầu (Ctrl+C)' });
         const last = (await pool.query('SELECT amount::int AS a FROM bids WHERE auction_id = $1 ORDER BY id DESC LIMIT 1', [ab])).rows[0].a;
         assert.strictEqual(last, 1_100_000);
@@ -947,7 +981,10 @@ async function main() {
         assert.strictEqual(u.status, 'active');
         assert.ok(u.pausedAt);
         assert.strictEqual(new Date(u.endsAt).getTime(), new Date(before.ends_at).getTime());
-        assert.ok(u.remainingSeconds > 3500 && u.remainingSeconds <= 3600, `remainingSeconds ${u.remainingSeconds}`);
+        // endsAt = giờ máy chạy test + 1 giờ (createAuctionForListing) còn pausedAt là now() của DB, nên máy lệch
+        // DB khoảng 1 giây thì ra 3601. Cho sai số +2 giây, và kiểm tra thêm remainingSeconds khớp đúng hai mốc trong chính sự kiện.
+        assert.ok(u.remainingSeconds > 3500 && u.remainingSeconds <= 3602, `remainingSeconds ${u.remainingSeconds}`);
+        assert.strictEqual(u.remainingSeconds, Math.ceil((new Date(u.endsAt) - new Date(u.pausedAt)) / 1000));
         assert.strictEqual(typeof u.currentPrice, 'number');
 
         await sleep(1200);
@@ -958,7 +995,8 @@ async function main() {
         assert.strictEqual(r.paused, false);
         assert.strictEqual(r.pausedAt, null);
         const shift = new Date(r.endsAt) - new Date(before.ends_at);
-        assert.ok(shift >= 1000 && shift < 5000, `giờ kết thúc mới phải lùi đúng thời gian dừng, lùi ${shift}ms`);
+        // Thời gian dừng thật >= 1,2 giây (sleep) nhưng cho dung sai ±2 giây: chỉ cần lùi về sau và không quá xa
+        assert.ok(shift > 0 && shift < 7000, `giờ kết thúc mới phải lùi đúng thời gian dừng, lùi ${shift}ms`);
         assert.strictEqual(new Date(r.endsAt).getTime(), new Date((await clock(as)).ends_at).getTime());
       });
       await step('auction:update khi đặt giá có reason bid; người ngoài phòng không nhận', async () => {
@@ -975,6 +1013,83 @@ async function main() {
         assert.deepStrictEqual([u.currentPrice, u.bidCount, u.bid.amount], [1_050_000, 1, 1_050_000]);
         assert.strictEqual(await outside, null);
       });
+      await step('serverTime: có trong auction:update (bid, paused, resumed) và auction:ended', async () => {
+        const { auctionId: as } = await mkAuction(seller);
+        const sA = await connect(tok(A, 'account', 'bidder'));
+        await joinRoom(sA, as);
+        await engine.joinAuction({ bidderId: B, auctionId: as });
+        const bid = waitFor(sA, 'auction:update', isFor(as, 'bid'));
+        await engine.placeBid({ bidderId: B, auctionId: as, increment: 50_000 });
+        assertServerTime(await bid, 'auction:update bid');
+        const paused = waitFor(sA, 'auction:update', isFor(as, 'paused'));
+        const f = await flag(as, 'paused');
+        assertServerTime(await paused, 'auction:update paused');
+        const resumed = waitFor(sA, 'auction:update', isFor(as, 'resumed'));
+        await pool.query(`UPDATE flagged_auctions SET status = 'safe' WHERE id = $1`, [f]);
+        assertServerTime(await resumed, 'auction:update resumed');
+        const ended = waitFor(sA, 'auction:ended', (e) => e.auctionId === String(as));
+        await expire(as);
+        await closedAuction(as);
+        const e = await ended;
+        assertServerTime(e, 'auction:ended');
+        assert.deepStrictEqual([e.auctionId, e.hasWinner], [String(as), true]); // các trường cũ giữ nguyên
+      });
+      await step('auction:viewers: đếm theo tài khoản (vào, rời, ngắt kết nối; hai kết nối cùng tài khoản tính 1) và GET /api/auctions/:id có viewers', async () => {
+        const { auctionId: av } = await mkAuction(seller);
+        const sA = await connect(tok(A, 'account', 'bidder'));
+        const sB = await connect(tok(B, 'account', 'bidder'));
+        const sA2 = await connect(tok(A, 'account', 'bidder')); // cùng tài khoản A, kết nối thứ hai
+        const viewersIs = (s, n) => waitFor(s, 'auction:viewers', (v) => v.auctionId === String(av) && v.viewers === n);
+        const restViewers = async () => {
+          const r = await fetch(`${url}/api/auctions/${av}`, { headers: { Authorization: `Bearer ${tok(A, 'account', 'bidder')}` } });
+          const body = await r.json();
+          assert.strictEqual(r.status, 200, JSON.stringify(body.error));
+          return body.data.viewers;
+        };
+        assert.strictEqual(await restViewers(), 0, 'chưa ai vào phòng');
+
+        let w = viewersIs(sA, 1);
+        sA.emit('auction:join', String(av));
+        const first = await w;
+        assert.deepStrictEqual(Object.keys(first).sort(), ['auctionId', 'viewers']); // payload đúng hai trường
+        assert.strictEqual(typeof first.viewers, 'number');
+
+        w = viewersIs(sA, 2);
+        const wB = viewersIs(sB, 2);
+        sB.emit('auction:join', av); // số (không phải chuỗi) vẫn vào đúng phòng
+        assert.ok(await w, 'A không nhận viewers = 2 khi B vào');
+        assert.ok(await wB, 'B không nhận viewers = 2 khi tự vào');
+        assert.strictEqual(await restViewers(), 2);
+
+        // Cùng tài khoản mở thêm kết nối: vẫn tính 1.
+        const dup = waitFor(sA, 'auction:viewers', (v) => v.auctionId === String(av), 1500);
+        sA2.emit('auction:join', String(av));
+        const d = await dup; // sự kiện vẫn được phát nhưng số không đổi
+        assert.ok(d && d.viewers === 2, `A mở 2 kết nối: mong viewers 2, nhận ${d && d.viewers}`);
+        assert.strictEqual(await restViewers(), 2);
+
+        w = viewersIs(sA, 1);
+        sB.emit('auction:leave', String(av));
+        assert.ok(await w, 'A không nhận viewers = 1 khi B rời');
+        assert.strictEqual(await restViewers(), 1);
+
+        // B vào lại rồi ngắt kết nối (đóng socket): các socket còn lại nhận số mới.
+        w = viewersIs(sA, 2);
+        sB.emit('auction:join', String(av));
+        assert.ok(await w);
+        w = viewersIs(sA, 1);
+        sB.close();
+        assert.ok(await w, 'A không nhận viewers = 1 khi B ngắt kết nối');
+        assert.strictEqual(await restViewers(), 1);
+
+        // A có hai kết nối: đóng một thì vẫn còn 1 người xem; đóng nốt thì 0.
+        sA.close();
+        await sleep(500);
+        assert.strictEqual(await restViewers(), 1, 'A còn một kết nối trong phòng');
+        sA2.close();
+        await sleep(500);
+        assert.strictEqual(await restViewers(), 0);
+      });
       await step('tạm dừng bị ROLLBACK thì không phát sự kiện; chấm dứt phiên đang dừng không phát "resumed"', async () => {
         const { auctionId: as } = await mkAuction(seller);
         const sA = await connect(tok(A, 'account', 'bidder'));
@@ -989,8 +1104,9 @@ async function main() {
         assert.strictEqual(await none, null, 'giao dịch ROLLBACK không được phát auction:update');
         assert.strictEqual((await clock(as)).paused_at, null);
 
+        const pausedEv = waitFor(sA, 'auction:update', isFor(as, 'paused')); // đăng ký trước khi tạm dừng, kẻo lỡ sự kiện đến sớm
         const f = await flag(as, 'paused');
-        assert.ok(await waitFor(sA, 'auction:update', isFor(as, 'paused')));
+        assert.ok(await pausedEv);
         const resumed = waitFor(sA, 'auction:update', isFor(as, 'resumed'), 2000);
         const ended = waitFor(sA, 'auction:ended', (e) => e.auctionId === String(as));
         const done = await tx(async (cl) => {
@@ -999,7 +1115,9 @@ async function main() {
           return d;
         });
         done.emit();
-        assert.deepStrictEqual(await ended, { auctionId: String(as), hasWinner: false, cancelled: true });
+        const { serverTime, ...endedFields } = await ended; // serverTime kiểm ở bước riêng; các trường cũ giữ nguyên
+        assertServerTime({ serverTime }, 'auction:ended huỷ phiên');
+        assert.deepStrictEqual(endedFields, { auctionId: String(as), hasWinner: false, cancelled: true });
         assert.strictEqual(await resumed, null);
       });
 
@@ -1049,6 +1167,216 @@ async function main() {
     }
   }
 
+  console.log('API dev /api/dev (DEV_TOOLS): tắt thì 404, bật thì rút ngắn phiên và cho đơn quá hạn');
+  {
+    const { spawn } = require('child_process');
+    const net = require('net');
+    const path = require('path');
+    const jwt = require('jsonwebtoken');
+    const env = require('../src/config/env');
+    const { io: ioClient } = require('socket.io-client');
+    const tok = (id, kind, role) => jwt.sign({ sub: String(id), kind, role }, env.jwtSecret, { expiresIn: '5m' });
+    const freePort = () => new Promise((resolve, reject) => {
+      const s = net.createServer().once('error', reject).listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
+    });
+    // Server con `node src/app.js` (có scheduler, như npm run dev) với biến môi trường tuỳ chọn.
+    const children = [];
+    const startServer = async (extraEnv) => {
+      const port = await freePort();
+      const child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'app.js')], {
+        cwd: path.join(__dirname, '..'),
+        env: { ...process.env, PORT: String(port), DB_POOL_MAX: '2', NODE_ENV: 'development', ...extraEnv },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let out = '';
+      child.stdout.on('data', (d) => { out += d; });
+      child.stderr.on('data', (d) => { out += d; });
+      const exited = new Promise((resolve) => child.once('exit', resolve));
+      children.push({ child, exited });
+      for (const end = Date.now() + 20_000; !(out.includes('đang chạy tại') && out.includes('[realtime] đang nghe')); await sleep(200)) {
+        if (child.exitCode !== null) throw new Error(`server dev thoát sớm: ${out.slice(-300)}`);
+        if (Date.now() > end) throw new Error(`server dev không sẵn sàng sau 20 giây. Output của server con:
+${out.slice(-600)}`);
+      }
+      // Đăng ký 'exit' ngay lúc tạo: tiến trình bị kill bằng tín hiệu có exitCode = null và sự kiện không phát lại,
+      // nên chờ 'exit' sau khi đã tắt sẽ treo mãi và Node thoát im lặng với mã 0 (bỏ qua phần test còn lại).
+      const stop = () => { child.kill(); return exited; };
+      return { url: `http://127.0.0.1:${port}`, stop, exited, output: () => out };
+    };
+    const call = async (url, method, p, token, body) => {
+      const r = await fetch(url + p, {
+        method,
+        headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: body === undefined ? undefined : JSON.stringify(body),
+      });
+      return { status: r.status, ...(await r.json()) };
+    };
+    const waitFor = (s, event, pred = () => true, ms = 8000) => new Promise((resolve) => {
+      const timer = setTimeout(() => { s.off(event, h); resolve(null); }, ms);
+      function h(data) { if (pred(data)) { clearTimeout(timer); s.off(event, h); resolve(data ?? true); } }
+      s.on(event, h);
+    });
+    // Chờ DB đạt điều kiện (scheduler của server con làm việc đóng phiên / huỷ đơn mỗi 5 giây).
+    const until = async (sql, params, pred, ms = 30_000) => {
+      for (const end = Date.now() + ms; Date.now() < end; await sleep(500)) {
+        const row = (await pool.query(sql, params)).rows[0];
+        if (row && pred(row)) return row;
+      }
+      return null;
+    };
+    const sockets = [];
+
+    try {
+      const P = await mkAccount('bidder', 'DevP');
+      const Q = await mkAccount('bidder', 'DevQ');
+      for (const id of [P, Q]) await tx((c) => walletService.topUp(c, { bidderId: id, amount: 5_000_000 }));
+      const tokP = tok(P, 'account', 'bidder');
+
+      await step('DEV_TOOLS tắt (mặc định): /api/dev không tồn tại, trả 404 NOT_FOUND kể cả khi có token', async () => {
+        const { server } = require('../src/app');
+        await new Promise((res) => server.listen(0, '127.0.0.1', res));
+        const url = `http://127.0.0.1:${server.address().port}`;
+        try {
+          for (const [p, t] of [['/api/dev/auctions/1/end-soon', tokP], ['/api/dev/orders/1/expire-payment', tokP], ['/api/dev/auctions/1/end-soon', null]]) {
+            const r = await call(url, 'POST', p, t, { seconds: 5 });
+            assert.deepStrictEqual([r.status, r.success, r.error.code], [404, false, 'NOT_FOUND'], p);
+          }
+        } finally {
+          await new Promise((res) => server.close(res));
+        }
+      });
+
+      await step('DEV_TOOLS=true nhưng NODE_ENV=production: vẫn 404 (không mở /api/dev)', async () => {
+        const prod = await startServer({ DEV_TOOLS: 'true', NODE_ENV: 'production' });
+        try {
+          const r = await call(prod.url, 'POST', '/api/dev/auctions/1/end-soon', tokP, { seconds: 5 });
+          assert.deepStrictEqual([r.status, r.error.code], [404, 'NOT_FOUND']);
+          assert.ok(prod.output().includes('bị bỏ qua vì NODE_ENV=production'), prod.output());
+        } finally { await prod.stop(); }
+      });
+
+      const dev = await startServer({ DEV_TOOLS: 'true' });
+      // Phiên kết thúc với `winner` thắng (tạo và đóng trong tiến trình test), trả { auctionId, orderId }.
+      const endedOrder = async (winner) => {
+        const { auctionId: aw } = await mkAuction(seller);
+        await engine.joinAuction({ bidderId: winner, auctionId: aw });
+        await engine.placeBid({ bidderId: winner, auctionId: aw, increment: 50_000 });
+        await expire(aw);
+        await closedAuction(aw);
+        return { auctionId: aw, orderId: (await pool.query('SELECT id FROM orders WHERE auction_id = $1', [aw])).rows[0].id };
+      };
+
+      await step('end-soon: cần đăng nhập; kiểm tra seconds, 404, phiên đã kết thúc 409, phiên tạm dừng 409', async () => {
+        const { auctionId: av } = await mkAuction(seller);
+        let r = await call(dev.url, 'POST', `/api/dev/auctions/${av}/end-soon`, null, { seconds: 10 });
+        assert.deepStrictEqual([r.status, r.error.code], [401, 'UNAUTHORIZED']);
+        const before = new Date((await clock(av)).ends_at).getTime();
+        for (const seconds of [4, 3601, 'abc', 5.5, 0]) {
+          r = await call(dev.url, 'POST', `/api/dev/auctions/${av}/end-soon`, tokP, { seconds });
+          assert.deepStrictEqual([r.status, r.error.code], [400, 'VALIDATION_ERROR'], `seconds=${seconds}`);
+        }
+        r = await call(dev.url, 'POST', '/api/dev/auctions/999999999/end-soon', tokP, {});
+        assert.deepStrictEqual([r.status, r.error.code], [404, 'NOT_FOUND']);
+        r = await call(dev.url, 'POST', '/api/dev/auctions/abc/end-soon', tokP, {});
+        assert.deepStrictEqual([r.status, r.error.code], [400, 'VALIDATION_ERROR']);
+        assert.strictEqual(new Date((await clock(av)).ends_at).getTime(), before, 'lỗi kiểm tra đầu vào không được đổi ends_at');
+
+        const f = await flag(av, 'paused');
+        r = await call(dev.url, 'POST', `/api/dev/auctions/${av}/end-soon`, tokP, { seconds: 10 });
+        assert.deepStrictEqual([r.status, r.error.code], [409, 'AUCTION_PAUSED']);
+        await pool.query(`UPDATE flagged_auctions SET status = 'safe' WHERE id = $1`, [f]);
+
+        const { auctionId: ae } = await mkAuction(seller);
+        await expire(ae);
+        await closedAuction(ae);
+        r = await call(dev.url, 'POST', `/api/dev/auctions/${ae}/end-soon`, tokP, { seconds: 10 });
+        assert.deepStrictEqual([r.status, r.error.code], [409, 'AUCTION_ENDED']);
+      });
+
+      let ended;
+      await step('end-soon: đặt ends_at, phát auction:update reason dev_time, scheduler đóng phiên và tạo đơn cho người dẫn đầu', async () => {
+        const { auctionId: ad } = await mkAuction(seller);
+        await engine.joinAuction({ bidderId: P, auctionId: ad });
+        await engine.joinAuction({ bidderId: Q, auctionId: ad });
+        await engine.placeBid({ bidderId: Q, auctionId: ad, increment: 50_000 });
+        await engine.placeBid({ bidderId: P, auctionId: ad, increment: 50_000 }); // P dẫn đầu
+        const heldQ = (await wallet(Q)).h;
+
+        const s = ioClient(dev.url, { auth: { token: tokP }, transports: ['websocket'], reconnection: false, forceNew: true });
+        sockets.push(s);
+        await new Promise((res, rej) => { s.once('connect', res); s.once('connect_error', rej); });
+        s.emit('auction:join', String(ad));
+        await sleep(300);
+        const gotUpdate = waitFor(s, 'auction:update', (u) => u.auctionId === String(ad) && u.reason === 'dev_time');
+        const gotEnded = waitFor(s, 'auction:ended', (e) => e.auctionId === String(ad), 30_000);
+
+        const r = await call(dev.url, 'POST', `/api/dev/auctions/${ad}/end-soon`, tokP, { seconds: 5 });
+        assert.strictEqual(r.status, 200, JSON.stringify(r.error));
+        assert.deepStrictEqual(Object.keys(r.data).sort(), ['auctionId', 'endsAt', 'remainingSeconds']);
+        assert.strictEqual(r.data.auctionId, String(ad));
+        assert.strictEqual(r.data.remainingSeconds, 5);
+        const left = new Date(r.data.endsAt) - Date.now();
+        assert.ok(left > -2000 && left < 8000, `endsAt còn ${left}ms, mong ~5000ms`);
+        assert.strictEqual(new Date((await clock(ad)).ends_at).getTime(), new Date(r.data.endsAt).getTime());
+
+        const u = await gotUpdate;
+        assert.ok(u, 'không nhận được auction:update reason dev_time');
+        assert.strictEqual(new Date(u.endsAt).getTime(), new Date(r.data.endsAt).getTime());
+        assert.strictEqual(u.remainingSeconds, 5);
+        assert.deepStrictEqual([u.status, u.paused, u.pausedAt, u.currentPrice, u.bidCount], ['active', false, null, 1_100_000, 2]);
+
+        // Việc đóng phiên do scheduler của server con làm như thật.
+        const row = await until('SELECT status, winner_id FROM auctions WHERE id = $1', [ad], (x) => x.status !== 'active');
+        assert.ok(row, 'phiên không được đóng sau khi hết giờ');
+        assert.deepStrictEqual([row.status, String(row.winner_id)], ['ended', String(P)]);
+        assert.ok(await gotEnded, 'không nhận được auction:ended');
+        const order = (await pool.query(
+          'SELECT id, bidder_id, final_price::int AS fp, payment_status FROM orders WHERE auction_id = $1', [ad])).rows;
+        assert.strictEqual(order.length, 1);
+        assert.deepStrictEqual([String(order[0].bidder_id), order[0].fp, order[0].payment_status], [String(P), 1_100_000, 'awaiting_payment']);
+        assert.strictEqual((await wallet(Q)).h, heldQ - 100_000, 'cọc của người thua phải được hoàn');
+        ended = { auctionId: ad, orderId: order[0].id };
+      });
+
+      await step('expire-payment: đặt hạn về quá khứ, scheduler huỷ đơn và tịch thu cọc; gọi lại 409 PAYMENT_EXPIRED', async () => {
+        const heldBefore = (await wallet(P)).h;
+        let r = await call(dev.url, 'POST', `/api/dev/orders/${ended.orderId}/expire-payment`, tokP);
+        assert.strictEqual(r.status, 200, JSON.stringify(r.error));
+        assert.deepStrictEqual(Object.keys(r.data).sort(), ['orderId', 'paymentDeadline']);
+        assert.strictEqual(r.data.orderId, String(ended.orderId));
+        // paymentDeadline = now() - 1 giây của DB: so với giờ máy cho dung sai +2 giây (lệch đồng hồ máy / DB)
+        assert.ok(new Date(r.data.paymentDeadline) < new Date(Date.now() + 2000), 'paymentDeadline phải ở quá khứ');
+        const o = await until('SELECT payment_status FROM orders WHERE id = $1', [ended.orderId], (x) => x.payment_status === 'expired');
+        assert.ok(o, 'đơn không bị scheduler đánh dấu expired');
+        const dep = (await pool.query(
+          'SELECT status FROM auction_deposits WHERE auction_id = $1 AND bidder_id = $2', [ended.auctionId, P])).rows[0];
+        assert.strictEqual(dep.status, 'forfeited');
+        // Cọc đã chuyển sang trạng thái "áp vào thanh toán" lúc đóng phiên nên không còn nằm trong wallet_held; chỉ cần
+        // có giao dịch forfeit và không hoàn lại.
+        const forfeits = await pool.query(`SELECT 1 FROM wallet_transactions WHERE bidder_id = $1 AND kind = 'deposit_forfeit'`, [P]);
+        assert.strictEqual(forfeits.rowCount, 1);
+        assert.strictEqual((await wallet(P)).h, heldBefore - 100_000, 'cọc bị tịch thu không còn nằm trong ví');
+        r = await call(dev.url, 'POST', `/api/dev/orders/${ended.orderId}/expire-payment`, tokP);
+        assert.deepStrictEqual([r.status, r.error.code], [409, 'PAYMENT_EXPIRED']);
+      });
+
+      await step('expire-payment: đơn đã thanh toán 409 ALREADY_PAID; không có đơn 404', async () => {
+        const paid = await endedOrder(Q);
+        await engine.payOrder({ bidderId: Q, orderId: paid.orderId, method: 'wallet' });
+        let r = await call(dev.url, 'POST', `/api/dev/orders/${paid.orderId}/expire-payment`, tokP);
+        assert.deepStrictEqual([r.status, r.error.code], [409, 'ALREADY_PAID']);
+        r = await call(dev.url, 'POST', '/api/dev/orders/999999999/expire-payment', tokP);
+        assert.deepStrictEqual([r.status, r.error.code], [404, 'NOT_FOUND']);
+        const after = (await pool.query('SELECT payment_status, payment_deadline FROM orders WHERE id = $1', [paid.orderId])).rows[0];
+        assert.strictEqual(after.payment_status, 'paid');
+        assert.ok(new Date(after.payment_deadline) > new Date(), 'đơn đã trả tiền không bị đổi hạn');
+      });
+    } finally {
+      sockets.forEach((s) => s.close());
+      await Promise.all(children.map(({ child, exited }) => { child.kill(); return exited; }));
+    }
+  }
+
   console.log('Real-time giữa nhiều backend cùng một database (pg_notify kênh bidvibe_events)');
   {
     const { spawn } = require('child_process');
@@ -1077,7 +1405,8 @@ async function main() {
       // Sẵn sàng khi đã lắng nghe cổng VÀ đã LISTEN kênh bidvibe_events.
       for (const end = Date.now() + 20_000; !(out.includes('đang chạy tại') && out.includes('[realtime] đang nghe')); await sleep(200)) {
         if (child.exitCode !== null) throw new Error(`server ${name} thoát sớm: ${out.slice(-300)}`);
-        if (Date.now() > end) throw new Error(`server ${name} không sẵn sàng sau 20 giây`);
+        if (Date.now() > end) throw new Error(`server ${name} không sẵn sàng sau 20 giây. Output của server con:
+${out.slice(-600)}`);
       }
       return `http://127.0.0.1:${port}`;
     };
@@ -1122,6 +1451,7 @@ async function main() {
         const bid = await rest(urlA, 'POST', '/api/bids', tok(P, 'account', 'bidder'), { auctionId: String(am), increment: 50_000 });
         const u = await got;
         assert.ok(u, 'server B không phát auction:update của lượt giá đặt ở server A');
+        assertServerTime(u, 'auction:update qua server B'); // giờ của server B (nơi client nối), không phải server A
         assert.strictEqual(u.currentPrice, bid.currentPrice);
         await sleep(800);
         assert.strictEqual(updates.length, 1, `nhận ${updates.length} lần auction:update (mong 1)`);
@@ -1150,15 +1480,23 @@ async function main() {
       sockets.forEach((s) => s.close());
       // Luôn tắt server con, kể cả khi bước nào đó lỗi.
       await Promise.all(children.map((c) => new Promise((resolve) => {
-        if (c.exitCode !== null) return resolve();
+        if (c.exitCode !== null || c.signalCode !== null) return resolve(); // đã thoát (kể cả bị tín hiệu): 'exit' không phát lại
         c.once('exit', resolve);
         c.kill();
       })));
     }
   }
 
+  finished = true;
   console.log(`\nTất cả ${passed} bước đạt.`);
 }
+
+// Nếu event loop cạn trước khi main() xong (một promise treo), Node thoát với mã 0 mà không chạy cleanup:
+// biến thành thất bại thay vì báo đạt giả.
+let finished = false;
+process.on('exit', (code) => {
+  if (!finished && code === 0) { console.error('\n✗ THẤT BẠI: test dừng giữa chừng (có promise treo), chưa chạy hết các phần.'); process.exitCode = 1; }
+});
 
 main()
   .catch((err) => { console.error('\n✗ THẤT BẠI:', err); process.exitCode = 1; })

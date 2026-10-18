@@ -19,9 +19,14 @@ const pending = new Set();
 // io được lấy lúc gọi (không require ở đầu file) để tránh vòng require với sockets/index.js.
 const getIo = () => require('./index').getIo();
 
+// Các sự kiện phiên kèm serverTime (giờ của CHÍNH tiến trình đang phát cho socket) để app tính độ lệch đồng hồ.
+// Đóng dấu ở đây (không ở publish) nên tin nhận từ backend khác cũng mang giờ của server mà client đang nối.
+const STAMPED_EVENTS = new Set(['auction:update', 'auction:ended']);
+
 function emitLocal(room, event, payload) {
   const io = getIo();
-  if (io) io.to(room).emit(event, payload);
+  if (!io) return;
+  io.to(room).emit(event, STAMPED_EVENTS.has(event) ? { ...payload, serverTime: new Date().toISOString() } : payload);
 }
 
 // Gửi một tin lên kênh. message: { room, event, payload } hoặc lệnh { command, ... }.
