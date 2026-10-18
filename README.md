@@ -52,9 +52,10 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 | `npm start` | Chạy server (không tự khởi động lại) |
 | `npm run db:migrate` | Chạy các file trong `migrations/` chưa được áp dụng |
 | `npm run db:seed` | Thêm dữ liệu demo (BE1 + BE2), chạy lại nhiều lần không bị trùng. Mật khẩu demo `123456`: tài khoản demo đã có mà bị đổi mật khẩu thì được đặt lại về `123456` (chỉ tài khoản demo và 3 bot; số dư ví giữ nguyên). **Thử đổi mật khẩu / sửa hồ sơ (`POST /api/me/password`, `PATCH /api/me`) chỉ trên tài khoản tự đăng ký**, không dùng tài khoản demo |
+| `npm run test:fraud` | Unit test các luật gian lận (`analyze()` của `fraud_detection.js`), không cần database: mỗi luật có ca phát hiện đúng và ca không báo nhầm, kể cả sát ngưỡng |
 | `npm run test:be1` | Kiểm thử end-to-end phần đấu giá/ví/tạm dừng/gian lận trên DB dùng chung (tài khoản `test_be1_*`, tự dọn) |
 | `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_<mã lần chạy>_*`, tự dọn) |
-| `npm test` | Chạy cả `test:be1` và `test:be2` |
+| `npm test` | Chạy `test:fraud`, `test:be1` rồi `test:be2` |
 | `npm run test:clean [-- --dry-run]` | Dọn dữ liệu `test_be2_` bỏ sót từ lần chạy bị ngắt (chỉ lần chạy bắt đầu hơn 1 giờ trước; in danh sách trước khi xoá). Chỉ chạy khi cần |
 | `npm run wallet:check [-- --bidder-ids=1,2]` | Đối soát ví (CHỈ ĐỌC): so số dư và tiền đang giữ của từng ví với sổ `wallet_transactions` và các khoản cọc; in bảng ví lệch, có lệch thì thoát mã 1 (công thức ở dưới) |
 | `npm run docs:check` | So route đăng ký trong `src/routes/` với `docs/api.md` (báo route thiếu / thừa). Chạy sau khi thêm hoặc sửa route |
