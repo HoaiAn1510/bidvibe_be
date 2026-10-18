@@ -437,11 +437,14 @@ async function main() {
         [af, i % 2 ? B : A, 1_000_000 + (i + 1) * 50_000, String((6 - i) * 20)]);
     }
     const created = await Promise.all(Array.from({ length: 8 }, () => fraud.scanAuction(af)));
-    assert.strictEqual(created.reduce((x, y) => x + y, 0), 1, `số cờ mới: ${created}`);
-    const n = await pool.query(`SELECT count(*)::int AS n FROM flagged_auctions WHERE auction_id = $1 AND status = 'pending'`, [af]);
-    assert.strictEqual(n.rows[0].n, 1);
-    const ev = await pool.query(
-      `SELECT count(*)::int AS n FROM flag_evidence e JOIN flagged_auctions f ON f.id = e.flagged_auction_id WHERE f.auction_id = $1`, [af]);
+    // Các luật theo danh tính (seller_affinity...) cũng có thể báo trên tài khoản test, nên không giả định chỉ có một luật:
+    // mỗi LÝ DO đúng một cờ pending, tổng số cờ mới = số cờ pending, và cờ ping_pong có đúng một bộ bằng chứng.
+    const pending = (await pool.query(`SELECT id, reason FROM flagged_auctions WHERE auction_id = $1 AND status = 'pending' ORDER BY id`, [af])).rows;
+    assert.strictEqual(created.reduce((x, y) => x + y, 0), pending.length, `số cờ mới: ${created}, cờ pending: ${pending.map((r) => r.reason)}`);
+    assert.strictEqual(new Set(pending.map((r) => r.reason)).size, pending.length, 'mỗi lý do chỉ một cờ pending');
+    const pp = pending.filter((r) => r.reason.startsWith('Chỉ hai'));
+    assert.strictEqual(pp.length, 1);
+    const ev = await pool.query('SELECT count(*)::int AS n FROM flag_evidence WHERE flagged_auction_id = $1', [pp[0].id]);
     assert.strictEqual(ev.rows[0].n, 2); // đúng một bộ bằng chứng, không bị nhân đôi
   });
   await step('unique index chặn hai cờ pending giống nhau chèn cùng lúc', async () => {
@@ -491,13 +494,19 @@ async function main() {
          VALUES ($1, $2, $3, now() - ($4 || ' seconds')::interval)`,
         [ap, i % 2 ? B : A, 1_000_000 + (i + 1) * 50_000, String((6 - i) * 20)]);
     }
-    assert.strictEqual(await fraud.scanAuction(ap), 1);
+    assert.ok(await fraud.scanAuction(ap) >= 1);
     const before = await flagsOf(ap);
-    assert.strictEqual(before[0].severity, 'high');
+    // Luật theo danh tính có thể thêm cờ mức thấp / vừa; báo cáo luôn gộp vào cờ nghiêm trọng nhất (ping_pong, high).
+    const top = before.find((f) => f.reason.startsWith('Chỉ hai'));
+    assert.strictEqual(top.severity, 'high');
     const r = await fraud.reportAuction({ reporterId: C, auctionId: ap, reason: 'Thấy hai người đặt qua lại' });
     assert.strictEqual(r.flagCreated, false);
     const after = await flagsOf(ap);
-    assert.deepStrictEqual([after.length, after[0].id, after[0].evidence], [1, before[0].id, before[0].evidence + 1]);
+    assert.strictEqual(after.length, before.length, 'không tạo cờ mới');
+    assert.strictEqual(after.find((f) => f.id === top.id).evidence, top.evidence + 1);
+    for (const f of before.filter((x) => x.id !== top.id)) {
+      assert.strictEqual(after.find((x) => x.id === f.id).evidence, f.evidence, 'cờ khác không bị thêm bằng chứng');
+    }
   });
   await step('cùng một người báo cáo song song: chỉ một báo cáo được ghi', async () => {
     const { auctionId: ap } = await mkAuction(seller);
@@ -1563,6 +1572,117 @@ async function main() {
       await pool.query('UPDATE bidders SET wallet_balance = wallet_balance - 5 WHERE account_id = $1', [w]);
       assert.throws(() => parseArgs(['--bidder-ids=abc']), /danh sách id số/);
       assert.throws(() => parseArgs(['--sai']), /Tham số không hợp lệ/);
+    });
+  }
+
+  console.log('Luật gian lận theo danh tính người đặt giá (seller_alt_account, seller_affinity, repeat_forfeiter)');
+  {
+    const R1 = 'Người đặt giá trùng số điện thoại với người bán';
+    const R2 = 'Tài khoản gần như chỉ đặt giá phiên của một người bán';
+    const R3 = 'Người dẫn đầu từng thắng rồi bỏ không thanh toán';
+    const flagsOf = async (auctionId, reason) => {
+      const f = (await pool.query(
+        'SELECT id, severity, confidence, reason, status FROM flagged_auctions WHERE auction_id = $1 AND reason = $2 ORDER BY id', [auctionId, reason])).rows;
+      for (const row of f) {
+        row.evidence = (await pool.query('SELECT label, value FROM flag_evidence WHERE flagged_auction_id = $1 ORDER BY id', [row.id])).rows;
+      }
+      return f;
+    };
+    // Lượt giá trong tiến trình test; scanAuction chạy lại một cách tường minh (placeBid cũng tự quét nền sau đó).
+    const bidAndScan = async (bidderId, auctionId) => {
+      await engine.joinAuction({ bidderId, auctionId }).catch((e) => { if (e.code !== 'ALREADY_JOINED') throw e; });
+      await engine.placeBid({ bidderId, auctionId, increment: 50_000 });
+      await fraud.scanAuction(auctionId);
+    };
+    const seller2 = await mkAccount('seller', 'ShillSeller');
+    await pool.query('UPDATE accounts SET phone = $2 WHERE id = $1', [seller2, '0901 234 567']);
+    const mkFunded = async (name, phone = null) => {
+      const id = await mkAccount('bidder', name);
+      if (phone) await pool.query('UPDATE accounts SET phone = $2 WHERE id = $1', [id, phone]);
+      await tx((c) => walletService.topUp(c, { bidderId: id, amount: 5_000_000 }));
+      return id;
+    };
+
+    await step('seller_alt_account: người bán "0901 234 567" và người mua "+84901234567" -> đúng 1 cờ high/90, bằng chứng che số; đặt giá thêm không sinh cờ trùng', async () => {
+      const X = await mkFunded('ShillX', '+84901234567');
+      const Y = await mkFunded('ShillY', '0377 111 222');
+      const { auctionId } = await mkAuction(seller2);
+      await bidAndScan(X, auctionId);
+      let f = await flagsOf(auctionId, R1);
+      assert.strictEqual(f.length, 1);
+      assert.deepStrictEqual([f[0].severity, f[0].confidence], ['high', 90]);
+      assert.deepStrictEqual(f[0].evidence, [
+        { label: `Tài khoản #${X} · số điện thoại trùng (đã che)`, value: '090****567' },
+        { label: `Tài khoản #${X} · số lượt giá trong phiên`, value: '1' },
+      ]);
+      const text = JSON.stringify(f);
+      for (const leak of ['0901234567', '901234567', '234567', '+84', '@', '0901 234 567']) assert.ok(!text.includes(leak), `bằng chứng lộ "${leak}": ${text}`);
+      // Đặt giá thêm (cả người khác) và quét nhiều lần: vẫn đúng một cờ.
+      await bidAndScan(Y, auctionId);
+      await bidAndScan(X, auctionId);
+      await fraud.scanAuction(auctionId);
+      await sleep(1500); // các lần quét nền của placeBid
+      f = await flagsOf(auctionId, R1);
+      assert.strictEqual(f.length, 1, `có ${f.length} cờ seller_alt_account`);
+      assert.strictEqual(f[0].evidence.length, 2, 'không thêm bằng chứng trùng');
+    });
+    await step('seller_alt_account KHÔNG báo nhầm: số điện thoại khác, hoặc người bán / người mua chưa có số', async () => {
+      const Z = await mkFunded('ShillZ', '0911 234 567');
+      const { auctionId: a1 } = await mkAuction(seller2);
+      await bidAndScan(Z, a1);
+      assert.strictEqual((await flagsOf(a1, R1)).length, 0, 'số khác nhau');
+      const noPhoneSeller = await mkAccount('seller', 'NoPhoneSeller');
+      const W = await mkFunded('ShillW'); // không có số
+      const { auctionId: a2 } = await mkAuction(noPhoneSeller);
+      await bidAndScan(W, a2);
+      assert.strictEqual((await flagsOf(a2, R1)).length, 0, 'cả hai đều không có số điện thoại');
+    });
+
+    await step('repeat_forfeiter: người dẫn đầu từng bị tịch thu cọc -> cờ low/60, bằng chứng có số lần và lần gần nhất; người chưa bỏ đơn thì không báo', async () => {
+      const F = await mkFunded('ShillForfeit');
+      const G = await mkFunded('ShillGood');
+      const { auctionId: dead } = await mkAuction(seller2);
+      const j = await engine.joinAuction({ bidderId: F, auctionId: dead });
+      await pool.query(`UPDATE auction_deposits SET status = 'forfeited' WHERE auction_id = $1 AND bidder_id = $2`, [dead, F]);
+      await tx((c) => walletService.forfeitDeposit(c, { bidderId: F, auctionId: dead, amount: j.deposit }));
+      const last = new Date((await pool.query(`SELECT max(created_at) AS t FROM wallet_transactions WHERE bidder_id = $1 AND kind = 'deposit_forfeit'`, [F])).rows[0].t);
+      const { auctionId } = await mkAuction(seller2);
+      await bidAndScan(F, auctionId);
+      const f = await flagsOf(auctionId, R3);
+      assert.strictEqual(f.length, 1);
+      assert.deepStrictEqual([f[0].severity, f[0].confidence], ['low', 60]);
+      const v = new Date(last.getTime() + 7 * 3600_000); // giờ Việt Nam (UTC+7)
+      const z = (n) => String(n).padStart(2, '0');
+      assert.deepStrictEqual(f[0].evidence.map((e) => e.value), ['1', `${z(v.getUTCHours())}:${z(v.getUTCMinutes())} ${z(v.getUTCDate())}/${z(v.getUTCMonth() + 1)}/${v.getUTCFullYear()}`]);
+      // Người đã từng bỏ đơn nhưng bị vượt giá: người dẫn đầu mới (chưa bỏ đơn) -> không còn cờ mới cho phiên khác.
+      const { auctionId: other } = await mkAuction(seller2);
+      await bidAndScan(G, other);
+      assert.strictEqual((await flagsOf(other, R3)).length, 0, 'người dẫn đầu chưa từng bỏ đơn');
+      await bidAndScan(F, other); // F vượt G và dẫn đầu -> được báo ở phiên này
+      assert.strictEqual((await flagsOf(other, R3)).length, 1);
+    });
+
+    await step('seller_affinity: đặt giá 3 phiên khác nhau của cùng người bán (100% lượt giá) -> cờ medium/70; rải thêm sang người bán khác (75%) hoặc mới 2 phiên thì không báo', async () => {
+      const H = await mkFunded('ShillHooked');
+      const J = await mkFunded('ShillSpread');
+      const [s1, s2, s3] = [await mkAuction(seller2), await mkAuction(seller2), await mkAuction(seller2)];
+      await bidAndScan(H, s1.auctionId);
+      await bidAndScan(H, s2.auctionId);
+      assert.strictEqual((await flagsOf(s2.auctionId, R2)).length, 0, 'mới 2 phiên của người bán');
+      await bidAndScan(H, s3.auctionId);
+      const f = await flagsOf(s3.auctionId, R2);
+      assert.strictEqual(f.length, 1);
+      assert.deepStrictEqual([f[0].severity, f[0].confidence], ['medium', 70]);
+      assert.deepStrictEqual(f[0].evidence.map((e) => e.value), ['3', '100% (3/3 lượt)', '0']);
+      assert.ok(!JSON.stringify(f).includes('@'), 'bằng chứng không ghi email');
+      // J: 3 lượt ở người bán này + 1 lượt ở người bán khác = 75% < 80%
+      const { auctionId: o1 } = await mkAuction(seller);
+      await bidAndScan(J, o1);
+      for (let i = 0; i < 3; i += 1) {
+        const { auctionId } = await mkAuction(seller2);
+        await bidAndScan(J, auctionId);
+        assert.strictEqual((await flagsOf(auctionId, R2)).length, 0, `phiên ${i + 1} của người bán: tỉ lệ dưới 80%`);
+      }
     });
   }
 

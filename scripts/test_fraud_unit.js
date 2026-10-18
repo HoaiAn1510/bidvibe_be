@@ -10,7 +10,7 @@
 // new_account tài khoản < 10 phút đặt >= 2 lần giá khởi điểm.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'unit-test-khong-dung-database';
 const assert = require('assert');
-const { analyze } = require('../src/services/fraud_detection');
+const { analyze, normalizePhone, maskPhone } = require('../src/services/fraud_detection');
 
 const T0 = Date.UTC(2026, 9, 1, 8, 0, 0);
 const OLD_ACCOUNT = new Date(T0 - 365 * 86_400_000);
@@ -151,6 +151,115 @@ test('KHÔNG báo nhầm: không biết giá khởi điểm (startPrice = 0)', (
 });
 test('KHÔNG báo nhầm: tài khoản cũ đặt giá cao', () => {
   assert.deepStrictEqual(codes([bid('A', 1_100_000, 0), bid('O', 2_000_000, 70)]), []);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Luật theo danh tính (cần context: số điện thoại, lịch sử người đặt giá). Không có context thì không luật nào chạy.
+const START = { startPrice: 1_000_000 };
+const hist = (over = {}) => ({ totalBids: 10, sellerBids: 8, sellerAuctions: 3, paidWins: 0, forfeits: 0, lastForfeitAt: null, ...over });
+const two = [bid('A', 1_000_000, 0), bid('B', 1_050_000, 70)];
+const signal = (bids, ctx, code) => analyze(bids, { ...START, ...ctx }).find((s) => s.code === code);
+const allText = (s) => JSON.stringify([s.reason, s.explanation, s.evidence]);
+
+console.log('seller_alt_account: người đặt giá trùng số điện thoại với người bán');
+test('phát hiện: "0901 234 567" của người bán và "+84901234567" của người đặt giá (hai định dạng khác nhau)', () => {
+  const ctx = { sellerPhone: '0901 234 567', bidderPhones: { A: '+84901234567', B: '0377 111 222' } };
+  assert.deepStrictEqual(codes(two, { ...START, ...ctx }), ['seller_alt_account']);
+  const s = signal(two, ctx, 'seller_alt_account');
+  assert.deepStrictEqual([s.severity, s.confidence, s.reason], ['high', 90, 'Người đặt giá trùng số điện thoại với người bán']);
+});
+test('bằng chứng che số điện thoại (090****567), kèm số lượt giá của tài khoản; không lộ đủ số', () => {
+  const bids = [bid('A', 1_000_000, 0), bid('B', 1_050_000, 70), bid('A', 1_100_000, 140)];
+  const s = signal(bids, { sellerPhone: '0901.234.567', bidderPhones: { A: '090-1234-567' } }, 'seller_alt_account');
+  assert.deepStrictEqual(s.evidence, [['Tài khoản #A · số điện thoại trùng (đã che)', '090****567'], ['Tài khoản #A · số lượt giá trong phiên', '2']]);
+  const text = allText(s);
+  for (const leak of ['0901234567', '901234567', '1234567', '234567', '+84']) assert.ok(!text.includes(leak), `lộ ${leak}: ${text}`);
+});
+test('các định dạng +84, 84, 0084, dấu chấm, gạch, ngoặc đều chuẩn hoá về cùng một số', () => {
+  for (const raw of ['+84901234567', '+84 901 234 567', '84901234567', '0084901234567', '0901.234.567', '090-123-4567', '(090) 1234 567']) {
+    assert.strictEqual(normalizePhone(raw), '0901234567', raw);
+  }
+  assert.strictEqual(maskPhone('0901234567'), '090****567');
+});
+test('một lượt giá là đủ để phát hiện; hai tài khoản cùng trùng số vẫn chỉ một tín hiệu, bằng chứng của cả hai', () => {
+  assert.deepStrictEqual(codes([bid('A', 1_000_000, 0)], { ...START, sellerPhone: '0901234567', bidderPhones: { A: '0901234567' } }), ['seller_alt_account']);
+  const s = signal(two, { sellerPhone: '0901234567', bidderPhones: { A: '0901234567', B: '+84901234567' } }, 'seller_alt_account');
+  assert.strictEqual(s.evidence.length, 4);
+  assert.ok(s.evidence.some(([l]) => l.includes('#A')) && s.evidence.some(([l]) => l.includes('#B')));
+});
+test('KHÔNG báo nhầm: số điện thoại khác nhau', () => {
+  assert.deepStrictEqual(codes(two, { ...START, sellerPhone: '0901234567', bidderPhones: { A: '0901234568', B: '0911234567' } }), []);
+});
+test('KHÔNG báo nhầm: số rỗng, thiếu hoặc quá ngắn (hai số rỗng không được coi là trùng)', () => {
+  for (const [sellerPhone, bidderPhone] of [['', ''], [null, null], ['   ', '  '], ['0901234567', ''], ['0901234567', null], ['', '0901234567'], ['12345', '12345'], ['abc', 'abc']]) {
+    assert.deepStrictEqual(codes(two, { ...START, sellerPhone, bidderPhones: { A: bidderPhone, B: bidderPhone } }), [], JSON.stringify([sellerPhone, bidderPhone]));
+  }
+  assert.deepStrictEqual(codes(two, { ...START, sellerPhone: '0901234567', bidderPhones: {} }), []);
+});
+
+console.log('seller_affinity: gần như chỉ đặt giá phiên của một người bán');
+test('phát hiện sát ngưỡng: 3 phiên, 8/10 lượt = 80%, chưa thắng thanh toán phiên nào', () => {
+  const ctx = { bidderHistory: { A: hist() } };
+  assert.deepStrictEqual(codes(two, { ...START, ...ctx }), ['seller_affinity']);
+  const s = signal(two, ctx, 'seller_affinity');
+  assert.deepStrictEqual([s.severity, s.confidence, s.reason], ['medium', 70, 'Tài khoản gần như chỉ đặt giá phiên của một người bán']);
+  assert.deepStrictEqual(s.evidence.map(([, v]) => v), ['3', '80% (8/10 lượt)', '0']);
+});
+test('phát hiện: nhiều tài khoản cùng vi phạm thì một tín hiệu, bằng chứng của từng tài khoản; chỉ xét người đang đặt giá', () => {
+  const ctx = { bidderHistory: { A: hist(), B: hist({ sellerAuctions: 5, sellerBids: 10, totalBids: 10 }), Z: hist() } }; // Z không đặt giá trong phiên này
+  const s = signal(two, ctx, 'seller_affinity');
+  assert.strictEqual(s.evidence.length, 6);
+  assert.ok(!allText(s).includes('#Z'));
+});
+test('KHÔNG báo nhầm: chỉ 2 phiên của người bán (dưới 3)', () => {
+  assert.deepStrictEqual(codes(two, { ...START, bidderHistory: { A: hist({ sellerAuctions: 2 }) } }), []);
+});
+test('KHÔNG báo nhầm: đặt giá rải đều nhiều người bán (79 trên 100 lượt = 79%, dưới 80%)', () => {
+  assert.deepStrictEqual(codes(two, { ...START, bidderHistory: { A: hist({ sellerBids: 79, totalBids: 100 }) } }), []);
+  assert.deepStrictEqual(codes(two, { ...START, bidderHistory: { A: hist({ sellerBids: 3, totalBids: 12, sellerAuctions: 3 }) } }), []);
+});
+test('KHÔNG báo nhầm: người mua đã thắng và thanh toán phiên của người bán này', () => {
+  assert.deepStrictEqual(codes(two, { ...START, bidderHistory: { A: hist({ paidWins: 1 }) } }), []);
+});
+test('KHÔNG báo nhầm: không có lịch sử, hoặc tổng lượt giá bằng 0 (không chia cho 0)', () => {
+  assert.deepStrictEqual(codes(two, { ...START, bidderHistory: {} }), []);
+  assert.deepStrictEqual(codes(two, { ...START, bidderHistory: { A: hist({ totalBids: 0, sellerBids: 0 }) } }), []);
+});
+
+console.log('repeat_forfeiter: người dẫn đầu từng thắng rồi bỏ không thanh toán');
+test('phát hiện: người dẫn đầu (lượt cuối) bị tịch thu cọc 1 lần; bằng chứng có số lần và lần gần nhất theo giờ Việt Nam', () => {
+  const ctx = { bidderHistory: { B: hist({ totalBids: 4, sellerBids: 1, sellerAuctions: 1, forfeits: 1, lastForfeitAt: new Date(Date.UTC(2026, 9, 1, 8, 0, 0)) }) } };
+  assert.deepStrictEqual(codes(two, { ...START, ...ctx }), ['repeat_forfeiter']);
+  const s = signal(two, ctx, 'repeat_forfeiter');
+  assert.deepStrictEqual([s.severity, s.confidence, s.reason], ['low', 60, 'Người dẫn đầu từng thắng rồi bỏ không thanh toán']);
+  assert.deepStrictEqual(s.evidence.map(([, v]) => v), ['1', '15:00 01/10/2026']); // 08:00 UTC = 15:00 giờ Việt Nam
+});
+test('phát hiện: bị tịch thu nhiều lần thì ghi đúng số lần', () => {
+  const s = signal(two, { bidderHistory: { B: hist({ totalBids: 4, sellerBids: 1, sellerAuctions: 1, forfeits: 3, lastForfeitAt: new Date(T0) }) } }, 'repeat_forfeiter');
+  assert.strictEqual(s.evidence[0][1], '3');
+});
+test('KHÔNG báo nhầm: người dẫn đầu chưa từng bỏ đơn (forfeits = 0)', () => {
+  assert.deepStrictEqual(codes(two, { ...START, bidderHistory: { B: hist({ totalBids: 4, sellerBids: 1, sellerAuctions: 1 }) } }), []);
+});
+test('KHÔNG báo nhầm: người từng bỏ đơn không phải người đang dẫn đầu', () => {
+  assert.deepStrictEqual(codes(two, { ...START, bidderHistory: { A: hist({ totalBids: 4, sellerBids: 1, sellerAuctions: 1, forfeits: 2, lastForfeitAt: new Date(T0) }), B: hist({ totalBids: 4, sellerBids: 1, sellerAuctions: 1 }) } }), []);
+});
+test('KHÔNG báo nhầm: không có lịch sử của người dẫn đầu', () => {
+  assert.deepStrictEqual(codes(two, { ...START, bidderHistory: {} }), []);
+});
+
+console.log('Kết hợp');
+test('nhiều luật cùng lúc: thứ tự tín hiệu là bốn luật mẫu lượt giá rồi seller_alt_account, seller_affinity, repeat_forfeiter', () => {
+  const bids = [bid('A', 1_100_000, 0), bid('B', 3_850_000, 70, 2)]; // price_jump + new_account
+  const ctx = {
+    startPrice: 1_000_000, sellerPhone: '0901234567', bidderPhones: { B: '0901234567' },
+    bidderHistory: { B: hist({ forfeits: 1, lastForfeitAt: new Date(T0) }) },
+  };
+  assert.deepStrictEqual(codes(bids, ctx), ['price_jump', 'new_account', 'seller_alt_account', 'seller_affinity', 'repeat_forfeiter']);
+});
+test('context bỏ trống: chỉ bốn luật theo mẫu lượt giá chạy (tương thích cách gọi cũ)', () => {
+  assert.deepStrictEqual(codes([bid('A', 1_000_000, 0), bid('B', 3_000_000, 70)], { startPrice: 1_000_000 }), ['price_jump']);
+  assert.deepStrictEqual(analyze([bid('A', 1_000_000, 0), bid('B', 3_000_000, 70)]).map((s) => s.code), ['price_jump']);
 });
 
 console.log(`\nTất cả ${passed} ca đạt.`);
