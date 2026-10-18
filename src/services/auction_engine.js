@@ -11,6 +11,10 @@ const { broadcast } = require('../sockets/broadcast');
 
 const DEFAULT_BID_STEP = 50_000;
 const SNIPE_WINDOW_MS = 30_000;       // đặt giá trong 30 giây cuối thì gia hạn thêm 30 giây
+// Giới hạn tốc độ: mỗi người tối đa một lượt đặt giá (bất kỳ phiên nào) mỗi giây. Chặn bot / app lỗi bắn dồn dập (và nhấn
+// đúp nút) làm đẩy giá ảo hoặc đè DB; 1 giây vẫn đủ nhanh cho người thật và cho bot demo (mặc định 5 giây một lượt).
+// Để trong đối tượng `limits` để test đổi được (đặt 0 = tắt).
+const limits = { bidMinIntervalMs: 1000 };
 const PAYMENT_WINDOW_MS = 24 * 3600_000;
 const FEE_RATE = 0.05;
 const SHIPPING_FEE = 40_000;
@@ -62,7 +66,8 @@ function emit(room, event, payload) {
 // ---------- Tạo phiên (BE2 gọi khi Thẩm định duyệt tin đăng) ----------
 
 // `client` đang trong giao dịch của BE2. Sinh auctions (1-1 với listing), đặt listing = 'live'.
-async function createAuctionForListing(client, listingId, { bidStep = DEFAULT_BID_STEP, startsAt = new Date() } = {}) {
+// startsAt bỏ trống: phiên bắt đầu ngay và ends_at = giờ DATABASE + thời lượng (seed.js truyền startsAt để dựng phiên đã kết thúc).
+async function createAuctionForListing(client, listingId, { bidStep = DEFAULT_BID_STEP, startsAt = null } = {}) {
   const { rows } = await client.query(
     'SELECT id, starting_price, duration_hours FROM listings WHERE id = $1 FOR UPDATE',
     [listingId],
@@ -71,7 +76,6 @@ async function createAuctionForListing(client, listingId, { bidStep = DEFAULT_BI
   if (!listing) throw new AppError('Không tìm thấy tin đăng', 404, 'NOT_FOUND');
 
   const startPrice = Number(listing.starting_price);
-  const endsAt = new Date(new Date(startsAt).getTime() + listing.duration_hours * 3600_000);
   let auctionId;
   try {
     auctionId = await auctionModel.insertAuction(client, {
@@ -80,7 +84,7 @@ async function createAuctionForListing(client, listingId, { bidStep = DEFAULT_BI
       bidStep,
       depositRequired: depositFor(startPrice),
       startsAt,
-      endsAt,
+      durationHours: listing.duration_hours,
     });
   } catch (err) {
     if (err.code === '23505') throw new AppError('Tin đăng này đã có phiên đấu giá', 409, 'AUCTION_EXISTS');
@@ -137,7 +141,8 @@ async function joinAuction({ bidderId, auctionId }) {
 }
 
 function assertBiddable(a) {
-  if (a.status !== 'active' || new Date(a.ends_at) <= new Date()) {
+  // a.expired do SQL tính theo giờ DATABASE (auction.model lockById), không theo giờ máy.
+  if (a.status !== 'active' || a.expired) {
     throw new AppError('Phiên đấu giá đã kết thúc', 409, 'AUCTION_ENDED');
   }
   if (a.paused) throw new AppError('Phiên đang bị tạm dừng để kiểm tra', 409, 'AUCTION_PAUSED');
@@ -177,25 +182,36 @@ async function placeBid({ bidderId, auctionId, amount: requested, increment }) {
       throw new AppError('Bạn đang dẫn đầu phiên này', 409, 'ALREADY_LEADING');
     }
 
+    // Giới hạn tốc độ theo bảng bids và giờ DATABASE (created_at đặt bằng clock_timestamp() lúc ghi, xem bid.model).
+    if (limits.bidMinIntervalMs > 0) {
+      const fast = await client.query(
+        `SELECT 1 FROM bids WHERE bidder_id = $1 AND created_at > clock_timestamp() - ($2 * interval '1 millisecond') LIMIT 1`,
+        [bidderId, limits.bidMinIntervalMs],
+      );
+      if (fast.rowCount > 0) {
+        throw new AppError('Bạn đặt giá quá nhanh, vui lòng thử lại sau giây lát', 429, 'BID_TOO_FAST');
+      }
+    }
+
     const minBid = Number(a.current_price) + Number(a.bid_step);
     if (amount < minBid) {
       throw new AppError(`Giá tối thiểu là ${fmt(minBid)}`, 400, 'BID_TOO_LOW');
     }
 
-    const now = new Date();
     const bid = await bidModel.insert(client, { auctionId, bidderId, amount });
 
-    // Anti-sniping: đặt giá trong 30 giây cuối thì phiên còn đúng 30 giây.
-    let endsAt = new Date(a.ends_at);
-    let extended = false;
-    if (endsAt.getTime() - now.getTime() <= SNIPE_WINDOW_MS) {
-      endsAt = new Date(now.getTime() + SNIPE_WINDOW_MS);
-      extended = true;
-    }
-    await client.query(
-      `UPDATE auctions SET current_price = $2, bid_count = bid_count + 1, ends_at = $3 WHERE id = $1`,
-      [auctionId, amount, endsAt],
+    // Anti-sniping: đặt giá trong 30 giây cuối thì phiên còn đúng 30 giây, tính hoàn toàn theo giờ DATABASE
+    // (a.seconds_left do SQL tính; ends_at = GREATEST(ends_at, giờ DB + 30 giây) nên không bao giờ rút ngắn phiên).
+    const extended = a.seconds_left <= SNIPE_WINDOW_MS / 1000;
+    const upd = await client.query(
+      `UPDATE auctions
+       SET current_price = $2, bid_count = bid_count + 1,
+           ends_at = CASE WHEN $3::boolean THEN GREATEST(ends_at, clock_timestamp() + ($4 * interval '1 millisecond')) ELSE ends_at END
+       WHERE id = $1
+       RETURNING ends_at`,
+      [auctionId, amount, extended, SNIPE_WINDOW_MS],
     );
+    const endsAt = upd.rows[0].ends_at;
 
     let outbid = null;
     if (latest) {
@@ -251,7 +267,8 @@ async function placeBid({ bidderId, auctionId, amount: requested, increment }) {
 async function closeAuction(auctionId) {
   const outcome = await inTransaction(async (client) => {
     const a = await auctionModel.lockById(client, auctionId, { skipLocked: true });
-    if (!a || a.status !== 'active' || new Date(a.ends_at) > new Date() || a.paused) return null;
+    // a.expired: hết giờ theo giờ DATABASE
+    if (!a || a.status !== 'active' || !a.expired || a.paused) return null;
 
     const notes = [];
     const latest = await bidModel.findLatest(client, auctionId);
@@ -438,7 +455,8 @@ async function payOrder({ bidderId, orderId, method = 'wallet' }) {
   const out = await inTransaction(async (client) => {
     const { rows } = await client.query(
       `SELECT o.id, o.auction_id, o.bidder_id, o.final_price, o.payment_status, o.payment_deadline,
-              o.shipping_address_id, l.title
+              o.shipping_address_id, l.title,
+              (o.payment_deadline < clock_timestamp()) AS overdue -- quá hạn theo giờ DATABASE
        FROM orders o JOIN auctions a ON a.id = o.auction_id JOIN listings l ON l.id = a.listing_id
        WHERE o.id = $1 FOR UPDATE OF o`,
       [orderId],
@@ -448,7 +466,7 @@ async function payOrder({ bidderId, orderId, method = 'wallet' }) {
       throw new AppError('Không tìm thấy đơn hàng', 404, 'NOT_FOUND');
     }
     if (o.payment_status === 'paid') throw new AppError('Đơn hàng đã được thanh toán', 409, 'ALREADY_PAID');
-    if (o.payment_status === 'expired' || new Date(o.payment_deadline) < new Date()) {
+    if (o.payment_status === 'expired' || o.overdue) {
       throw new AppError('Đơn hàng đã quá hạn thanh toán', 409, 'PAYMENT_EXPIRED');
     }
 
@@ -535,6 +553,7 @@ async function processPaymentTimeouts() {
 }
 
 module.exports = {
+  limits,
   depositFor,
   inTransaction,
   createAuctionForListing,

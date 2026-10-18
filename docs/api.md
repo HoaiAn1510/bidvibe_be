@@ -453,8 +453,8 @@ Mọi vai trò. Query (đều tuỳ chọn):
 | `status` | [enum phiên](#phiên-auctionsstatus) |
 | `isLive` | Đang nhận cọc và lượt giá (`active`, chưa hết giờ, không tạm dừng) |
 | `paused`, `pausedAt` | Admin tạm dừng để kiểm tra. Đồng hồ **đứng yên** khi dừng; khi tiếp tục `endsAt` được cộng thêm đúng thời gian đã dừng |
-| `remainingSeconds` | Giây còn lại do server tính (đứng yên khi `paused`). Dùng giá trị này để đếm ngược, không tự tính `endsAt - now` khi đang dừng |
-| `serverTime` | **Cấp `data`** (không lặp trong từng phiên): giờ hiện tại của server lúc trả, ISO 8601 UTC. Dùng để tính độ lệch đồng hồ điện thoại ([cách dùng](fe-quickstart.md#6c-đồng-hồ-đếm-ngược-đúng-dù-điện-thoại-lệch-giờ)) |
+| `remainingSeconds` | Giây còn lại do server tính trong SQL theo giờ database (đứng yên khi `paused`). Dùng giá trị này để đếm ngược, không tự tính `endsAt - now` khi đang dừng |
+| `serverTime` | **Cấp `data`** (không lặp trong từng phiên): giờ hiện tại của **database** lúc trả (giờ máy chủ cộng độ lệch đo định kỳ), ISO 8601 UTC, cùng đồng hồ với `endsAt`. Dùng để tính độ lệch đồng hồ điện thoại ([cách dùng](fe-quickstart.md#6c-đồng-hồ-đếm-ngược-đúng-dù-điện-thoại-lệch-giờ)) |
 | `total`, `limit`, `offset` | Tổng số phiên khớp bộ lọc (không tính phân trang) và phân trang đã áp dụng. Còn trang sau khi `offset + auctions.length < total` |
 | `coverUrl` | Ảnh bìa = ảnh đầu tiên của tin (`order_index` nhỏ nhất); `null` nếu tin chưa có ảnh |
 | `seller.name` | Tên hiển thị người bán: `storeName`, nếu người bán chưa đặt tên shop thì là họ tên |
@@ -531,7 +531,8 @@ Quy tắc:
 - Phải đã đặt cọc → `403 DEPOSIT_REQUIRED`.
 - Giá ≥ `currentPrice + bidStep` → nếu không: `400 BID_TOO_LOW` ("Giá tối thiểu là 1.100.000đ").
 - Không tự vượt giá của chính mình → `409 ALREADY_LEADING`.
-- Đặt trong **30 giây cuối**: phiên còn đúng 30 giây (`extended: true`, `endsAt` mới).
+- **Giới hạn tốc độ**: mỗi người tối đa **một lượt đặt giá mỗi giây** (tính trên mọi phiên, theo giờ database). Đặt lại trong vòng 1 giây sau lượt trước → `429 BID_TOO_FAST` ("Bạn đặt giá quá nhanh, vui lòng thử lại sau giây lát"); lượt bị từ chối không ghi gì. Kiểm tra sau `ALREADY_LEADING`, trước `BID_TOO_LOW`. Nên khoá nút đặt giá khoảng 1 giây sau mỗi lần bấm.
+- Đặt trong **30 giây cuối**: phiên còn đúng 30 giây (`extended: true`, `endsAt` mới). Tính theo giờ database: `endsAt = max(endsAt, giờ DB + 30 giây)`, không bao giờ rút ngắn phiên.
 - Gửi cả `amount` và `increment`, hoặc không gửi cái nào → `400 VALIDATION_ERROR`.
 - Phiên hết giờ / huỷ → `409 AUCTION_ENDED`; đang tạm dừng → `409 AUCTION_PAUSED`; không có phiên → `404 NOT_FOUND`.
 
@@ -1215,6 +1216,7 @@ Gom từ mọi `AppError` trong code. "Gợi ý hiển thị" khi muốn khác `
 |---|---|---|---|
 | `VALIDATION_ERROR` | 400 | Thiếu / sai trường, sai định dạng, ngoài khoảng | Hiện `message` cạnh form |
 | `INVALID_JSON` | 400 | Body không phải JSON | Lỗi lập trình, ghi log |
+| `BID_TOO_FAST` | 429 | Cùng một người đặt giá hai lượt trong vòng 1 giây | Hiện `message`, mở lại nút sau khoảng 1 giây |
 | `BID_TOO_LOW` | 400 | Giá thấp hơn giá hiện tại + bước giá | Hiện `message` (có giá tối thiểu), tải lại phiên |
 | `PHOTOS_REQUIRED` | 400 | Gửi thẩm định khi chưa có ảnh | Chuyển tới bước thêm ảnh |
 | `WRONG_PASSWORD` | 400 | Đổi mật khẩu: mật khẩu hiện tại sai | Hiện `message` ở trường mật khẩu hiện tại |

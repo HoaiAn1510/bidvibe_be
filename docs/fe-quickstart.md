@@ -163,6 +163,7 @@ Lỗi hay gặp:
 | Gọi route sai vai trò | `FORBIDDEN` (403) | Lỗi giao diện: ẩn tính năng theo `role` |
 | Thao tác sai thứ tự (ví dụ sửa tin đang chờ thẩm định) | `INVALID_STATE` (409) | Hiện `message`, tải lại dữ liệu |
 | Đặt giá thấp | `BID_TOO_LOW` (400) | `message` có giá tối thiểu |
+| Đặt giá liên tiếp quá nhanh (dưới 1 giây sau lượt trước của cùng người) | `BID_TOO_FAST` (429) | Hiện `message`; khoá nút đặt giá khoảng 1 giây sau mỗi lần bấm để không dính lỗi này |
 | Phiên đang tạm dừng | `AUCTION_PAUSED` (409) | Tải lại phiên, đồng hồ đứng yên |
 | Kho gửi đơn chưa có địa chỉ | `ORDER_NO_ADDRESS` (409) | Màn kho: báo chờ người mua chọn địa chỉ |
 | Không tìm thấy / không phải của mình | `NOT_FOUND` (404) | Quay lại danh sách |
@@ -359,7 +360,7 @@ Lỗi thường gặp: `404` ở `/api/dev/...` là chưa bật `DEV_TOOLS=true`
 
 ## 6c. Đồng hồ đếm ngược đúng dù điện thoại lệch giờ
 
-Giờ trên điện thoại có thể lệch giờ server vài giây đến vài phút, nên đếm ngược kiểu `endsAt - DateTime.now()` sẽ sai. Server trả `serverTime` (ISO 8601 UTC, giờ server lúc trả) ở:
+Giờ trên điện thoại có thể lệch giờ server vài giây đến vài phút, nên đếm ngược kiểu `endsAt - DateTime.now()` sẽ sai. Server trả `serverTime` (ISO 8601 UTC) ở dưới. Đây là **giờ của database** (server đo độ lệch với database lúc khởi động và mỗi 60 giây), cùng đồng hồ với `endsAt` và với việc đóng phiên, nên đếm ngược theo `serverTime` khớp lúc server đóng phiên:
 
 - [`GET /api/auctions`](api.md#get-apiauctions) và [`GET /api/auctions/:id`](api.md#get-apiauctionsid): cấp `data`, không lặp trong từng phiên;
 - mọi sự kiện socket `auction:update` và `auction:ended` ([`socket.md`](socket.md)).

@@ -16,6 +16,9 @@ const { pool } = require('../src/config/db');
 const engine = require('../src/services/auction_engine');
 const walletService = require('../src/services/wallet_service');
 const fraud = require('../src/services/fraud_detection');
+// Giới hạn tốc độ đặt giá (1 lượt / giây / người) tắt trong các bước khác, vì chúng đặt giá liên tiếp nhanh bằng cùng một tài khoản;
+// phần "Giới hạn tốc độ đặt giá" bên dưới bật lại để kiểm tra.
+engine.limits.bidMinIntervalMs = 0;
 
 const PREFIX = 'test_be1_';
 const DOMAIN = '@be1test.local';
@@ -107,6 +110,33 @@ async function closedAuction(auctionId) {
     await new Promise((res) => setTimeout(res, 250));
   }
   return r;
+}
+
+// Chạy một server con `node src/app.js` như `npm run dev` của một người khác: cổng riêng, cùng DB, pool 2, có scheduler.
+// Trả về { url, output(), stop() }; stop() chờ tiến trình thoát thật (đăng ký 'exit' ngay lúc tạo).
+async function spawnApp(extraEnv = {}) {
+  const { spawn } = require('child_process');
+  const net = require('net');
+  const path = require('path');
+  const port = await new Promise((resolve, reject) => {
+    const srv = net.createServer().once('error', reject).listen(0, '127.0.0.1', () => { const { port: p } = srv.address(); srv.close(() => resolve(p)); });
+  });
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'app.js')], {
+    cwd: path.join(__dirname, '..'),
+    env: { ...process.env, PORT: String(port), DB_POOL_MAX: '2', NODE_ENV: 'development', ...extraEnv },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  child.stdout.on('data', (d) => { out += d; });
+  child.stderr.on('data', (d) => { out += d; });
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  const stop = () => { child.kill(); return exited; };
+  for (const end = Date.now() + 20_000; !(out.includes('đang chạy tại') && out.includes('[realtime] đang nghe')); await new Promise((r) => setTimeout(r, 200))) {
+    if (child.exitCode !== null) throw new Error(`server con thoát sớm: ${out.slice(-300)}`);
+    if (Date.now() > end) { await stop(); throw new Error(`server con không sẵn sàng sau 20 giây. Output của server con:
+${out.slice(-600)}`); }
+  }
+  return { url: `http://127.0.0.1:${port}`, stop, output: () => out };
 }
 
 async function main() {
@@ -773,6 +803,16 @@ async function main() {
         const r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 3, log, allowedEmails, stopBeforeSeconds: 60 });
         assert.deepStrictEqual(r, { bids: 0, reason: 'phiên còn dưới 60 giây, bot dừng để không thắng phiên' });
       });
+      await step('bot với interval mặc định 5 giây không bị giới hạn tốc độ đặt giá (1 lượt / giây / người)', async () => {
+        engine.limits.bidMinIntervalMs = 1000;
+        try {
+          const { auctionId: ab } = await mkAuction(seller);
+          const r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 5000, max: 2, log, allowedEmails, stopBeforeSeconds: 60 });
+          assert.deepStrictEqual(r, { bids: 2, reason: 'đủ 2 lượt' });
+          const n = (await pool.query('SELECT count(DISTINCT bidder_id)::int AS n FROM bids WHERE auction_id = $1', [ab])).rows[0].n;
+          assert.strictEqual(n, 2, 'hai bot luân phiên đều đặt được');
+        } finally { engine.limits.bidMinIntervalMs = 0; }
+      });
       await step('--only-outbid: chỉ trả giá khi người khác dẫn đầu, bot dẫn đầu rồi thì chờ', async () => {
         const { auctionId: ab } = await mkAuction(seller);
         const stopAfter = (ms) => { const sig = { stop: false }; setTimeout(() => { sig.stop = true; }, ms); return sig; };
@@ -1164,6 +1204,190 @@ async function main() {
       sockets.forEach((s) => s.close());
       await pauseListener.stop();
       await new Promise((res) => server.close(res));
+    }
+  }
+
+  console.log('Đồng hồ theo giờ database');
+  {
+    const dbClock = require('../src/config/db_clock');
+    const dbNow = async () => new Date((await pool.query('SELECT clock_timestamp() AS t')).rows[0].t);
+    const endsAtOf = async (id) => new Date((await clock(id)).ends_at).getTime();
+    await step('chống chốt phút chót theo giờ DB: còn ≤ 30 giây thì ends_at = giờ DB + 30 giây; còn > 30 giây không đổi', async () => {
+      const { auctionId: ax } = await mkAuction(seller);
+      await engine.joinAuction({ bidderId: A, auctionId: ax });
+      await engine.joinAuction({ bidderId: B, auctionId: ax });
+      // Còn lâu mới hết: không gia hạn, ends_at giữ nguyên từng micro giây.
+      const before = await endsAtOf(ax);
+      let r = await engine.placeBid({ bidderId: B, auctionId: ax, increment: 50_000 });
+      assert.strictEqual(r.extended, false);
+      assert.strictEqual(new Date(r.endsAt).getTime(), before);
+      // Còn 10 giây: gia hạn đúng 30 giây tính từ giờ DB lúc đặt giá. endsAt <= giờ DB đo SAU đó + 30 giây (không dung sai).
+      await pool.query(`UPDATE auctions SET ends_at = clock_timestamp() + interval '10 seconds' WHERE id = $1`, [ax]);
+      r = await engine.placeBid({ bidderId: A, auctionId: ax, increment: 50_000 });
+      const after = await dbNow();
+      assert.strictEqual(r.extended, true);
+      const left = new Date(r.endsAt) - after;
+      assert.ok(left <= 30_000 && left > 27_000, `còn ${left}ms sau gia hạn, mong trong (27000, 30000]`);
+      assert.strictEqual(new Date(r.endsAt).getTime(), await endsAtOf(ax), 'ends_at trong DB khớp giá trị trả về');
+      // Còn 31 giây (> 30): không gia hạn, ends_at giữ nguyên.
+      await pool.query(`UPDATE auctions SET ends_at = clock_timestamp() + interval '31 seconds' WHERE id = $1`, [ax]);
+      const set = await endsAtOf(ax);
+      r = await engine.placeBid({ bidderId: B, auctionId: ax, increment: 50_000 });
+      assert.strictEqual(r.extended, false);
+      assert.strictEqual(new Date(r.endsAt).getTime(), set);
+    });
+    await step('hết giờ tính theo giờ DB: ends_at vừa qua thì đặt cọc / đặt giá bị từ chối AUCTION_ENDED (phiên chưa kịp đóng)', async () => {
+      const { auctionId: ax } = await mkAuction(seller);
+      await engine.joinAuction({ bidderId: A, auctionId: ax });
+      await pool.query(`UPDATE auctions SET ends_at = clock_timestamp() - interval '1 second', starts_at = now() - interval '1 hour' WHERE id = $1`, [ax]);
+      await rejects(engine.placeBid({ bidderId: A, auctionId: ax, increment: 50_000 }), 'AUCTION_ENDED');
+      await rejects(engine.joinAuction({ bidderId: B, auctionId: ax }), 'AUCTION_ENDED');
+      assert.strictEqual((await clock(ax)).status, 'active', 'chưa có ai đóng phiên');
+    });
+    await step('remainingSeconds tính trong SQL theo giờ DB: khớp ends_at - giờ DB, đứng yên khi tạm dừng, 0 khi đã kết thúc', async () => {
+      const { auctionId: ax } = await mkAuction(seller);
+      await pool.query(`UPDATE auctions SET ends_at = clock_timestamp() + interval '40 seconds', starts_at = now() - interval '1 hour' WHERE id = $1`, [ax]);
+      const v = await engine.getAuction(ax, A);
+      assert.ok(v.remainingSeconds >= 38 && v.remainingSeconds <= 40, `remainingSeconds ${v.remainingSeconds}`);
+      const f = await flag(ax, 'paused');
+      const p1 = (await engine.getAuction(ax, A)).remainingSeconds;
+      await sleep(1500);
+      const p2 = (await engine.getAuction(ax, A)).remainingSeconds;
+      assert.strictEqual(p1, p2, 'đang tạm dừng thì remainingSeconds đứng yên');
+      assert.ok(p1 >= 38 && p1 <= 40, `remainingSeconds khi dừng ${p1}`);
+      await pool.query(`UPDATE flagged_auctions SET status = 'safe' WHERE id = $1`, [f]);
+      await expire(ax);
+      await closedAuction(ax);
+      assert.strictEqual((await engine.getAuction(ax, A)).remainingSeconds, 0);
+    });
+    await step('tạo phiên: starts_at / ends_at theo giờ DB (ends_at - starts_at = thời lượng tin đăng)', async () => {
+      const { auctionId: ax } = await mkAuction(seller);
+      const r = (await pool.query(
+        `SELECT (ends_at - starts_at) = interval '1 hour' AS exact,
+                abs(extract(epoch FROM (clock_timestamp() - starts_at))) AS age FROM auctions WHERE id = $1`, [ax])).rows[0];
+      assert.strictEqual(r.exact, true);
+      assert.ok(Number(r.age) < 60, `starts_at lệch giờ DB ${r.age}s`);
+    });
+    await step('db_clock: đo độ lệch giờ DB, đo lỗi thì giữ độ lệch cũ và không ném lỗi; serverTime = giờ máy + độ lệch', async () => {
+      assert.strictEqual(await dbClock.measure(), true);
+      const dbT = await dbNow();
+      assert.ok(Math.abs(dbClock.serverNow() - dbT) < 1500, `serverNow lệch giờ DB ${dbClock.serverNow() - dbT}ms`);
+      const kept = dbClock.getOffsetMs();
+      assert.strictEqual(await dbClock.measure({ query: async () => { throw new Error('mất kết nối'); } }), false);
+      assert.strictEqual(dbClock.getOffsetMs(), kept, 'đo lỗi phải giữ độ lệch cũ');
+      dbClock.setOffsetForTest(5000);
+      try {
+        const lead = Date.parse(dbClock.serverTimeIso()) - Date.now();
+        assert.ok(lead > 4500 && lead < 5500, `serverTime phải đi trước giờ máy ~5000ms, nhận ${lead}ms`);
+      } finally { dbClock.setOffsetForTest(0); }
+    });
+  }
+
+  console.log('Scheduler: chỉ một backend làm việc tại một thời điểm (khoá advisory)');
+  {
+    const { Client } = require('pg');
+    const env = require('../src/config/env');
+    const { SCHEDULER_LOCK_KEY } = require('../src/services/scheduler');
+    const apps = [];
+    let holder = null;
+    // Phiên đã hết giờ, người dẫn đầu P, chờ scheduler đóng.
+    const expiredAuction = async (P) => {
+      const { auctionId } = await mkAuction(seller);
+      await engine.joinAuction({ bidderId: P, auctionId });
+      await engine.placeBid({ bidderId: P, auctionId, increment: 50_000 });
+      await expire(auctionId);
+      return auctionId;
+    };
+    const status = async (id) => (await pool.query('SELECT status FROM auctions WHERE id = $1', [id])).rows[0].status;
+    const untilEnded = async (id, ms = 30_000) => {
+      for (const end = Date.now() + ms; Date.now() < end; await sleep(500)) if ((await status(id)) !== 'active') return true;
+      return false;
+    };
+    // Dòng log đóng phiên có dạng "[scheduler] đã đóng 2 phiên (#12, #13)": đếm số dòng nhắc tới #id.
+    const closedBy = (app, id) => app.output().split('\n').filter((l) => l.includes('đã đóng') && (l.includes(`#${id})`) || l.includes(`#${id},`))).length;
+    const closedLogs = (id) => apps.reduce((n, app) => n + closedBy(app, id), 0);
+    try {
+      const P = await mkAccount('bidder', 'SchedP');
+      await tx((c) => walletService.topUp(c, { bidderId: P, amount: 5_000_000 }));
+      // Một "backend khác" đang giữ khoá scheduler: kết nối riêng giữ pg_advisory_lock. Giữ TRƯỚC khi hai server con
+      // khởi động, kẻo lượt tick đầu tiên của chúng (chạy ngay lúc khởi động) lấy được khoá trước.
+      holder = new Client({ connectionString: env.databaseUrl, ssl: env.dbSsl ? { rejectUnauthorized: false } : false });
+      await holder.connect();
+      await holder.query('SELECT pg_advisory_lock($1)', [SCHEDULER_LOCK_KEY]);
+      const [A1, B1] = [await spawnApp(), await spawnApp()];
+      apps.push(A1, B1);
+
+      const a1 = await expiredAuction(P);
+      await step('khoá đang bị giữ: cả hai backend bỏ lượt, phiên hết giờ chưa bị đóng (qua ít nhất 2 lượt tick)', async () => {
+        await sleep(14_000);
+        assert.strictEqual(await status(a1), 'active', 'khoá đang bị giữ mà phiên vẫn bị đóng');
+        assert.strictEqual(closedLogs(a1), 0);
+        for (const a of apps) assert.ok(!a.output().includes('đang làm scheduler chính'), a.output());
+      });
+
+      await step('nhả khoá (backend giữ khoá tắt): phiên được đóng đúng một lần, có đúng một đơn, có log scheduler chính', async () => {
+        await holder.end(); // đóng kết nối = Postgres tự nhả khoá phiên
+        holder = null;
+        assert.ok(await untilEnded(a1), 'phiên không được đóng sau khi nhả khoá');
+        await sleep(6000); // chờ thêm một lượt tick của cả hai backend: không được đóng lần hai
+        assert.strictEqual(closedLogs(a1), 1, `phiên #${a1} được log đóng ${closedLogs(a1)} lần`);
+        const orders = (await pool.query('SELECT bidder_id FROM orders WHERE auction_id = $1', [a1])).rows;
+        assert.deepStrictEqual(orders.map((o) => String(o.bidder_id)), [String(P)]);
+        assert.ok(apps.some((a) => a.output().includes('backend này đang làm scheduler chính')), 'không backend nào log làm scheduler chính');
+      });
+
+      await step('tắt một backend: backend còn lại vẫn đóng được phiên kế tiếp, vẫn chỉ một đơn', async () => {
+        await A1.stop();
+        const a2 = await expiredAuction(P);
+        assert.ok(await untilEnded(a2), 'backend còn lại không đóng được phiên kế tiếp');
+        assert.strictEqual(closedLogs(a2), 1);
+        assert.strictEqual(closedBy(B1, a2), 1, 'phiên kế tiếp phải do backend còn lại đóng');
+        assert.strictEqual(closedBy(A1, a2), 0, 'backend đã tắt không được đóng phiên');
+        assert.strictEqual((await pool.query('SELECT 1 FROM orders WHERE auction_id = $1', [a2])).rowCount, 1);
+      });
+    } finally {
+      if (holder) await holder.end().catch(() => {});
+      await Promise.all(apps.map((a) => a.stop()));
+    }
+  }
+
+  console.log('Giới hạn tốc độ đặt giá');
+  {
+    const X = await mkAccount('bidder', 'RateX');
+    const Y = await mkAccount('bidder', 'RateY');
+    for (const id of [X, Y]) await tx((c) => walletService.topUp(c, { bidderId: id, amount: 5_000_000 }));
+    const bidCountOf = async (id) => (await pool.query('SELECT bid_count FROM auctions WHERE id = $1', [id])).rows[0].bid_count;
+    try {
+      const { auctionId: a1 } = await mkAuction(seller);
+      const { auctionId: a2 } = await mkAuction(seller);
+      for (const id of [X, Y]) for (const a of [a1, a2]) await engine.joinAuction({ bidderId: id, auctionId: a });
+
+      await step('hai lượt liên tiếp của cùng một người (kể cả phiên khác nhau): lượt 2 bị 429 BID_TOO_FAST, không ghi gì', async () => {
+        engine.limits.bidMinIntervalMs = 30_000; // ngưỡng lớn để kết quả không phụ thuộc tốc độ mạng tới DB
+        await engine.placeBid({ bidderId: Y, auctionId: a1, increment: 50_000 });
+        const before = await bidCountOf(a2);
+        await assert.rejects(engine.placeBid({ bidderId: Y, auctionId: a2, increment: 50_000 }),
+          (e) => e.code === 'BID_TOO_FAST' && e.statusCode === 429 && e.message === 'Bạn đặt giá quá nhanh, vui lòng thử lại sau giây lát');
+        assert.strictEqual(await bidCountOf(a2), before, 'lượt bị từ chối không được ghi');
+        // Người khác không bị ảnh hưởng.
+        await engine.placeBid({ bidderId: X, auctionId: a2, increment: 50_000 });
+      });
+      await step('chờ quá ngưỡng 1 giây thì đặt được', async () => {
+        engine.limits.bidMinIntervalMs = 1000;
+        await sleep(1200); // lượt giá của Y ở bước trước đã cũ hơn 1 giây
+        const r = await engine.placeBid({ bidderId: Y, auctionId: a2, increment: 50_000 });
+        assert.ok(r.bidId);
+        // Hai chiều của ngưỡng kiểm bằng created_at của lượt vừa rồi (không phụ thuộc tốc độ mạng). X vượt Y ở phiên kia
+        // trước, để Y không còn là người dẫn đầu (ALREADY_LEADING được kiểm trước giới hạn tốc độ).
+        await engine.placeBid({ bidderId: X, auctionId: a1, increment: 50_000 });
+        await pool.query(`UPDATE bids SET created_at = clock_timestamp() + interval '1 hour' WHERE id = $1`, [r.bidId]);
+        await assert.rejects(engine.placeBid({ bidderId: Y, auctionId: a1, increment: 50_000 }), { code: 'BID_TOO_FAST' });
+        await pool.query(`UPDATE bids SET created_at = clock_timestamp() - interval '1100 milliseconds' WHERE id = $1`, [r.bidId]);
+        const r2 = await engine.placeBid({ bidderId: Y, auctionId: a1, increment: 50_000 });
+        assert.ok(r2.bidId);
+      });
+    } finally {
+      engine.limits.bidMinIntervalMs = 0;
     }
   }
 
