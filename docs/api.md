@@ -837,6 +837,22 @@ Query `status` ([enum cờ](#cờ-gian-lận-flagged_auctionsstatus)), `limit`, 
 
 Cờ được tạo tự động bởi bộ phát hiện gian lận sau mỗi lượt giá, hoặc khi người dùng [báo cáo phiên](#post-apiauctionsidreport).
 
+#### Các luật phát hiện tự động (7 luật)
+
+`reason` là chuỗi cố định cho mỗi luật nên cùng một phiên không có hai cờ cùng dấu hiệu (kể cả khi đặt giá thêm nhiều lần); cờ Admin đã đánh dấu `safe` thì luật có thể báo lại nếu dấu hiệu còn. Bốn luật đầu xét mẫu lượt giá của phiên; ba luật sau xét danh tính và lịch sử của những người đang đặt giá trong phiên.
+
+| Mã | `reason` hiển thị cho Admin | Mức | Độ tin cậy | Điều kiện | Ví dụ thực tế |
+|---|---|---|---|---|---|
+| `ping_pong` | Chỉ hai tài khoản đặt giá xen kẽ nhau | high | 85 | Trong 8 lượt gần nhất, có ít nhất 6 lượt, chỉ đúng 2 tài khoản và đặt xen kẽ A, B, A, B... | Người bán dùng hai tài khoản đẩy giá qua lại cho phiên trông sôi động |
+| `burst` | Một tài khoản đặt giá dồn dập | medium | 70 | Người đặt lượt cuối đã đặt ít nhất 5 lượt trong 60 giây gần nhất | Bot hoặc script bắn liên tiếp 5 lượt trong nửa phút |
+| `price_jump` | Giá tăng đột biến | low | 55 | Giá lượt cuối từ 3 lần giá lượt liền trước trở lên | Đang 1.000.000đ bỗng có người đặt 3.500.000đ để dọa người khác bỏ cuộc |
+| `new_account` | Tài khoản mới tạo đặt giá cao | medium | 60 | Tài khoản tạo chưa đầy 10 phút đặt giá từ 2 lần giá khởi điểm trở lên | Tài khoản vừa đăng ký đã đặt 2.000.000đ cho món khởi điểm 1.000.000đ |
+| `seller_alt_account` | Người đặt giá trùng số điện thoại với người bán | high | 90 | Số điện thoại của một người đặt giá trùng số của người bán sau khi chuẩn hoá (bỏ khoảng trắng, dấu chấm, gạch; `+84` / `84` đầu số đổi thành `0`); số rỗng bị bỏ qua | Người bán `0901 234 567` và người đặt giá `+84901234567` là cùng một người |
+| `seller_affinity` | Tài khoản gần như chỉ đặt giá phiên của một người bán | medium | 70 | Trong 30 ngày gần nhất, người mua đặt giá ở ít nhất 3 phiên khác nhau của cùng người bán này, các lượt đó chiếm từ 80% tổng lượt giá của họ, và họ chưa từng thắng rồi thanh toán phiên nào của người bán này | Một tài khoản chỉ lượn quanh shop "Phố Cổ" 3 phiên liền (8/10 lượt giá), chưa mua món nào |
+| `repeat_forfeiter` | Người dẫn đầu từng thắng rồi bỏ không thanh toán | low | 60 | Người đang dẫn đầu (lượt giá cuối) đã bị tịch thu cọc ít nhất 1 lần trong 30 ngày | Người này thắng phiên trước 5 ngày nhưng không thanh toán nên mất cọc, nay lại dẫn đầu phiên mới |
+
+Bằng chứng (`evidence`) viết bằng tiếng Việt, mỗi dòng bắt đầu bằng `Tài khoản #<id>` để Admin biết tài khoản nào. **Số điện thoại luôn bị che** (`0901234567` thành `090****567`), không ghi đủ số và không ghi email. Ba luật danh tính tự chạy cùng lúc với bốn luật cũ: lỗi khi lấy lịch sử chỉ được ghi log và bốn luật cũ vẫn chạy.
+
 ### `POST /api/admin/flags/:id/action`
 
 Body `{ "action": "pause" | "verify" | "safe" | "terminate", "reason": string }` (`reason` bắt buộc khi `terminate`, ≤ 1000). Phản hồi `200` là cờ (cấu trúc như trên).
