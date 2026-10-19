@@ -39,6 +39,7 @@ function shutdown(signal) {
   force.unref();
   (async () => {
     require('./services/scheduler').stop();
+    require('./config/db_clock').stop();
     await require('./sockets/pause_listener').stop().catch(() => {});
     await new Promise((resolve) => io.close(() => resolve()));
     await new Promise((resolve) => server.close(() => resolve()));
@@ -70,6 +71,7 @@ if (require.main === module) {
     lanAddresses().forEach((ip) => console.log(`  Điện thoại thật (cùng Wi-Fi): http://${ip}:${env.port}`));
     if (env.devToolsEnabled) console.warn('[dev] DEV_TOOLS=true: đang mở /api/dev (rút ngắn phiên, cho đơn quá hạn). KHÔNG bật trên máy chạy buổi demo.');
     else if (env.devTools) console.warn('[dev] DEV_TOOLS=true bị bỏ qua vì NODE_ENV=production: /api/dev không được mở.');
+    require('./config/db_clock').start(); // đo độ lệch giờ DB cho serverTime
     require('./services/scheduler').start();
     require('./sockets/pause_listener').start(); // BE1: auction:update khi tạm dừng / tiếp tục
   });

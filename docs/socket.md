@@ -84,7 +84,7 @@ Cùng một tên sự kiện cho hai loại thay đổi; phân biệt bằng tr�
 | `resumed` | Admin cho phiên chạy lại | như `paused` |
 | `dev_time` | Chỉ khi server bật `DEV_TOOLS=true`: dev gọi `POST /api/dev/auctions/:id/end-soon` để rút ngắn phiên | như `paused` (`paused: false`) |
 
-**`serverTime`** (chuỗi ISO 8601 UTC, giờ hiện tại của server lúc gửi) có mặt trong **mọi** `auction:update` (mọi `reason`) và `auction:ended`, ngoài các trường ở bảng trên và ở ví dụ dưới (các ví dụ rút gọn, không ghi `serverTime`). Nhận được thì cập nhật độ lệch đồng hồ ([`fe-quickstart.md`](fe-quickstart.md#6c-đồng-hồ-đếm-ngược-đúng-dù-điện-thoại-lệch-giờ)). Khi nhiều backend cùng database, `serverTime` là giờ của server mà client đang nối.
+**`serverTime`** (chuỗi ISO 8601 UTC, giờ hiện tại của **database** lúc gửi: giờ máy chủ cộng độ lệch đo định kỳ, cùng đồng hồ với `endsAt`) có mặt trong **mọi** `auction:update` (mọi `reason`) và `auction:ended`, ngoài các trường ở bảng trên và ở ví dụ dưới (các ví dụ rút gọn, không ghi `serverTime`). Nhận được thì cập nhật độ lệch đồng hồ ([`fe-quickstart.md`](fe-quickstart.md#6c-đồng-hồ-đếm-ngược-đúng-dù-điện-thoại-lệch-giờ)). Khi nhiều backend cùng database, `serverTime` là giờ của server mà client đang nối.
 
 **Lượt giá mới** (`reason: "bid"`):
 
