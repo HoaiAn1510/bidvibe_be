@@ -25,7 +25,7 @@ async function endAuctionSoon({ auctionId, seconds }) {
   const result = await inTransaction(async (client) => {
     const a = await auctionModel.lockById(client, auctionId);
     if (!a) throw new AppError('Không tìm thấy phiên đấu giá', 404, 'NOT_FOUND');
-    if (a.status !== 'active' || new Date(a.ends_at) <= new Date()) {
+    if (a.status !== 'active' || a.expired) { // a.expired: hết giờ theo giờ DATABASE
       throw new AppError('Chỉ rút ngắn được phiên đang diễn ra', 409, 'AUCTION_ENDED');
     }
     if (a.paused) throw new AppError('Phiên đang bị tạm dừng để kiểm tra', 409, 'AUCTION_PAUSED');

@@ -14,9 +14,56 @@ const NEW_ACCOUNT_MS = 10 * 60_000;
 
 const fmt = (n) => `${Number(n).toLocaleString('vi-VN')}đ`;
 
+// ---- Luật theo danh tính người đặt giá (shill bidding) ----
+// Luật seller_affinity: trong HISTORY_WINDOW_DAYS ngày gần nhất, một người mua đặt giá ở >= AFFINITY_MIN_AUCTIONS phiên
+// khác nhau của CÙNG một người bán, các lượt đó chiếm >= AFFINITY_MIN_SHARE_PCT phần trăm tổng lượt giá của họ, và họ chưa
+// từng thắng rồi thanh toán phiên nào của người bán này. Ba phiên là mức tối thiểu để loại trừ trùng hợp (ai đó thích hàng
+// của một shop), 80 phần trăm để chỉ bắt người gần như CHỈ đặt giá ở một nơi; chưa từng mua thật thì mới đáng ngờ.
+const HISTORY_WINDOW_DAYS = 30;
+const AFFINITY_MIN_AUCTIONS = 3;
+const AFFINITY_MIN_SHARE_PCT = 80;
+
+// Chuẩn hoá số điện thoại để so sánh: bỏ khoảng trắng, dấu chấm, gạch, ngoặc; +84 / 0084 / 84 (11-12 chữ số) đổi thành 0.
+// Số rỗng hoặc ngắn hơn 8 chữ số coi như không có (null) để hai số rỗng không bao giờ "trùng" nhau.
+function normalizePhone(raw) {
+  if (raw == null) return null;
+  const compact = String(raw).replace(/[\s.\-()]/g, '');
+  let digits = compact.replace(/\D/g, '');
+  if (!digits) return null;
+  if (compact.startsWith('+') && digits.startsWith('84')) digits = `0${digits.slice(2)}`;
+  else if (digits.startsWith('0084')) digits = `0${digits.slice(4)}`;
+  else if (/^84\d{9,10}$/.test(digits)) digits = `0${digits.slice(2)}`;
+  return digits.length >= 8 ? digits : null;
+}
+
+// Che số trong bằng chứng: 0901234567 -> 090****567. Không bao giờ ghi đủ số.
+const maskPhone = (phone) => (phone.length >= 8 ? `${phone.slice(0, 3)}****${phone.slice(-3)}` : '****');
+
+const VN_TIME = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'Asia/Ho_Chi_Minh', hour: '2-digit', minute: '2-digit', day: '2-digit', month: '2-digit', year: 'numeric', hourCycle: 'h23',
+});
+const fmtVn = (t) => {
+  const p = Object.fromEntries(VN_TIME.formatToParts(new Date(t)).map((x) => [x.type, x.value]));
+  return `${p.hour}:${p.minute} ${p.day}/${p.month}/${p.year}`;
+};
+
 // Phân tích thuần trên danh sách lượt đặt giá (cũ -> mới) — dễ test, không đụng DB.
 // bids: [{ bidderId, amount, at: Date, accountCreatedAt: Date }]
-function analyze(bids, { startPrice = 0 } = {}) {
+// context (scanAuction dựng bằng truy vấn gộp; bỏ trống thì chỉ chạy bốn luật theo mẫu lượt giá):
+//   startPrice     giá khởi điểm
+//   sellerPhone    số điện thoại của người bán (chưa chuẩn hoá)
+//   bidderPhones   { [bidderId]: số điện thoại }
+//   bidderHistory  { [bidderId]: { totalBids, sellerBids, sellerAuctions, paidWins, forfeits, lastForfeitAt } }
+//                  totalBids / sellerBids: số lượt giá trong 30 ngày (mọi phiên / các phiên của người bán này);
+//                  sellerAuctions: số phiên khác nhau của người bán này đã đặt giá trong 30 ngày;
+//                  paidWins: số phiên của người bán này đã thắng và thanh toán (mọi thời gian);
+//                  forfeits / lastForfeitAt: số lần bị tịch thu cọc trong 30 ngày và lần gần nhất.
+function analyze(bids, context = {}) {
+  return [...analyzePattern(bids, context), ...analyzeIdentity(bids, context)];
+}
+
+// Bốn luật theo mẫu lượt giá: ping_pong, burst, price_jump, new_account.
+function analyzePattern(bids, { startPrice = 0 } = {}) {
   const signals = [];
   if (bids.length < 2) return signals;
 
@@ -87,15 +134,136 @@ function analyze(bids, { startPrice = 0 } = {}) {
   return signals;
 }
 
+// Ba luật theo danh tính người đặt giá. Chỉ xét những người đang đặt giá trong phiên này; mỗi luật tối đa một tín hiệu cho
+// cả phiên (lý do cố định nên raiseFlag chống trùng cờ), bằng chứng liệt kê từng tài khoản vi phạm.
+function analyzeIdentity(bids, { sellerPhone = null, bidderPhones = {}, bidderHistory = {} } = {}) {
+  const signals = [];
+  if (!bids.length) return signals;
+  const bidders = [...new Set(bids.map((b) => b.bidderId))];
+  const countIn = (id) => bids.filter((b) => b.bidderId === id).length;
+
+  // Luật 1 — seller_alt_account: người đặt giá trùng số điện thoại với người bán (tài khoản phụ của người bán đẩy giá).
+  const sellerP = normalizePhone(sellerPhone);
+  if (sellerP) {
+    const hits = bidders.filter((id) => normalizePhone(bidderPhones[id]) === sellerP);
+    if (hits.length) {
+      signals.push({
+        code: 'seller_alt_account',
+        severity: 'high',
+        confidence: 90,
+        reason: 'Người đặt giá trùng số điện thoại với người bán',
+        explanation: `${hits.length} tài khoản đặt giá trong phiên có số điện thoại trùng với người bán — nghi người bán dùng tài khoản phụ để đẩy giá.`,
+        evidence: hits.flatMap((id) => [
+          [`Tài khoản #${id} · số điện thoại trùng (đã che)`, maskPhone(sellerP)],
+          [`Tài khoản #${id} · số lượt giá trong phiên`, String(countIn(id))],
+        ]),
+      });
+    }
+  }
+
+  // Luật 2 — seller_affinity: tài khoản gần như chỉ đặt giá phiên của một người bán, chưa từng mua thật của người đó.
+  const affinity = bidders.filter((id) => {
+    const h = bidderHistory[id];
+    return h && h.totalBids > 0 && h.sellerAuctions >= AFFINITY_MIN_AUCTIONS
+      && h.sellerBids * 100 >= h.totalBids * AFFINITY_MIN_SHARE_PCT && h.paidWins === 0;
+  });
+  if (affinity.length) {
+    signals.push({
+      code: 'seller_affinity',
+      severity: 'medium',
+      confidence: 70,
+      reason: 'Tài khoản gần như chỉ đặt giá phiên của một người bán',
+      explanation: `${affinity.length} tài khoản trong phiên gần như chỉ đặt giá phiên của người bán này và chưa từng mua thật — dấu hiệu đẩy giá có chủ đích.`,
+      evidence: affinity.flatMap((id) => {
+        const h = bidderHistory[id];
+        return [
+          [`Tài khoản #${id} · số phiên của người bán đã đặt giá (${HISTORY_WINDOW_DAYS} ngày)`, String(h.sellerAuctions)],
+          [`Tài khoản #${id} · tỉ lệ lượt giá vào người bán này`, `${Math.round((h.sellerBids * 100) / h.totalBids)}% (${h.sellerBids}/${h.totalBids} lượt)`],
+          [`Tài khoản #${id} · số phiên đã thắng và thanh toán`, String(h.paidWins)],
+        ];
+      }),
+    });
+  }
+
+  // Luật 3 — repeat_forfeiter: người đang dẫn đầu từng thắng rồi bỏ không thanh toán (mất cọc).
+  const leader = bids[bids.length - 1].bidderId;
+  const lh = bidderHistory[leader];
+  if (lh && lh.forfeits >= 1) {
+    signals.push({
+      code: 'repeat_forfeiter',
+      severity: 'low',
+      confidence: 60,
+      reason: 'Người dẫn đầu từng thắng rồi bỏ không thanh toán',
+      explanation: `Người đang dẫn đầu đã bị tịch thu cọc ${lh.forfeits} lần trong ${HISTORY_WINDOW_DAYS} ngày gần nhất vì không thanh toán — có thể lại bỏ đơn.`,
+      evidence: [
+        [`Tài khoản #${leader} · số lần bị tịch thu cọc (${HISTORY_WINDOW_DAYS} ngày)`, String(lh.forfeits)],
+        ...(lh.lastForfeitAt ? [[`Tài khoản #${leader} · lần gần nhất (giờ Việt Nam)`, fmtVn(lh.lastForfeitAt)]] : []),
+      ],
+    });
+  }
+
+  return signals;
+}
+
+// Số điện thoại và lịch sử của MỌI người đặt giá trong phiên bằng hai truy vấn gộp (không truy vấn từng người).
+async function loadIdentityContext(bids, sellerId) {
+  const ids = [...new Set(bids.map((b) => b.bidderId))];
+  if (!ids.length) return {};
+  const [phones, hist] = await Promise.all([
+    pool.query('SELECT id, phone FROM accounts WHERE id = ANY($1::bigint[])', [ids]),
+    pool.query(
+      `WITH recent AS (
+         SELECT b.bidder_id, b.auction_id, l.seller_id
+         FROM bids b JOIN auctions a ON a.id = b.auction_id JOIN listings l ON l.id = a.listing_id
+         WHERE b.bidder_id = ANY($1::bigint[]) AND b.created_at > clock_timestamp() - ($3 * interval '1 day')
+       )
+       SELECT u.id AS bidder_id,
+              (SELECT count(*) FROM recent r WHERE r.bidder_id = u.id)::int AS total_bids,
+              (SELECT count(*) FROM recent r WHERE r.bidder_id = u.id AND r.seller_id = $2)::int AS seller_bids,
+              (SELECT count(DISTINCT r.auction_id) FROM recent r WHERE r.bidder_id = u.id AND r.seller_id = $2)::int AS seller_auctions,
+              (SELECT count(*) FROM orders o JOIN auctions a ON a.id = o.auction_id JOIN listings l ON l.id = a.listing_id
+               WHERE o.bidder_id = u.id AND l.seller_id = $2 AND o.payment_status = 'paid')::int AS paid_wins,
+              f.n AS forfeits, f.last_at AS last_forfeit_at
+       FROM unnest($1::bigint[]) AS u(id)
+       LEFT JOIN LATERAL (
+         SELECT count(*)::int AS n, max(w.created_at) AS last_at FROM wallet_transactions w
+         WHERE w.bidder_id = u.id AND w.kind = 'deposit_forfeit' AND w.created_at > clock_timestamp() - ($3 * interval '1 day')
+       ) f ON true`,
+      [ids, sellerId, HISTORY_WINDOW_DAYS],
+    ),
+  ]);
+  const bidderPhones = {};
+  for (const r of phones.rows) bidderPhones[String(r.id)] = r.phone;
+  const bidderHistory = {};
+  for (const r of hist.rows) {
+    bidderHistory[String(r.bidder_id)] = {
+      totalBids: r.total_bids,
+      sellerBids: r.seller_bids,
+      sellerAuctions: r.seller_auctions,
+      paidWins: r.paid_wins,
+      forfeits: r.forfeits,
+      lastForfeitAt: r.last_forfeit_at ? new Date(r.last_forfeit_at) : null,
+    };
+  }
+  return { bidderPhones, bidderHistory };
+}
+
 // Quét một phiên và ghi cờ cho tín hiệu chưa được ghi. Trả về số cờ mới.
 async function scanAuction(auctionId) {
   const { rows } = await pool.query(
-    `SELECT l.starting_price FROM auctions a JOIN listings l ON l.id = a.listing_id WHERE a.id = $1`,
+    `SELECT l.starting_price, l.seller_id, sa.phone AS seller_phone
+     FROM auctions a JOIN listings l ON l.id = a.listing_id JOIN accounts sa ON sa.id = l.seller_id
+     WHERE a.id = $1`,
     [auctionId],
   );
   if (!rows[0]) return 0;
   const bids = await bidModel.listRawByAuction(pool, auctionId);
-  const signals = analyze(bids, { startPrice: Number(rows[0].starting_price) });
+  const identity = await loadIdentityContext(bids, rows[0].seller_id).catch((err) => {
+    // Không dựng được ngữ cảnh danh tính thì bốn luật theo mẫu lượt giá vẫn chạy.
+    console.error('[fraud] không dựng được ngữ cảnh danh tính:', err.message);
+    return {};
+  });
+  const signals = analyze(bids, { startPrice: Number(rows[0].starting_price), sellerPhone: rows[0].seller_phone, ...identity });
 
   let created = 0;
   for (const s of signals) {
@@ -187,4 +355,4 @@ async function reportAuction({ reporterId, auctionId, reason, note = null }) {
   });
 }
 
-module.exports = { analyze, scanAuction, reportAuction };
+module.exports = { analyze, scanAuction, reportAuction, normalizePhone, maskPhone };

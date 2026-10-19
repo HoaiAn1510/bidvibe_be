@@ -16,6 +16,9 @@ const { pool } = require('../src/config/db');
 const engine = require('../src/services/auction_engine');
 const walletService = require('../src/services/wallet_service');
 const fraud = require('../src/services/fraud_detection');
+// Giới hạn tốc độ đặt giá (1 lượt / giây / người) tắt trong các bước khác, vì chúng đặt giá liên tiếp nhanh bằng cùng một tài khoản;
+// phần "Giới hạn tốc độ đặt giá" bên dưới bật lại để kiểm tra.
+engine.limits.bidMinIntervalMs = 0;
 
 const PREFIX = 'test_be1_';
 const DOMAIN = '@be1test.local';
@@ -107,6 +110,33 @@ async function closedAuction(auctionId) {
     await new Promise((res) => setTimeout(res, 250));
   }
   return r;
+}
+
+// Chạy một server con `node src/app.js` như `npm run dev` của một người khác: cổng riêng, cùng DB, pool 2, có scheduler.
+// Trả về { url, output(), stop() }; stop() chờ tiến trình thoát thật (đăng ký 'exit' ngay lúc tạo).
+async function spawnApp(extraEnv = {}) {
+  const { spawn } = require('child_process');
+  const net = require('net');
+  const path = require('path');
+  const port = await new Promise((resolve, reject) => {
+    const srv = net.createServer().once('error', reject).listen(0, '127.0.0.1', () => { const { port: p } = srv.address(); srv.close(() => resolve(p)); });
+  });
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'src', 'app.js')], {
+    cwd: path.join(__dirname, '..'),
+    env: { ...process.env, PORT: String(port), DB_POOL_MAX: '2', NODE_ENV: 'development', ...extraEnv },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  child.stdout.on('data', (d) => { out += d; });
+  child.stderr.on('data', (d) => { out += d; });
+  const exited = new Promise((resolve) => child.once('exit', resolve));
+  const stop = () => { child.kill(); return exited; };
+  for (const end = Date.now() + 20_000; !(out.includes('đang chạy tại') && out.includes('[realtime] đang nghe')); await new Promise((r) => setTimeout(r, 200))) {
+    if (child.exitCode !== null) throw new Error(`server con thoát sớm: ${out.slice(-300)}`);
+    if (Date.now() > end) { await stop(); throw new Error(`server con không sẵn sàng sau 20 giây. Output của server con:
+${out.slice(-600)}`); }
+  }
+  return { url: `http://127.0.0.1:${port}`, stop, output: () => out };
 }
 
 async function main() {
@@ -407,11 +437,14 @@ async function main() {
         [af, i % 2 ? B : A, 1_000_000 + (i + 1) * 50_000, String((6 - i) * 20)]);
     }
     const created = await Promise.all(Array.from({ length: 8 }, () => fraud.scanAuction(af)));
-    assert.strictEqual(created.reduce((x, y) => x + y, 0), 1, `số cờ mới: ${created}`);
-    const n = await pool.query(`SELECT count(*)::int AS n FROM flagged_auctions WHERE auction_id = $1 AND status = 'pending'`, [af]);
-    assert.strictEqual(n.rows[0].n, 1);
-    const ev = await pool.query(
-      `SELECT count(*)::int AS n FROM flag_evidence e JOIN flagged_auctions f ON f.id = e.flagged_auction_id WHERE f.auction_id = $1`, [af]);
+    // Các luật theo danh tính (seller_affinity...) cũng có thể báo trên tài khoản test, nên không giả định chỉ có một luật:
+    // mỗi LÝ DO đúng một cờ pending, tổng số cờ mới = số cờ pending, và cờ ping_pong có đúng một bộ bằng chứng.
+    const pending = (await pool.query(`SELECT id, reason FROM flagged_auctions WHERE auction_id = $1 AND status = 'pending' ORDER BY id`, [af])).rows;
+    assert.strictEqual(created.reduce((x, y) => x + y, 0), pending.length, `số cờ mới: ${created}, cờ pending: ${pending.map((r) => r.reason)}`);
+    assert.strictEqual(new Set(pending.map((r) => r.reason)).size, pending.length, 'mỗi lý do chỉ một cờ pending');
+    const pp = pending.filter((r) => r.reason.startsWith('Chỉ hai'));
+    assert.strictEqual(pp.length, 1);
+    const ev = await pool.query('SELECT count(*)::int AS n FROM flag_evidence WHERE flagged_auction_id = $1', [pp[0].id]);
     assert.strictEqual(ev.rows[0].n, 2); // đúng một bộ bằng chứng, không bị nhân đôi
   });
   await step('unique index chặn hai cờ pending giống nhau chèn cùng lúc', async () => {
@@ -461,13 +494,19 @@ async function main() {
          VALUES ($1, $2, $3, now() - ($4 || ' seconds')::interval)`,
         [ap, i % 2 ? B : A, 1_000_000 + (i + 1) * 50_000, String((6 - i) * 20)]);
     }
-    assert.strictEqual(await fraud.scanAuction(ap), 1);
+    assert.ok(await fraud.scanAuction(ap) >= 1);
     const before = await flagsOf(ap);
-    assert.strictEqual(before[0].severity, 'high');
+    // Luật theo danh tính có thể thêm cờ mức thấp / vừa; báo cáo luôn gộp vào cờ nghiêm trọng nhất (ping_pong, high).
+    const top = before.find((f) => f.reason.startsWith('Chỉ hai'));
+    assert.strictEqual(top.severity, 'high');
     const r = await fraud.reportAuction({ reporterId: C, auctionId: ap, reason: 'Thấy hai người đặt qua lại' });
     assert.strictEqual(r.flagCreated, false);
     const after = await flagsOf(ap);
-    assert.deepStrictEqual([after.length, after[0].id, after[0].evidence], [1, before[0].id, before[0].evidence + 1]);
+    assert.strictEqual(after.length, before.length, 'không tạo cờ mới');
+    assert.strictEqual(after.find((f) => f.id === top.id).evidence, top.evidence + 1);
+    for (const f of before.filter((x) => x.id !== top.id)) {
+      assert.strictEqual(after.find((x) => x.id === f.id).evidence, f.evidence, 'cờ khác không bị thêm bằng chứng');
+    }
   });
   await step('cùng một người báo cáo song song: chỉ một báo cáo được ghi', async () => {
     const { auctionId: ap } = await mkAuction(seller);
@@ -772,6 +811,16 @@ async function main() {
         await pool.query(`UPDATE auctions SET ends_at = now() + interval '50 seconds' WHERE id = $1`, [ab]);
         const r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 50, max: 3, log, allowedEmails, stopBeforeSeconds: 60 });
         assert.deepStrictEqual(r, { bids: 0, reason: 'phiên còn dưới 60 giây, bot dừng để không thắng phiên' });
+      });
+      await step('bot với interval mặc định 5 giây không bị giới hạn tốc độ đặt giá (1 lượt / giây / người)', async () => {
+        engine.limits.bidMinIntervalMs = 1000;
+        try {
+          const { auctionId: ab } = await mkAuction(seller);
+          const r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 5000, max: 2, log, allowedEmails, stopBeforeSeconds: 60 });
+          assert.deepStrictEqual(r, { bids: 2, reason: 'đủ 2 lượt' });
+          const n = (await pool.query('SELECT count(DISTINCT bidder_id)::int AS n FROM bids WHERE auction_id = $1', [ab])).rows[0].n;
+          assert.strictEqual(n, 2, 'hai bot luân phiên đều đặt được');
+        } finally { engine.limits.bidMinIntervalMs = 0; }
       });
       await step('--only-outbid: chỉ trả giá khi người khác dẫn đầu, bot dẫn đầu rồi thì chờ', async () => {
         const { auctionId: ab } = await mkAuction(seller);
@@ -1163,6 +1212,586 @@ async function main() {
     } finally {
       sockets.forEach((s) => s.close());
       await pauseListener.stop();
+      await new Promise((res) => server.close(res));
+    }
+  }
+
+  console.log('Đồng hồ theo giờ database');
+  {
+    const dbClock = require('../src/config/db_clock');
+    const dbNow = async () => new Date((await pool.query('SELECT clock_timestamp() AS t')).rows[0].t);
+    const endsAtOf = async (id) => new Date((await clock(id)).ends_at).getTime();
+    await step('chống chốt phút chót theo giờ DB: còn ≤ 30 giây thì ends_at = giờ DB + 30 giây; còn > 30 giây không đổi', async () => {
+      const { auctionId: ax } = await mkAuction(seller);
+      await engine.joinAuction({ bidderId: A, auctionId: ax });
+      await engine.joinAuction({ bidderId: B, auctionId: ax });
+      // Còn lâu mới hết: không gia hạn, ends_at giữ nguyên từng micro giây.
+      const before = await endsAtOf(ax);
+      let r = await engine.placeBid({ bidderId: B, auctionId: ax, increment: 50_000 });
+      assert.strictEqual(r.extended, false);
+      assert.strictEqual(new Date(r.endsAt).getTime(), before);
+      // Còn 10 giây: gia hạn đúng 30 giây tính từ giờ DB lúc đặt giá. endsAt <= giờ DB đo SAU đó + 30 giây (không dung sai).
+      await pool.query(`UPDATE auctions SET ends_at = clock_timestamp() + interval '10 seconds' WHERE id = $1`, [ax]);
+      r = await engine.placeBid({ bidderId: A, auctionId: ax, increment: 50_000 });
+      const after = await dbNow();
+      assert.strictEqual(r.extended, true);
+      const left = new Date(r.endsAt) - after;
+      assert.ok(left <= 30_000 && left > 27_000, `còn ${left}ms sau gia hạn, mong trong (27000, 30000]`);
+      assert.strictEqual(new Date(r.endsAt).getTime(), await endsAtOf(ax), 'ends_at trong DB khớp giá trị trả về');
+      // Còn 31 giây (> 30): không gia hạn, ends_at giữ nguyên.
+      await pool.query(`UPDATE auctions SET ends_at = clock_timestamp() + interval '31 seconds' WHERE id = $1`, [ax]);
+      const set = await endsAtOf(ax);
+      r = await engine.placeBid({ bidderId: B, auctionId: ax, increment: 50_000 });
+      assert.strictEqual(r.extended, false);
+      assert.strictEqual(new Date(r.endsAt).getTime(), set);
+    });
+    await step('hết giờ tính theo giờ DB: ends_at vừa qua thì đặt cọc / đặt giá bị từ chối AUCTION_ENDED (phiên chưa kịp đóng)', async () => {
+      const { auctionId: ax } = await mkAuction(seller);
+      await engine.joinAuction({ bidderId: A, auctionId: ax });
+      await pool.query(`UPDATE auctions SET ends_at = clock_timestamp() - interval '1 second', starts_at = now() - interval '1 hour' WHERE id = $1`, [ax]);
+      await rejects(engine.placeBid({ bidderId: A, auctionId: ax, increment: 50_000 }), 'AUCTION_ENDED');
+      await rejects(engine.joinAuction({ bidderId: B, auctionId: ax }), 'AUCTION_ENDED');
+      assert.strictEqual((await clock(ax)).status, 'active', 'chưa có ai đóng phiên');
+    });
+    await step('remainingSeconds tính trong SQL theo giờ DB: khớp ends_at - giờ DB, đứng yên khi tạm dừng, 0 khi đã kết thúc', async () => {
+      const { auctionId: ax } = await mkAuction(seller);
+      await pool.query(`UPDATE auctions SET ends_at = clock_timestamp() + interval '40 seconds', starts_at = now() - interval '1 hour' WHERE id = $1`, [ax]);
+      const v = await engine.getAuction(ax, A);
+      assert.ok(v.remainingSeconds >= 38 && v.remainingSeconds <= 40, `remainingSeconds ${v.remainingSeconds}`);
+      const f = await flag(ax, 'paused');
+      const p1 = (await engine.getAuction(ax, A)).remainingSeconds;
+      await sleep(1500);
+      const p2 = (await engine.getAuction(ax, A)).remainingSeconds;
+      assert.strictEqual(p1, p2, 'đang tạm dừng thì remainingSeconds đứng yên');
+      assert.ok(p1 >= 38 && p1 <= 40, `remainingSeconds khi dừng ${p1}`);
+      await pool.query(`UPDATE flagged_auctions SET status = 'safe' WHERE id = $1`, [f]);
+      await expire(ax);
+      await closedAuction(ax);
+      assert.strictEqual((await engine.getAuction(ax, A)).remainingSeconds, 0);
+    });
+    await step('tạo phiên: starts_at / ends_at theo giờ DB (ends_at - starts_at = thời lượng tin đăng)', async () => {
+      const { auctionId: ax } = await mkAuction(seller);
+      const r = (await pool.query(
+        `SELECT (ends_at - starts_at) = interval '1 hour' AS exact,
+                abs(extract(epoch FROM (clock_timestamp() - starts_at))) AS age FROM auctions WHERE id = $1`, [ax])).rows[0];
+      assert.strictEqual(r.exact, true);
+      assert.ok(Number(r.age) < 60, `starts_at lệch giờ DB ${r.age}s`);
+    });
+    await step('db_clock: đo độ lệch giờ DB, đo lỗi thì giữ độ lệch cũ và không ném lỗi; serverTime = giờ máy + độ lệch', async () => {
+      assert.strictEqual(await dbClock.measure(), true);
+      const dbT = await dbNow();
+      assert.ok(Math.abs(dbClock.serverNow() - dbT) < 1500, `serverNow lệch giờ DB ${dbClock.serverNow() - dbT}ms`);
+      const kept = dbClock.getOffsetMs();
+      assert.strictEqual(await dbClock.measure({ query: async () => { throw new Error('mất kết nối'); } }), false);
+      assert.strictEqual(dbClock.getOffsetMs(), kept, 'đo lỗi phải giữ độ lệch cũ');
+      dbClock.setOffsetForTest(5000);
+      try {
+        const lead = Date.parse(dbClock.serverTimeIso()) - Date.now();
+        assert.ok(lead > 4500 && lead < 5500, `serverTime phải đi trước giờ máy ~5000ms, nhận ${lead}ms`);
+      } finally { dbClock.setOffsetForTest(0); }
+    });
+  }
+
+  console.log('Scheduler: chỉ một backend làm việc tại một thời điểm (khoá advisory)');
+  {
+    const { Client } = require('pg');
+    const env = require('../src/config/env');
+    const { SCHEDULER_LOCK_KEY } = require('../src/services/scheduler');
+    const apps = [];
+    let holder = null;
+    // Phiên đã hết giờ, người dẫn đầu P, chờ scheduler đóng.
+    const expiredAuction = async (P) => {
+      const { auctionId } = await mkAuction(seller);
+      await engine.joinAuction({ bidderId: P, auctionId });
+      await engine.placeBid({ bidderId: P, auctionId, increment: 50_000 });
+      await expire(auctionId);
+      return auctionId;
+    };
+    const status = async (id) => (await pool.query('SELECT status FROM auctions WHERE id = $1', [id])).rows[0].status;
+    const untilEnded = async (id, ms = 30_000) => {
+      for (const end = Date.now() + ms; Date.now() < end; await sleep(500)) if ((await status(id)) !== 'active') return true;
+      return false;
+    };
+    // Dòng log đóng phiên có dạng "[scheduler] đã đóng 2 phiên (#12, #13)": đếm số dòng nhắc tới #id.
+    const closedBy = (app, id) => app.output().split('\n').filter((l) => l.includes('đã đóng') && (l.includes(`#${id})`) || l.includes(`#${id},`))).length;
+    const closedLogs = (id) => apps.reduce((n, app) => n + closedBy(app, id), 0);
+    try {
+      const P = await mkAccount('bidder', 'SchedP');
+      await tx((c) => walletService.topUp(c, { bidderId: P, amount: 5_000_000 }));
+      // Một "backend khác" đang giữ khoá scheduler: kết nối riêng giữ pg_advisory_lock. Giữ TRƯỚC khi hai server con
+      // khởi động, kẻo lượt tick đầu tiên của chúng (chạy ngay lúc khởi động) lấy được khoá trước.
+      holder = new Client({ connectionString: env.databaseUrl, ssl: env.dbSsl ? { rejectUnauthorized: false } : false });
+      await holder.connect();
+      await holder.query('SELECT pg_advisory_lock($1)', [SCHEDULER_LOCK_KEY]);
+      const [A1, B1] = [await spawnApp(), await spawnApp()];
+      apps.push(A1, B1);
+
+      const a1 = await expiredAuction(P);
+      await step('khoá đang bị giữ: cả hai backend bỏ lượt, phiên hết giờ chưa bị đóng (qua ít nhất 2 lượt tick)', async () => {
+        await sleep(14_000);
+        assert.strictEqual(await status(a1), 'active', 'khoá đang bị giữ mà phiên vẫn bị đóng');
+        assert.strictEqual(closedLogs(a1), 0);
+        for (const a of apps) assert.ok(!a.output().includes('đang làm scheduler chính'), a.output());
+      });
+
+      await step('nhả khoá (backend giữ khoá tắt): phiên được đóng đúng một lần, có đúng một đơn, có log scheduler chính', async () => {
+        await holder.end(); // đóng kết nối = Postgres tự nhả khoá phiên
+        holder = null;
+        assert.ok(await untilEnded(a1), 'phiên không được đóng sau khi nhả khoá');
+        await sleep(6000); // chờ thêm một lượt tick của cả hai backend: không được đóng lần hai
+        assert.strictEqual(closedLogs(a1), 1, `phiên #${a1} được log đóng ${closedLogs(a1)} lần`);
+        const orders = (await pool.query('SELECT bidder_id FROM orders WHERE auction_id = $1', [a1])).rows;
+        assert.deepStrictEqual(orders.map((o) => String(o.bidder_id)), [String(P)]);
+        assert.ok(apps.some((a) => a.output().includes('backend này đang làm scheduler chính')), 'không backend nào log làm scheduler chính');
+      });
+
+      await step('tắt một backend: backend còn lại vẫn đóng được phiên kế tiếp, vẫn chỉ một đơn', async () => {
+        await A1.stop();
+        const a2 = await expiredAuction(P);
+        assert.ok(await untilEnded(a2), 'backend còn lại không đóng được phiên kế tiếp');
+        assert.strictEqual(closedLogs(a2), 1);
+        assert.strictEqual(closedBy(B1, a2), 1, 'phiên kế tiếp phải do backend còn lại đóng');
+        assert.strictEqual(closedBy(A1, a2), 0, 'backend đã tắt không được đóng phiên');
+        assert.strictEqual((await pool.query('SELECT 1 FROM orders WHERE auction_id = $1', [a2])).rowCount, 1);
+      });
+    } finally {
+      if (holder) await holder.end().catch(() => {});
+      await Promise.all(apps.map((a) => a.stop()));
+    }
+  }
+
+  console.log('Giới hạn tốc độ đặt giá');
+  {
+    const X = await mkAccount('bidder', 'RateX');
+    const Y = await mkAccount('bidder', 'RateY');
+    for (const id of [X, Y]) await tx((c) => walletService.topUp(c, { bidderId: id, amount: 5_000_000 }));
+    const bidCountOf = async (id) => (await pool.query('SELECT bid_count FROM auctions WHERE id = $1', [id])).rows[0].bid_count;
+    try {
+      const { auctionId: a1 } = await mkAuction(seller);
+      const { auctionId: a2 } = await mkAuction(seller);
+      for (const id of [X, Y]) for (const a of [a1, a2]) await engine.joinAuction({ bidderId: id, auctionId: a });
+
+      await step('hai lượt liên tiếp của cùng một người (kể cả phiên khác nhau): lượt 2 bị 429 BID_TOO_FAST, không ghi gì', async () => {
+        engine.limits.bidMinIntervalMs = 30_000; // ngưỡng lớn để kết quả không phụ thuộc tốc độ mạng tới DB
+        await engine.placeBid({ bidderId: Y, auctionId: a1, increment: 50_000 });
+        const before = await bidCountOf(a2);
+        await assert.rejects(engine.placeBid({ bidderId: Y, auctionId: a2, increment: 50_000 }),
+          (e) => e.code === 'BID_TOO_FAST' && e.statusCode === 429 && e.message === 'Bạn đặt giá quá nhanh, vui lòng thử lại sau giây lát');
+        assert.strictEqual(await bidCountOf(a2), before, 'lượt bị từ chối không được ghi');
+        // Người khác không bị ảnh hưởng.
+        await engine.placeBid({ bidderId: X, auctionId: a2, increment: 50_000 });
+      });
+      await step('chờ quá ngưỡng 1 giây thì đặt được', async () => {
+        engine.limits.bidMinIntervalMs = 1000;
+        await sleep(1200); // lượt giá của Y ở bước trước đã cũ hơn 1 giây
+        const r = await engine.placeBid({ bidderId: Y, auctionId: a2, increment: 50_000 });
+        assert.ok(r.bidId);
+        // Hai chiều của ngưỡng kiểm bằng created_at của lượt vừa rồi (không phụ thuộc tốc độ mạng). X vượt Y ở phiên kia
+        // trước, để Y không còn là người dẫn đầu (ALREADY_LEADING được kiểm trước giới hạn tốc độ).
+        await engine.placeBid({ bidderId: X, auctionId: a1, increment: 50_000 });
+        await pool.query(`UPDATE bids SET created_at = clock_timestamp() + interval '1 hour' WHERE id = $1`, [r.bidId]);
+        await assert.rejects(engine.placeBid({ bidderId: Y, auctionId: a1, increment: 50_000 }), { code: 'BID_TOO_FAST' });
+        await pool.query(`UPDATE bids SET created_at = clock_timestamp() - interval '1100 milliseconds' WHERE id = $1`, [r.bidId]);
+        const r2 = await engine.placeBid({ bidderId: Y, auctionId: a1, increment: 50_000 });
+        assert.ok(r2.bidId);
+      });
+    } finally {
+      engine.limits.bidMinIntervalMs = 0;
+    }
+  }
+
+  console.log('Phạt người hay bỏ đơn (2 cọc bị tịch thu trong 30 ngày: chặn tham gia 7 ngày)');
+  {
+    const jwt = require('jsonwebtoken');
+    const env = require('../src/config/env');
+    const { server } = require('../src/app');
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    const base = `http://127.0.0.1:${server.address().port}/api`;
+    const tokOf = (id) => jwt.sign({ sub: String(id), kind: 'account', role: 'bidder' }, env.jwtSecret, { expiresIn: '5m' });
+    const walletApi = async (id) => {
+      const r = await fetch(`${base}/wallet`, { headers: { Authorization: `Bearer ${tokOf(id)}` } });
+      const body = await r.json();
+      assert.strictEqual(r.status, 200, JSON.stringify(body.error));
+      return body.data;
+    };
+    // Một lần bỏ đơn: cọc một phiên rồi bị tịch thu qua đúng luồng ví (deposit_forfeit) và đánh dấu cọc forfeited.
+    const forfeitOnce = async (id) => {
+      const { auctionId } = await mkAuction(seller);
+      const j = await engine.joinAuction({ bidderId: id, auctionId });
+      await pool.query(`UPDATE auction_deposits SET status = 'forfeited' WHERE auction_id = $1 AND bidder_id = $2`, [auctionId, id]);
+      await tx((c) => walletService.forfeitDeposit(c, { bidderId: id, auctionId, amount: j.deposit }));
+    };
+    const freshAuction = async () => (await mkAuction(seller)).auctionId;
+    const ageForfeits = (id, interval) => pool.query(
+      `UPDATE wallet_transactions SET created_at = clock_timestamp() - $2::interval WHERE bidder_id = $1 AND kind = 'deposit_forfeit'`, [id, interval]);
+    const latestForfeit = async (id) => new Date((await pool.query(
+      `SELECT max(created_at) AS t FROM wallet_transactions WHERE bidder_id = $1 AND kind = 'deposit_forfeit'`, [id])).rows[0].t);
+    // Giờ Việt Nam (UTC+7, không có giờ mùa hè) dạng "HH:mm dd/MM/yyyy" như trong message.
+    const vnText = (d) => {
+      const v = new Date(d.getTime() + 7 * 3600_000);
+      const z = (n) => String(n).padStart(2, '0');
+      return `${z(v.getUTCHours())}:${z(v.getUTCMinutes())} ${z(v.getUTCDate())}/${z(v.getUTCMonth() + 1)}/${v.getUTCFullYear()}`;
+    };
+    try {
+      const Z = await mkAccount('bidder', 'Skipper');
+      await tx((c) => walletService.topUp(c, { bidderId: Z, amount: 5_000_000 }));
+
+      await step('chưa bỏ đơn lần nào, và mới 1 lần bị tịch thu cọc: vẫn tham gia được, joinBlockedUntil = null', async () => {
+        assert.strictEqual((await walletApi(Z)).joinBlockedUntil, null);
+        await forfeitOnce(Z);
+        assert.strictEqual((await walletApi(Z)).joinBlockedUntil, null);
+        assert.ok((await engine.joinAuction({ bidderId: Z, auctionId: await freshAuction() })).depositId);
+      });
+      await step('2 lần tịch thu trong 30 ngày: 403 JOIN_BLOCKED, message có ngày giờ được tham gia lại (giờ Việt Nam); GET /api/wallet có joinBlockedUntil', async () => {
+        await forfeitOnce(Z);
+        const until = new Date((await latestForfeit(Z)).getTime() + 7 * 86400_000);
+        const target = await freshAuction();
+        const before = (await wallet(Z));
+        await assert.rejects(engine.joinAuction({ bidderId: Z, auctionId: target }), (e) => {
+          assert.strictEqual(e.code, 'JOIN_BLOCKED');
+          assert.strictEqual(e.statusCode, 403);
+          assert.ok(e.message.includes(vnText(until)), `${e.message} / ${vnText(until)}`);
+          return true;
+        });
+        assert.deepStrictEqual(await wallet(Z), before, 'bị chặn thì không giữ cọc');
+        assert.strictEqual((await pool.query('SELECT 1 FROM auction_deposits WHERE auction_id = $1 AND bidder_id = $2', [target, Z])).rowCount, 0);
+        const w = await walletApi(Z);
+        assert.strictEqual(new Date(w.joinBlockedUntil).getTime(), until.getTime());
+        assert.deepStrictEqual(Object.keys(w).sort(), ['available', 'balance', 'held', 'joinBlockedUntil']); // chỉ thêm trường mới
+      });
+      await step('hết 7 ngày kể từ lần tịch thu gần nhất thì tham gia lại được (lần tịch thu cách đây 8 ngày)', async () => {
+        await ageForfeits(Z, '8 days');
+        assert.strictEqual((await walletApi(Z)).joinBlockedUntil, null);
+        assert.ok((await engine.joinAuction({ bidderId: Z, auctionId: await freshAuction() })).depositId);
+      });
+      await step('lần tịch thu cũ hơn 30 ngày không tính: 1 cũ (40 ngày) + 1 mới thì không bị chặn', async () => {
+        const Z2 = await mkAccount('bidder', 'SkipperTwo');
+        await tx((c) => walletService.topUp(c, { bidderId: Z2, amount: 5_000_000 }));
+        await forfeitOnce(Z2);
+        await ageForfeits(Z2, '40 days');
+        await forfeitOnce(Z2);
+        assert.strictEqual((await walletApi(Z2)).joinBlockedUntil, null);
+        assert.ok((await engine.joinAuction({ bidderId: Z2, auctionId: await freshAuction() })).depositId);
+      });
+      await step('2 lần trong 30 ngày (29 ngày trước và hôm qua): bị chặn đến 7 ngày sau lần gần nhất', async () => {
+        const Z3 = await mkAccount('bidder', 'SkipperThree');
+        await tx((c) => walletService.topUp(c, { bidderId: Z3, amount: 5_000_000 }));
+        await forfeitOnce(Z3);
+        await ageForfeits(Z3, '29 days');
+        await forfeitOnce(Z3);
+        await pool.query(
+          `UPDATE wallet_transactions SET created_at = clock_timestamp() - interval '1 day'
+           WHERE id = (SELECT max(id) FROM wallet_transactions WHERE bidder_id = $1 AND kind = 'deposit_forfeit')`, [Z3]);
+        const until = new Date((await latestForfeit(Z3)).getTime() + 7 * 86400_000);
+        await rejects(engine.joinAuction({ bidderId: Z3, auctionId: await freshAuction() }), 'JOIN_BLOCKED');
+        assert.strictEqual(new Date((await walletApi(Z3)).joinBlockedUntil).getTime(), until.getTime());
+      });
+    } finally {
+      await new Promise((res) => server.close(res));
+    }
+  }
+
+  console.log('Đối soát ví (npm run wallet:check)');
+  {
+    const { spawnSync } = require('child_process');
+    const path = require('path');
+    const { checkWallets, parseArgs } = require('./wallet_check');
+    const bidders = {};
+    for (const n of ['ChkWin', 'ChkQr', 'ChkLose', 'ChkSkip']) {
+      bidders[n] = await mkAccount('bidder', n);
+      await tx((c) => walletService.topUp(c, { bidderId: bidders[n], amount: 5_000_000 }));
+    }
+    const ids = Object.values(bidders);
+    const closedWithWinner = async (winner, loser) => { // trả { auctionId, orderId }
+      const { auctionId } = await mkAuction(seller);
+      await engine.joinAuction({ bidderId: winner, auctionId });
+      if (loser) { await engine.joinAuction({ bidderId: loser, auctionId }); await engine.placeBid({ bidderId: loser, auctionId, increment: 50_000 }); }
+      await engine.placeBid({ bidderId: winner, auctionId, increment: 50_000 });
+      await expire(auctionId);
+      await closedAuction(auctionId);
+      return { auctionId, orderId: (await pool.query('SELECT id FROM orders WHERE auction_id = $1', [auctionId])).rows[0].id };
+    };
+    const probs = async (list = ids) => (await checkWallets({ bidderIds: list })).problems;
+    const cli = (list) => spawnSync(process.execPath, [path.join(__dirname, 'wallet_check.js'), `--bidder-ids=${list.join(',')}`],
+      { encoding: 'utf8', env: { ...process.env, DB_POOL_MAX: '1' } });
+
+    await step('đủ các loại giao dịch (nạp, giữ, hoàn, tịch thu, thanh toán bằng ví và bằng QR, hoàn tiền): không báo lệch', async () => {
+      const w1 = await closedWithWinner(bidders.ChkWin, bidders.ChkLose);            // người thua được hoàn cọc
+      await engine.payOrder({ bidderId: bidders.ChkWin, orderId: w1.orderId, method: 'wallet' });
+      const w2 = await closedWithWinner(bidders.ChkQr, null);
+      await engine.payOrder({ bidderId: bidders.ChkQr, orderId: w2.orderId, method: 'qr' }); // cổng ngoài: ví không bị trừ
+      const w3 = await closedWithWinner(bidders.ChkSkip, null);                       // thắng rồi bỏ đơn
+      await pool.query(`UPDATE orders SET payment_deadline = now() - interval '1 minute' WHERE id = $1`, [w3.orderId]);
+      await engine.processPaymentTimeouts();
+      for (let i = 0; i < 20; i += 1) { // có thể backend khác xử lý trước: chờ DB đúng trạng thái
+        if ((await pool.query('SELECT payment_status FROM orders WHERE id = $1', [w3.orderId])).rows[0].payment_status === 'expired') break;
+        await sleep(250);
+      }
+      await tx((c) => walletService.refund(c, { bidderId: bidders.ChkWin, amount: 70_000, auctionId: w1.auctionId }));
+      // Một cọc đang giữ và một đơn thắng chưa thanh toán (applied_to_payment + awaiting_payment) vẫn phải khớp.
+      const { auctionId: live } = await mkAuction(seller);
+      await engine.joinAuction({ bidderId: bidders.ChkLose, auctionId: live });
+      await closedWithWinner(bidders.ChkLose, null);
+      const r = await checkWallets({ bidderIds: ids });
+      assert.strictEqual(r.wallets, 4);
+      assert.deepStrictEqual(r.problems, []);
+    });
+
+    await step('phát hiện số dư lệch (wallet_balance +1), tiền giữ lệch (wallet_held +7), sổ giao dịch bị sửa (amount +1)', async () => {
+      const w = bidders.ChkWin;
+      await pool.query('UPDATE bidders SET wallet_balance = wallet_balance + 1 WHERE account_id = $1', [w]);
+      let p = await probs();
+      assert.deepStrictEqual([...new Set(p.map((x) => x.check))], ['balance']);
+      assert.ok(p.every((x) => x.bidderId === String(w) && x.diff === '1'), JSON.stringify(p));
+      await pool.query('UPDATE bidders SET wallet_balance = wallet_balance - 1 WHERE account_id = $1', [w]);
+
+      await pool.query('UPDATE bidders SET wallet_held = wallet_held + 7 WHERE account_id = $1', [w]);
+      p = await probs();
+      assert.deepStrictEqual([...new Set(p.map((x) => x.check))].sort(), ['held_deposits', 'held_ledger']);
+      await pool.query('UPDATE bidders SET wallet_held = wallet_held - 7 WHERE account_id = $1', [w]);
+
+      const tid = (await pool.query(`SELECT min(id) AS id FROM wallet_transactions WHERE bidder_id = $1 AND kind = 'topup'`, [w])).rows[0].id;
+      await pool.query('UPDATE wallet_transactions SET amount = amount + 1 WHERE id = $1', [tid]);
+      p = await probs();
+      assert.ok(p.some((x) => x.check === 'balance_chain' && x.detail.includes(`#${tid}`)), JSON.stringify(p));
+      await pool.query('UPDATE wallet_transactions SET amount = amount - 1 WHERE id = $1', [tid]);
+      assert.deepStrictEqual(await probs(), [], 'khôi phục xong thì khớp lại');
+    });
+
+    await step('lệnh wallet:check: exit 0 khi khớp, exit 1 và in bảng khi lệch; chỉ đọc (không sửa dữ liệu); tham số sai bị từ chối', async () => {
+      const ok = cli(ids);
+      assert.strictEqual(ok.status, 0, ok.stdout + ok.stderr);
+      assert.ok(ok.stdout.includes('Đối soát 4 ví: 4 khớp, 0 lệch'), ok.stdout);
+      const w = bidders.ChkQr;
+      await pool.query('UPDATE bidders SET wallet_balance = wallet_balance + 5 WHERE account_id = $1', [w]);
+      const before = (await wallet(w));
+      const bad = cli(ids);
+      assert.strictEqual(bad.status, 1, bad.stdout + bad.stderr);
+      assert.ok(bad.stdout.includes('balance') && bad.stdout.includes(String(w)) && bad.stdout.includes('1 lệch'), bad.stdout);
+      assert.deepStrictEqual(await wallet(w), before, 'wallet:check không được sửa dữ liệu');
+      await pool.query('UPDATE bidders SET wallet_balance = wallet_balance - 5 WHERE account_id = $1', [w]);
+      assert.throws(() => parseArgs(['--bidder-ids=abc']), /danh sách id số/);
+      assert.throws(() => parseArgs(['--sai']), /Tham số không hợp lệ/);
+    });
+  }
+
+  console.log('Luật gian lận theo danh tính người đặt giá (seller_alt_account, seller_affinity, repeat_forfeiter)');
+  {
+    const R1 = 'Người đặt giá trùng số điện thoại với người bán';
+    const R2 = 'Tài khoản gần như chỉ đặt giá phiên của một người bán';
+    const R3 = 'Người dẫn đầu từng thắng rồi bỏ không thanh toán';
+    const flagsOf = async (auctionId, reason) => {
+      const f = (await pool.query(
+        'SELECT id, severity, confidence, reason, status FROM flagged_auctions WHERE auction_id = $1 AND reason = $2 ORDER BY id', [auctionId, reason])).rows;
+      for (const row of f) {
+        row.evidence = (await pool.query('SELECT label, value FROM flag_evidence WHERE flagged_auction_id = $1 ORDER BY id', [row.id])).rows;
+      }
+      return f;
+    };
+    // Lượt giá trong tiến trình test; scanAuction chạy lại một cách tường minh (placeBid cũng tự quét nền sau đó).
+    const bidAndScan = async (bidderId, auctionId) => {
+      await engine.joinAuction({ bidderId, auctionId }).catch((e) => { if (e.code !== 'ALREADY_JOINED') throw e; });
+      await engine.placeBid({ bidderId, auctionId, increment: 50_000 });
+      await fraud.scanAuction(auctionId);
+    };
+    const seller2 = await mkAccount('seller', 'ShillSeller');
+    await pool.query('UPDATE accounts SET phone = $2 WHERE id = $1', [seller2, '0901 234 567']);
+    const mkFunded = async (name, phone = null) => {
+      const id = await mkAccount('bidder', name);
+      if (phone) await pool.query('UPDATE accounts SET phone = $2 WHERE id = $1', [id, phone]);
+      await tx((c) => walletService.topUp(c, { bidderId: id, amount: 5_000_000 }));
+      return id;
+    };
+
+    await step('seller_alt_account: người bán "0901 234 567" và người mua "+84901234567" -> đúng 1 cờ high/90, bằng chứng che số; đặt giá thêm không sinh cờ trùng', async () => {
+      const X = await mkFunded('ShillX', '+84901234567');
+      const Y = await mkFunded('ShillY', '0377 111 222');
+      const { auctionId } = await mkAuction(seller2);
+      await bidAndScan(X, auctionId);
+      let f = await flagsOf(auctionId, R1);
+      assert.strictEqual(f.length, 1);
+      assert.deepStrictEqual([f[0].severity, f[0].confidence], ['high', 90]);
+      assert.deepStrictEqual(f[0].evidence, [
+        { label: `Tài khoản #${X} · số điện thoại trùng (đã che)`, value: '090****567' },
+        { label: `Tài khoản #${X} · số lượt giá trong phiên`, value: '1' },
+      ]);
+      const text = JSON.stringify(f);
+      for (const leak of ['0901234567', '901234567', '234567', '+84', '@', '0901 234 567']) assert.ok(!text.includes(leak), `bằng chứng lộ "${leak}": ${text}`);
+      // Đặt giá thêm (cả người khác) và quét nhiều lần: vẫn đúng một cờ.
+      await bidAndScan(Y, auctionId);
+      await bidAndScan(X, auctionId);
+      await fraud.scanAuction(auctionId);
+      await sleep(1500); // các lần quét nền của placeBid
+      f = await flagsOf(auctionId, R1);
+      assert.strictEqual(f.length, 1, `có ${f.length} cờ seller_alt_account`);
+      assert.strictEqual(f[0].evidence.length, 2, 'không thêm bằng chứng trùng');
+    });
+    await step('seller_alt_account KHÔNG báo nhầm: số điện thoại khác, hoặc người bán / người mua chưa có số', async () => {
+      const Z = await mkFunded('ShillZ', '0911 234 567');
+      const { auctionId: a1 } = await mkAuction(seller2);
+      await bidAndScan(Z, a1);
+      assert.strictEqual((await flagsOf(a1, R1)).length, 0, 'số khác nhau');
+      const noPhoneSeller = await mkAccount('seller', 'NoPhoneSeller');
+      const W = await mkFunded('ShillW'); // không có số
+      const { auctionId: a2 } = await mkAuction(noPhoneSeller);
+      await bidAndScan(W, a2);
+      assert.strictEqual((await flagsOf(a2, R1)).length, 0, 'cả hai đều không có số điện thoại');
+    });
+
+    await step('repeat_forfeiter: người dẫn đầu từng bị tịch thu cọc -> cờ low/60, bằng chứng có số lần và lần gần nhất; người chưa bỏ đơn thì không báo', async () => {
+      const F = await mkFunded('ShillForfeit');
+      const G = await mkFunded('ShillGood');
+      const { auctionId: dead } = await mkAuction(seller2);
+      const j = await engine.joinAuction({ bidderId: F, auctionId: dead });
+      await pool.query(`UPDATE auction_deposits SET status = 'forfeited' WHERE auction_id = $1 AND bidder_id = $2`, [dead, F]);
+      await tx((c) => walletService.forfeitDeposit(c, { bidderId: F, auctionId: dead, amount: j.deposit }));
+      const last = new Date((await pool.query(`SELECT max(created_at) AS t FROM wallet_transactions WHERE bidder_id = $1 AND kind = 'deposit_forfeit'`, [F])).rows[0].t);
+      const { auctionId } = await mkAuction(seller2);
+      await bidAndScan(F, auctionId);
+      const f = await flagsOf(auctionId, R3);
+      assert.strictEqual(f.length, 1);
+      assert.deepStrictEqual([f[0].severity, f[0].confidence], ['low', 60]);
+      const v = new Date(last.getTime() + 7 * 3600_000); // giờ Việt Nam (UTC+7)
+      const z = (n) => String(n).padStart(2, '0');
+      assert.deepStrictEqual(f[0].evidence.map((e) => e.value), ['1', `${z(v.getUTCHours())}:${z(v.getUTCMinutes())} ${z(v.getUTCDate())}/${z(v.getUTCMonth() + 1)}/${v.getUTCFullYear()}`]);
+      // Người đã từng bỏ đơn nhưng bị vượt giá: người dẫn đầu mới (chưa bỏ đơn) -> không còn cờ mới cho phiên khác.
+      const { auctionId: other } = await mkAuction(seller2);
+      await bidAndScan(G, other);
+      assert.strictEqual((await flagsOf(other, R3)).length, 0, 'người dẫn đầu chưa từng bỏ đơn');
+      await bidAndScan(F, other); // F vượt G và dẫn đầu -> được báo ở phiên này
+      assert.strictEqual((await flagsOf(other, R3)).length, 1);
+    });
+
+    await step('seller_affinity: đặt giá 3 phiên khác nhau của cùng người bán (100% lượt giá) -> cờ medium/70; rải thêm sang người bán khác (75%) hoặc mới 2 phiên thì không báo', async () => {
+      const H = await mkFunded('ShillHooked');
+      const J = await mkFunded('ShillSpread');
+      const [s1, s2, s3] = [await mkAuction(seller2), await mkAuction(seller2), await mkAuction(seller2)];
+      await bidAndScan(H, s1.auctionId);
+      await bidAndScan(H, s2.auctionId);
+      assert.strictEqual((await flagsOf(s2.auctionId, R2)).length, 0, 'mới 2 phiên của người bán');
+      await bidAndScan(H, s3.auctionId);
+      const f = await flagsOf(s3.auctionId, R2);
+      assert.strictEqual(f.length, 1);
+      assert.deepStrictEqual([f[0].severity, f[0].confidence], ['medium', 70]);
+      assert.deepStrictEqual(f[0].evidence.map((e) => e.value), ['3', '100% (3/3 lượt)', '0']);
+      assert.ok(!JSON.stringify(f).includes('@'), 'bằng chứng không ghi email');
+      // J: 3 lượt ở người bán này + 1 lượt ở người bán khác = 75% < 80%
+      const { auctionId: o1 } = await mkAuction(seller);
+      await bidAndScan(J, o1);
+      for (let i = 0; i < 3; i += 1) {
+        const { auctionId } = await mkAuction(seller2);
+        await bidAndScan(J, auctionId);
+        assert.strictEqual((await flagsOf(auctionId, R2)).length, 0, `phiên ${i + 1} của người bán: tỉ lệ dưới 80%`);
+      }
+    });
+  }
+
+  console.log('Phiên của tôi: myMaxBid và myState');
+  {
+    const jwt = require('jsonwebtoken');
+    const env = require('../src/config/env');
+    const { server } = require('../src/app');
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    const base = `http://127.0.0.1:${server.address().port}/api`;
+    const tokOf = (id, role) => jwt.sign({ sub: String(id), kind: 'account', role }, env.jwtSecret, { expiresIn: '5m' });
+    const getApi = async (path, id, role = 'bidder') => {
+      const r = await fetch(base + path, { headers: { Authorization: `Bearer ${tokOf(id, role)}` } });
+      const body = await r.json();
+      assert.strictEqual(r.status, 200, JSON.stringify(body.error));
+      return body.data;
+    };
+    const mine = async (viewer, auctionId) => {
+      const v = await engine.getAuction(auctionId, viewer);
+      return [v.myState, v.myMaxBid];
+    };
+    try {
+      const P = await mkAccount('bidder', 'MineP');
+      const Q = await mkAccount('bidder', 'MineQ');
+      const R = await mkAccount('bidder', 'MineR');
+      for (const id of [P, Q, R]) await tx((c) => walletService.topUp(c, { bidderId: id, amount: 5_000_000 }));
+      const lastBid = async (id, who) => (await pool.query(
+        'SELECT max(amount)::int AS m FROM bids WHERE auction_id = $1 AND bidder_id = $2', [id, who])).rows[0].m;
+
+      const { auctionId: a1 } = await mkAuction(seller);
+      await step('myState / myMaxBid theo từng giai đoạn: không tham gia, đã cọc chưa đặt giá, dẫn đầu, bị vượt, dẫn đầu lại', async () => {
+        assert.deepStrictEqual(await mine(R, a1), [null, null], 'người chưa tham gia');
+        assert.deepStrictEqual(await mine(seller, a1), [null, null], 'người bán xem phiên của mình');
+        const anon = await engine.getAuction(a1, null);
+        assert.deepStrictEqual([anon.myState, anon.myMaxBid], [null, null], 'không có người xem (tài khoản ops)');
+
+        await engine.joinAuction({ bidderId: P, auctionId: a1 });
+        assert.deepStrictEqual(await mine(P, a1), ['joined_no_bid', null]);
+        assert.strictEqual((await engine.getAuction(a1, P)).myBid, 0, 'trường cũ myBid vẫn là 0 khi chưa đặt giá');
+
+        await engine.placeBid({ bidderId: P, auctionId: a1, increment: 50_000 });
+        assert.deepStrictEqual(await mine(P, a1), ['leading', 1_050_000]);
+
+        await engine.joinAuction({ bidderId: Q, auctionId: a1 });
+        await engine.placeBid({ bidderId: Q, auctionId: a1, increment: 50_000 });
+        assert.deepStrictEqual(await mine(P, a1), ['outbid', 1_050_000], 'bị vượt: myMaxBid vẫn là giá cao nhất CỦA MÌNH, không phải giá hiện tại');
+        assert.deepStrictEqual(await mine(Q, a1), ['leading', 1_100_000]);
+        assert.deepStrictEqual(await mine(R, a1), [null, null]);
+
+        await engine.placeBid({ bidderId: P, auctionId: a1, increment: 50_000 });
+        assert.deepStrictEqual(await mine(P, a1), ['leading', 1_150_000]);
+        assert.deepStrictEqual(await mine(Q, a1), ['outbid', 1_100_000]);
+        assert.strictEqual(await lastBid(a1, P), 1_150_000);
+      });
+
+      const states = {};
+      await step('phiên kết thúc: won (mình thắng), lost (người khác thắng / không ai đặt giá / phiên bị huỷ)', async () => {
+        const { auctionId: a2 } = await mkAuction(seller); // P đặt, Q vượt, Q thắng
+        await engine.joinAuction({ bidderId: P, auctionId: a2 });
+        await engine.joinAuction({ bidderId: Q, auctionId: a2 });
+        await engine.placeBid({ bidderId: P, auctionId: a2, increment: 50_000 });
+        await engine.placeBid({ bidderId: Q, auctionId: a2, increment: 50_000 });
+        await expire(a2);
+        await closedAuction(a2);
+        assert.deepStrictEqual(await mine(P, a2), ['lost', 1_050_000]);
+        assert.deepStrictEqual(await mine(Q, a2), ['won', 1_100_000]);
+
+        const { auctionId: a3 } = await mkAuction(seller); // P đặt và thắng
+        await engine.joinAuction({ bidderId: P, auctionId: a3 });
+        await engine.placeBid({ bidderId: P, auctionId: a3, increment: 50_000 });
+        await expire(a3);
+        await closedAuction(a3);
+        assert.deepStrictEqual(await mine(P, a3), ['won', 1_050_000]);
+
+        const { auctionId: a4 } = await mkAuction(seller); // phiên bị huỷ
+        await engine.joinAuction({ bidderId: P, auctionId: a4 });
+        const done = await tx((c) => engine.cancelAuction(c, a4));
+        done.emit();
+        assert.deepStrictEqual(await mine(P, a4), ['lost', null]);
+
+        const { auctionId: a5 } = await mkAuction(seller); // đã cọc nhưng không ai đặt giá, phiên kết thúc
+        await engine.joinAuction({ bidderId: P, auctionId: a5 });
+        await expire(a5);
+        await closedAuction(a5);
+        assert.deepStrictEqual(await mine(P, a5), ['lost', null]);
+        Object.assign(states, { [a1]: 'leading', [a2]: 'lost', [a3]: 'won', [a4]: 'lost', [a5]: 'lost' });
+      });
+
+      await step('GET /api/auctions?status=joined (một truy vấn cho cả danh sách) và GET /api/auctions/:id trả myState / myMaxBid; trường cũ giữ nguyên', async () => {
+        const list = await getApi('/auctions?status=joined&limit=50', P);
+        assert.strictEqual(list.total, 5);
+        const byId = Object.fromEntries(list.auctions.map((a) => [a.id, a]));
+        assert.deepStrictEqual(Object.fromEntries(Object.keys(states).map((id) => [id, byId[id].myState])), states);
+        assert.strictEqual(byId[Object.keys(states)[0]].myMaxBid, 1_150_000);
+        for (const a of list.auctions) {
+          for (const k of ['joined', 'myDepositStatus', 'myDeposit', 'myBid', 'leading', 'won']) assert.ok(k in a, `trường cũ ${k}`);
+          assert.ok('myState' in a && 'myMaxBid' in a);
+        }
+        const detail = await getApi(`/auctions/${a1}`, Q);
+        assert.deepStrictEqual([detail.myState, detail.myMaxBid], ['outbid', 1_100_000]);
+        // Người chưa tham gia / người bán không có myState.
+        assert.strictEqual((await getApi('/auctions?status=joined', R)).total, 0);
+        const asSeller = (await getApi(`/auctions/${a1}`, seller, 'seller'));
+        assert.deepStrictEqual([asSeller.myState, asSeller.myMaxBid], [null, null]);
+        // Danh sách chung (không lọc joined): phiên mình chưa tham gia có myState null.
+        const all = await getApi('/auctions?limit=100&sort=newest', R);
+        assert.ok(all.auctions.length > 0 && all.auctions.every((a) => a.myState === null && a.myMaxBid === null));
+      });
+    } finally {
       await new Promise((res) => server.close(res));
     }
   }

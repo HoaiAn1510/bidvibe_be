@@ -453,8 +453,8 @@ Mọi vai trò. Query (đều tuỳ chọn):
 | `status` | [enum phiên](#phiên-auctionsstatus) |
 | `isLive` | Đang nhận cọc và lượt giá (`active`, chưa hết giờ, không tạm dừng) |
 | `paused`, `pausedAt` | Admin tạm dừng để kiểm tra. Đồng hồ **đứng yên** khi dừng; khi tiếp tục `endsAt` được cộng thêm đúng thời gian đã dừng |
-| `remainingSeconds` | Giây còn lại do server tính (đứng yên khi `paused`). Dùng giá trị này để đếm ngược, không tự tính `endsAt - now` khi đang dừng |
-| `serverTime` | **Cấp `data`** (không lặp trong từng phiên): giờ hiện tại của server lúc trả, ISO 8601 UTC. Dùng để tính độ lệch đồng hồ điện thoại ([cách dùng](fe-quickstart.md#6c-đồng-hồ-đếm-ngược-đúng-dù-điện-thoại-lệch-giờ)) |
+| `remainingSeconds` | Giây còn lại do server tính trong SQL theo giờ database (đứng yên khi `paused`). Dùng giá trị này để đếm ngược, không tự tính `endsAt - now` khi đang dừng |
+| `serverTime` | **Cấp `data`** (không lặp trong từng phiên): giờ hiện tại của **database** lúc trả (giờ máy chủ cộng độ lệch đo định kỳ), ISO 8601 UTC, cùng đồng hồ với `endsAt`. Dùng để tính độ lệch đồng hồ điện thoại ([cách dùng](fe-quickstart.md#6c-đồng-hồ-đếm-ngược-đúng-dù-điện-thoại-lệch-giờ)) |
 | `total`, `limit`, `offset` | Tổng số phiên khớp bộ lọc (không tính phân trang) và phân trang đã áp dụng. Còn trang sau khi `offset + auctions.length < total` |
 | `coverUrl` | Ảnh bìa = ảnh đầu tiên của tin (`order_index` nhỏ nhất); `null` nếu tin chưa có ảnh |
 | `seller.name` | Tên hiển thị người bán: `storeName`, nếu người bán chưa đặt tên shop thì là họ tên |
@@ -462,6 +462,8 @@ Mọi vai trò. Query (đều tuỳ chọn):
 | `depositRequired` | Tiền cọc = 10 phần trăm giá khởi điểm, làm tròn nghìn |
 | `depositAffordable` | Số dư ví (`balance`) của người xem có đủ `depositRequired` không. Chỉ có với tài khoản `bidder`; vai trò khác là `null` |
 | `joined`, `myDepositStatus`, `myDeposit`, `myBid`, `leading`, `won` | Riêng của người đang xem (tài khoản `ops` luôn rỗng) |
+| `myMaxBid` | Giá **cao nhất mình đã đặt** trong phiên; `null` nếu chưa đặt lần nào (`myBid` cũ vẫn trả `0` khi chưa đặt) |
+| `myState` | Trạng thái của mình trong phiên, tính sẵn để làm màn "Phiên của tôi" (`GET /api/auctions?status=joined`): `leading` đang dẫn đầu, `outbid` đã đặt giá nhưng bị vượt, `joined_no_bid` đã cọc chưa đặt giá, `won` đã kết thúc và mình thắng, `lost` đã kết thúc không thắng (người khác thắng, không ai thắng hoặc phiên bị huỷ), `null` không tham gia hoặc không phải người mua. `leading` / `outbid` / `joined_no_bid` chỉ khi phiên `active` |
 
 ### `GET /api/auctions/:id`
 
@@ -508,7 +510,7 @@ Chỉ `bidder`. Không có body. Đặt cọc tham gia phiên: giữ `depositReq
 { "depositId": "388", "deposit": 100000, "balanceAfter": 4900000 }
 ```
 
-Lỗi: `402 INSUFFICIENT_FUNDS`, `404 NOT_FOUND`, `409 ALREADY_JOINED`, `409 AUCTION_ENDED`, `409 AUCTION_PAUSED`.
+Lỗi: `402 INSUFFICIENT_FUNDS`, `403 JOIN_BLOCKED`, `404 NOT_FOUND`, `409 ALREADY_JOINED`, `409 AUCTION_ENDED`, `409 AUCTION_PAUSED`.
 
 Cọc được hoàn tự động khi thua phiên hoặc phiên bị huỷ; người thắng được trừ cọc vào số tiền thanh toán; quá hạn thanh toán 24 giờ thì mất cọc.
 
@@ -531,7 +533,8 @@ Quy tắc:
 - Phải đã đặt cọc → `403 DEPOSIT_REQUIRED`.
 - Giá ≥ `currentPrice + bidStep` → nếu không: `400 BID_TOO_LOW` ("Giá tối thiểu là 1.100.000đ").
 - Không tự vượt giá của chính mình → `409 ALREADY_LEADING`.
-- Đặt trong **30 giây cuối**: phiên còn đúng 30 giây (`extended: true`, `endsAt` mới).
+- **Giới hạn tốc độ**: mỗi người tối đa **một lượt đặt giá mỗi giây** (tính trên mọi phiên, theo giờ database). Đặt lại trong vòng 1 giây sau lượt trước → `429 BID_TOO_FAST` ("Bạn đặt giá quá nhanh, vui lòng thử lại sau giây lát"); lượt bị từ chối không ghi gì. Kiểm tra sau `ALREADY_LEADING`, trước `BID_TOO_LOW`. Nên khoá nút đặt giá khoảng 1 giây sau mỗi lần bấm.
+- Đặt trong **30 giây cuối**: phiên còn đúng 30 giây (`extended: true`, `endsAt` mới). Tính theo giờ database: `endsAt = max(endsAt, giờ DB + 30 giây)`, không bao giờ rút ngắn phiên.
 - Gửi cả `amount` và `increment`, hoặc không gửi cái nào → `400 VALIDATION_ERROR`.
 - Phiên hết giờ / huỷ → `409 AUCTION_ENDED`; đang tạm dừng → `409 AUCTION_PAUSED`; không có phiên → `404 NOT_FOUND`.
 
@@ -547,8 +550,10 @@ Chỉ `bidder`.
 
 ```json
 // 200 — balance: tiền dùng được; held: cọc đang giữ (không nằm trong balance); available = balance
-{ "balance": 19530000, "held": 0, "available": 19530000 }
+{ "balance": 19530000, "held": 0, "available": 19530000, "joinBlockedUntil": null }
 ```
+
+`joinBlockedUntil`: `null` nếu được tham gia bình thường; nếu người mua bị **tạm chặn đặt cọc tham gia phiên mới** thì là thời điểm được tham gia lại (ISO 8601 UTC), ví dụ `"2026-10-25T07:05:00.000Z"`. Luật phạt người hay bỏ đơn: từ **2 lần bị tịch thu cọc** (quá hạn thanh toán 24 giờ) trong **30 ngày** gần nhất thì bị chặn đến **7 ngày** sau lần tịch thu gần nhất; xem lỗi `403 JOIN_BLOCKED` ở [`POST /api/auctions/:id/join`](#post-apiauctionsidjoin). Chỉ chặn đặt cọc phiên mới; phiên đã cọc trước đó vẫn đặt giá được. Trường này cũng có trong phản hồi `POST /api/wallet/topup`.
 
 ### `GET /api/wallet/transactions`
 
@@ -833,6 +838,22 @@ Query `status` ([enum cờ](#cờ-gian-lận-flagged_auctionsstatus)), `limit`, 
 ```
 
 Cờ được tạo tự động bởi bộ phát hiện gian lận sau mỗi lượt giá, hoặc khi người dùng [báo cáo phiên](#post-apiauctionsidreport).
+
+#### Các luật phát hiện tự động (7 luật)
+
+`reason` là chuỗi cố định cho mỗi luật nên cùng một phiên không có hai cờ cùng dấu hiệu (kể cả khi đặt giá thêm nhiều lần); cờ Admin đã đánh dấu `safe` thì luật có thể báo lại nếu dấu hiệu còn. Bốn luật đầu xét mẫu lượt giá của phiên; ba luật sau xét danh tính và lịch sử của những người đang đặt giá trong phiên.
+
+| Mã | `reason` hiển thị cho Admin | Mức | Độ tin cậy | Điều kiện | Ví dụ thực tế |
+|---|---|---|---|---|---|
+| `ping_pong` | Chỉ hai tài khoản đặt giá xen kẽ nhau | high | 85 | Trong 8 lượt gần nhất, có ít nhất 6 lượt, chỉ đúng 2 tài khoản và đặt xen kẽ A, B, A, B... | Người bán dùng hai tài khoản đẩy giá qua lại cho phiên trông sôi động |
+| `burst` | Một tài khoản đặt giá dồn dập | medium | 70 | Người đặt lượt cuối đã đặt ít nhất 5 lượt trong 60 giây gần nhất | Bot hoặc script bắn liên tiếp 5 lượt trong nửa phút |
+| `price_jump` | Giá tăng đột biến | low | 55 | Giá lượt cuối từ 3 lần giá lượt liền trước trở lên | Đang 1.000.000đ bỗng có người đặt 3.500.000đ để dọa người khác bỏ cuộc |
+| `new_account` | Tài khoản mới tạo đặt giá cao | medium | 60 | Tài khoản tạo chưa đầy 10 phút đặt giá từ 2 lần giá khởi điểm trở lên | Tài khoản vừa đăng ký đã đặt 2.000.000đ cho món khởi điểm 1.000.000đ |
+| `seller_alt_account` | Người đặt giá trùng số điện thoại với người bán | high | 90 | Số điện thoại của một người đặt giá trùng số của người bán sau khi chuẩn hoá (bỏ khoảng trắng, dấu chấm, gạch; `+84` / `84` đầu số đổi thành `0`); số rỗng bị bỏ qua | Người bán `0901 234 567` và người đặt giá `+84901234567` là cùng một người |
+| `seller_affinity` | Tài khoản gần như chỉ đặt giá phiên của một người bán | medium | 70 | Trong 30 ngày gần nhất, người mua đặt giá ở ít nhất 3 phiên khác nhau của cùng người bán này, các lượt đó chiếm từ 80% tổng lượt giá của họ, và họ chưa từng thắng rồi thanh toán phiên nào của người bán này | Một tài khoản chỉ lượn quanh shop "Phố Cổ" 3 phiên liền (8/10 lượt giá), chưa mua món nào |
+| `repeat_forfeiter` | Người dẫn đầu từng thắng rồi bỏ không thanh toán | low | 60 | Người đang dẫn đầu (lượt giá cuối) đã bị tịch thu cọc ít nhất 1 lần trong 30 ngày | Người này thắng phiên trước 5 ngày nhưng không thanh toán nên mất cọc, nay lại dẫn đầu phiên mới |
+
+Bằng chứng (`evidence`) viết bằng tiếng Việt, mỗi dòng bắt đầu bằng `Tài khoản #<id>` để Admin biết tài khoản nào. **Số điện thoại luôn bị che** (`0901234567` thành `090****567`), không ghi đủ số và không ghi email. Ba luật danh tính tự chạy cùng lúc với bốn luật cũ: lỗi khi lấy lịch sử chỉ được ghi log và bốn luật cũ vẫn chạy.
 
 ### `POST /api/admin/flags/:id/action`
 
@@ -1215,6 +1236,7 @@ Gom từ mọi `AppError` trong code. "Gợi ý hiển thị" khi muốn khác `
 |---|---|---|---|
 | `VALIDATION_ERROR` | 400 | Thiếu / sai trường, sai định dạng, ngoài khoảng | Hiện `message` cạnh form |
 | `INVALID_JSON` | 400 | Body không phải JSON | Lỗi lập trình, ghi log |
+| `BID_TOO_FAST` | 429 | Cùng một người đặt giá hai lượt trong vòng 1 giây | Hiện `message`, mở lại nút sau khoảng 1 giây |
 | `BID_TOO_LOW` | 400 | Giá thấp hơn giá hiện tại + bước giá | Hiện `message` (có giá tối thiểu), tải lại phiên |
 | `PHOTOS_REQUIRED` | 400 | Gửi thẩm định khi chưa có ảnh | Chuyển tới bước thêm ảnh |
 | `WRONG_PASSWORD` | 400 | Đổi mật khẩu: mật khẩu hiện tại sai | Hiện `message` ở trường mật khẩu hiện tại |
@@ -1225,6 +1247,7 @@ Gom từ mọi `AppError` trong code. "Gợi ý hiển thị" khi muốn khác `
 | `INSUFFICIENT_FUNDS` | 402 | Ví không đủ tiền cọc / thanh toán | Gợi ý nạp tiền ([ví](#post-apiwallettopup)) |
 | `FORBIDDEN` | 403 | Sai vai trò, hoặc tài khoản `ops` dùng tính năng chỉ cho người dùng | Ẩn tính năng theo vai trò |
 | `ACCOUNT_SUSPENDED` | 403 | Tài khoản bị khoá | Đăng xuất, báo "Tài khoản đã bị khoá" |
+| `JOIN_BLOCKED` | 403 | Người mua bị tạm chặn đặt cọc phiên mới (từ 2 lần bị tịch thu cọc trong 30 ngày, chặn 7 ngày). `message` có ngày giờ được tham gia lại (giờ Việt Nam) | Hiện `message`; ẩn nút đặt cọc khi `joinBlockedUntil` của `GET /api/wallet` khác `null` |
 | `DEPOSIT_REQUIRED` | 403 | Đặt giá khi chưa cọc | Mở bước đặt cọc |
 | `NOT_FOUND` | 404 | Không tồn tại **hoặc không thuộc về bạn**; route sai | Quay lại danh sách |
 | `PAYLOAD_TOO_LARGE` | 413 | Body quá lớn | Lỗi lập trình |

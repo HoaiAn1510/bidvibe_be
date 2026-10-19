@@ -105,12 +105,12 @@ Ký hiệu: → gọi theo thứ tự; (socket) cần Socket.io.
 |---|---|---|
 | Đăng nhập | [`POST /api/auth/login`](api.md#post-apiauthlogin) (bidder / seller) hoặc [`POST /api/auth/ops/login`](api.md#post-apiauthopslogin) (thẩm định / kho / admin) → lưu `token`, `role` → [`GET /api/me`](api.md#get-apime) | `role` quyết định mở giao diện nào. Sau khi đăng nhập, mở Socket.io (socket) |
 | Đăng ký | [`POST /api/auth/register`](api.md#post-apiauthregister) | Trả token luôn, không cần đăng nhập lại |
-| Danh sách phiên | [`GET /api/categories`](api.md#get-apicategories), [`GET /api/auctions?status=live&sort=ending`](api.md#get-apiauctions) | Tab "Phiên của tôi": `status=joined` |
+| Danh sách phiên | [`GET /api/categories`](api.md#get-apicategories), [`GET /api/auctions?status=live&sort=ending`](api.md#get-apiauctions) | Tab "Phiên của tôi": `status=joined`; nhãn theo `myState` ([gợi ý nhãn bên dưới](#nhãn-phiên-của-tôi-theo-mystate)) và hiện giá mình đặt cao nhất `myMaxBid` |
 | Chi tiết phiên | [`GET /api/auctions/:id`](api.md#get-apiauctionsid) → (socket) `auction:join` | Đếm ngược theo `endsAt` và độ lệch giờ server (`serverTime`, [xem mục 6c](#6c-đồng-hồ-đếm-ngược-đúng-dù-điện-thoại-lệch-giờ)), khi tạm dừng theo `remainingSeconds`; nghe `auction:update`, `auction:ended`; rời màn → `auction:leave` |
 | Đặt cọc | [`POST /api/auctions/:id/join`](api.md#post-apiauctionsidjoin) | Nút hiện khi `joined == false`. `402` → mở màn nạp ví |
 | Đặt giá | [`POST /api/bids`](api.md#post-apibids) | Gửi `amount` **hoặc** `increment`. Giá mới về qua (socket) `auction:update` |
 | Báo cáo phiên | [`POST /api/auctions/:id/report`](api.md#post-apiauctionsidreport) | |
-| Ví | [`GET /api/wallet`](api.md#get-apiwallet), [`GET /api/wallet/transactions`](api.md#get-apiwallettransactions), [`POST /api/wallet/topup`](api.md#post-apiwallettopup) | |
+| Ví | [`GET /api/wallet`](api.md#get-apiwallet) (có `joinBlockedUntil`: khác `null` thì hiện cảnh báo "Bạn bị tạm chặn tham gia phiên mới đến <ngày giờ>" và khoá nút đặt cọc), [`GET /api/wallet/transactions`](api.md#get-apiwallettransactions), [`POST /api/wallet/topup`](api.md#post-apiwallettopup) | |
 | Đơn hàng (người mua) | [`GET /api/orders/mine`](api.md#get-apiordersmine) → [`GET /api/orders/:id`](api.md#get-apiordersid) → [`POST /api/orders/:id/pay`](api.md#post-apiordersidpay) | Đếm ngược tới `paymentDeadline` (24 giờ) |
 | Chọn địa chỉ | [`GET /api/addresses`](api.md#get-apiaddresses) (chưa có thì [`POST /api/addresses`](api.md#post-apiaddresses)) → [`POST /api/orders/:id/shipping-address`](api.md#post-apiordersidshipping-address) | Nên làm ngay sau khi thắng / thanh toán; kho không gửi được đơn chưa có địa chỉ |
 | Theo dõi giao hàng | [`GET /api/orders/:id/tracking`](api.md#get-apiordersidtracking) → [`POST /api/orders/:id/confirm-delivery`](api.md#post-apiordersidconfirm-delivery) | Hiện `stage`, `events`; nút "Đã nhận hàng" khi `stage == delivered`. Có vấn đề → [`POST /api/disputes`](api.md#post-apidisputes) |
@@ -163,6 +163,8 @@ Lỗi hay gặp:
 | Gọi route sai vai trò | `FORBIDDEN` (403) | Lỗi giao diện: ẩn tính năng theo `role` |
 | Thao tác sai thứ tự (ví dụ sửa tin đang chờ thẩm định) | `INVALID_STATE` (409) | Hiện `message`, tải lại dữ liệu |
 | Đặt giá thấp | `BID_TOO_LOW` (400) | `message` có giá tối thiểu |
+| Người hay bỏ đơn bị chặn đặt cọc phiên mới | `JOIN_BLOCKED` (403) | Hiện `message` (đã có ngày giờ được tham gia lại, giờ Việt Nam) |
+| Đặt giá liên tiếp quá nhanh (dưới 1 giây sau lượt trước của cùng người) | `BID_TOO_FAST` (429) | Hiện `message`; khoá nút đặt giá khoảng 1 giây sau mỗi lần bấm để không dính lỗi này |
 | Phiên đang tạm dừng | `AUCTION_PAUSED` (409) | Tải lại phiên, đồng hồ đứng yên |
 | Kho gửi đơn chưa có địa chỉ | `ORDER_NO_ADDRESS` (409) | Màn kho: báo chờ người mua chọn địa chỉ |
 | Không tìm thấy / không phải của mình | `NOT_FOUND` (404) | Quay lại danh sách |
@@ -311,6 +313,19 @@ Future<void> addPhotosFromGallery(String baseUrl, String token, String listingId
 - **Thời gian** là ISO 8601 UTC; một số trường lồng trả dạng `+00:00`. Dùng `DateTime.parse(...).toLocal()`.
 - Tài khoản `ops` (thẩm định / kho / admin) không có thông báo, ví, địa chỉ, chatbot.
 
+## Nhãn "Phiên của tôi" theo `myState`
+
+`GET /api/auctions` và `GET /api/auctions/:id` trả thêm `myState` và `myMaxBid` cho người mua đang đăng nhập (tính sẵn ở server, app không phải tự suy ra từ `leading` / `won` / `myBid`). Gợi ý nhãn:
+
+| `myState` | Nhãn gợi ý | Màu gợi ý | Ghi chú |
+|---|---|---|---|
+| `leading` | Bạn đang dẫn đầu | Xanh | Phiên đang diễn ra |
+| `outbid` | Bạn bị vượt giá | Đỏ | Có nút đặt giá lại; hiện `myMaxBid` là giá cao nhất của mình |
+| `joined_no_bid` | Đã đặt cọc | Xanh dương | Chưa đặt giá; `myMaxBid` là `null` |
+| `won` | Bạn đã thắng | Xanh đậm | Mở màn thanh toán / theo dõi đơn |
+| `lost` | Không thắng | Xám | Cọc đã hoàn về ví (hoặc phiên bị huỷ) |
+| `null` | (không nhãn) | | Chưa tham gia phiên này |
+
 ## 6b. Test nhanh thắng phiên và quá hạn thanh toán
 
 Phiên thật chạy hàng giờ và đơn quá hạn sau 24 giờ, nên trước đây phải sửa tay database để test. Backend có sẵn hai API dev, mặc định **tắt**:
@@ -359,7 +374,7 @@ Lỗi thường gặp: `404` ở `/api/dev/...` là chưa bật `DEV_TOOLS=true`
 
 ## 6c. Đồng hồ đếm ngược đúng dù điện thoại lệch giờ
 
-Giờ trên điện thoại có thể lệch giờ server vài giây đến vài phút, nên đếm ngược kiểu `endsAt - DateTime.now()` sẽ sai. Server trả `serverTime` (ISO 8601 UTC, giờ server lúc trả) ở:
+Giờ trên điện thoại có thể lệch giờ server vài giây đến vài phút, nên đếm ngược kiểu `endsAt - DateTime.now()` sẽ sai. Server trả `serverTime` (ISO 8601 UTC) ở dưới. Đây là **giờ của database** (server đo độ lệch với database lúc khởi động và mỗi 60 giây), cùng đồng hồ với `endsAt` và với việc đóng phiên, nên đếm ngược theo `serverTime` khớp lúc server đóng phiên:
 
 - [`GET /api/auctions`](api.md#get-apiauctions) và [`GET /api/auctions/:id`](api.md#get-apiauctionsid): cấp `data`, không lặp trong từng phiên;
 - mọi sự kiện socket `auction:update` và `auction:ended` ([`socket.md`](socket.md)).

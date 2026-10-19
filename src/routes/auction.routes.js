@@ -4,6 +4,7 @@ const engine = require('../services/auction_engine');
 const fraud = require('../services/fraud_detection');
 const validate = require('../utils/validate');
 const { countViewers } = require('../sockets/viewers');
+const dbClock = require('../config/db_clock');
 const { ok, idParam, pageParams } = require('./_http');
 
 const router = express.Router();
@@ -21,14 +22,14 @@ router.get('/', async (req, res) => {
     engine.listAuctions({ ...filters, sort, ...page }),
     engine.countAuctions(filters),
   ]);
-  // serverTime: giờ server lúc trả, để app tính độ lệch đồng hồ (cấp data, không lặp trong từng phiên)
-  ok(res, { auctions, total, ...page, serverTime: new Date().toISOString() });
+  // serverTime: giờ DATABASE lúc trả (giờ máy + độ lệch đo định kỳ), để app tính độ lệch đồng hồ (cấp data, không lặp trong từng phiên)
+  ok(res, { auctions, total, ...page, serverTime: dbClock.serverTimeIso() });
 });
 
 router.get('/:id', async (req, res) => {
   const auction = await engine.getAuction(idParam(req.params.id), viewerOf(req));
   // viewers: số tài khoản đang xem phiên qua Socket.io (đếm trên backend này, như sự kiện auction:viewers)
-  ok(res, { ...auction, viewers: await countViewers(auction.id), serverTime: new Date().toISOString() });
+  ok(res, { ...auction, viewers: await countViewers(auction.id), serverTime: dbClock.serverTimeIso() });
 });
 
 // Đặt cọc tham gia phiên

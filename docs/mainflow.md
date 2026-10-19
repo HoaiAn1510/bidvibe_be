@@ -171,7 +171,7 @@ Quyết định đã chốt: **Seller chưa có ví**, giải ngân chỉ đổi
 
 | Việc | Hiện trạng |
 |---|---|
-| Phát hiện | `fraud_detection.scanAuction` (BE1) chạy sau mỗi lượt giá, theo 4 luật (hai tài khoản đặt xen kẽ, dồn dập từ 5 lượt trong 60 giây, nhảy giá từ 3 lần, tài khoản mới đặt giá cao). Ghi `flagged_auctions` (`pending`) + `flag_evidence`. Kiểm tra trùng và ghi cờ nằm chung một giao dịch, tuần tự theo phiên (advisory lock); unique index `uq_flagged_auctions_pending_reason` (migration 006) chặn hai cờ `pending` cùng lý do |
+| Phát hiện | `fraud_detection.scanAuction` (BE1) chạy sau mỗi lượt giá, theo 7 luật: 4 luật theo mẫu lượt giá (`ping_pong` hai tài khoản đặt xen kẽ, `burst` dồn dập từ 5 lượt trong 60 giây, `price_jump` nhảy giá từ 3 lần, `new_account` tài khoản mới đặt giá cao) và 3 luật theo danh tính (`seller_alt_account` người đặt giá trùng số điện thoại với người bán, `seller_affinity` gần như chỉ đặt giá phiên của một người bán, `repeat_forfeiter` người dẫn đầu từng bị tịch thu cọc). `analyze()` là hàm thuần; `scanAuction` dựng ngữ cảnh (số điện thoại, lịch sử người đặt giá) bằng hai truy vấn gộp rồi gọi `analyze()`. Bằng chứng che số điện thoại, không ghi email. Chi tiết 7 luật: `docs/api.md` mục 14. Ghi `flagged_auctions` (`pending`) + `flag_evidence`. Kiểm tra trùng và ghi cờ nằm chung một giao dịch, tuần tự theo phiên (advisory lock); unique index `uq_flagged_auctions_pending_reason` (migration 006) chặn hai cờ `pending` cùng lý do |
 | Admin xem | `GET /api/admin/flags?status=` |
 | Hành động | `POST /api/admin/flags/:id/action` `{ action, reason }` |
 | `pause` | Cờ → `paused`. Phiên không nhận cọc / lượt giá mới, không bị đóng tự động, **đồng hồ đóng băng**: trigger `flagged_auctions_sync_pause` (migration 006, BE1) ghi `auctions.paused_at`. Thông báo Seller; người đang xem phiên nhận Socket.io `auction:update` (`reason: 'paused'`, migration 007) |
@@ -325,7 +325,7 @@ Giới hạn hiện tại:
 |---|---|---|---|
 | Thời lượng phiên | `listings.duration_hours` (1–336 giờ) | `createAuctionForListing` (BE1) | Có |
 | Chống chốt phút chót | Đặt giá khi còn ≤ 30 giây thì `ends_at` = lúc đặt + 30 giây | `SNIPE_WINDOW_MS`, `auction_engine.js` | Có |
-| Quét phiên hết giờ | Mỗi 5 giây, bỏ qua phiên đang tạm dừng | `scheduler.js` → `closeExpiredAuctions` (BE1) | Có |
+| Quét phiên hết giờ | Mỗi 5 giây, bỏ qua phiên đang tạm dừng. Nhiều backend cùng database: mỗi lượt lấy khoá advisory, chỉ backend lấy được mới làm | `scheduler.js` → `closeExpiredAuctions` (BE1) | Có |
 | Tạm dừng phiên | Đồng hồ đứng yên; tiếp tục thì `ends_at` += thời gian đã dừng | Trigger `sync_auction_pause` (migration 006), `auctions.paused_at` | Có |
 | Hạn thanh toán | Lúc thắng + 24 giờ | `PAYMENT_WINDOW_MS`, `auction_engine.js` | Có |
 | Quét đơn quá hạn thanh toán | Mỗi 5 giây | `scheduler.js` → `processPaymentTimeouts` (BE1) | Có |
