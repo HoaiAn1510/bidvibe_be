@@ -815,6 +815,9 @@ async function main() {
       await step('bot với interval mặc định 5 giây không bị giới hạn tốc độ đặt giá (1 lượt / giây / người)', async () => {
         engine.limits.bidMinIntervalMs = 1000;
         try {
+          // Hai tài khoản bot vừa đặt giá ở các bước trước (với giới hạn tắt); nếu chưa tới 1 giây thì lượt đầu của bot ở bước
+          // này bị BID_TOO_FAST (dễ gặp khi database phản hồi nhanh). Chờ hết khoảng giới hạn để chỉ kiểm interval 5 giây của bot.
+          await sleep(1100);
           const { auctionId: ab } = await mkAuction(seller);
           const r = await runBidbot({ base, auctionId: ab, accounts: [b1, b2], intervalMs: 5000, max: 2, log, allowedEmails, stopBeforeSeconds: 60 });
           assert.deepStrictEqual(r, { bids: 2, reason: 'đủ 2 lượt' });
