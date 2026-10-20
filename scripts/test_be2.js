@@ -882,6 +882,46 @@ async function main() {
         { token: T.wh, body: { result: 'match', photoUrls: wUrls.slice(0, 1) }, note: (j) => `stage=${j.data.stage}` });
       const noDispute = await q1('SELECT count(*)::int AS n FROM disputes WHERE order_id = $1', [W2.orderId]);
       assert.strictEqual(noDispute.n, 0);
+
+      // ---- Việc 5: trả photos trong tranh chấp ----
+      const checkPhotos = (photos, label) => {
+        assert.ok(Array.isArray(photos), `${label}: photos phải là mảng`);
+        for (const ph of photos) {
+          assert.deepStrictEqual(Object.keys(ph).sort(), ['createdAt', 'id', 'uploaderRole', 'url'], `${label}: trường của ảnh`);
+          assert.strictEqual(typeof ph.id, 'string', `${label}: id là chuỗi`);
+          assert.ok(['bidder', 'seller', 'warehouse'].includes(ph.uploaderRole));
+          assert.ok(!Number.isNaN(Date.parse(ph.createdAt)));
+        }
+        for (let i = 1; i < photos.length; i += 1) assert.ok(Date.parse(photos[i].createdAt) >= Date.parse(photos[i - 1].createdAt), `${label}: sắp theo thời gian`);
+      };
+      const mineOf = async (token) => (await api('GET /api/disputes/mine', 'GET', '/api/disputes/mine',
+        { token, note: (j) => `${j.data.disputes.length} tranh chấp` })).disputes;
+      const pb = (await mineOf(T.b1)).find((x) => String(x.id) === String(d1.id));
+      checkPhotos(pb.photos, 'người mua');
+      assert.strictEqual(pb.photos.length, 12);
+      assert.deepStrictEqual(pb.photos.slice(0, 4).map((x) => x.uploaderRole), ['bidder', 'bidder', 'bidder', 'seller']);
+      assert.deepStrictEqual(pb.photos.slice(0, 2).map((x) => x.url), bUrls);
+      const ps = (await mineOf(T.seller)).find((x) => String(x.id) === String(d1.id));
+      assert.deepStrictEqual(ps.photos, pb.photos, 'người bán thấy cùng các ảnh');
+      assert.ok(!(await mineOf(T.b2)).some((x) => String(x.id) === String(d1.id)), 'người ngoài không thấy tranh chấp này');
+      const noPhoto = (await mineOf(T.b1)).find((x) => String(x.id) === String(dc.id));
+      assert.deepStrictEqual(noPhoto.photos, [], 'tranh chấp không có ảnh trả mảng rỗng');
+      record('GET /api/disputes/mine có photos', `người mua và người bán: 12 ảnh (id chuỗi, url, uploaderRole, createdAt, sắp theo thời gian); tranh chấp không ảnh: []`);
+
+      const isWh = (x) => String(x.id) === String(T.whDispute.id);
+      const adm = await api('Admin xem tranh chấp có ảnh của kho', 'GET', await pageOf('/api/admin/disputes', T.admin, 'disputes', isWh),
+        { token: T.admin, note: (j) => { const x = j.data.disputes.find(isWh); return `${x.photos.length} ảnh: ${x.photos.map((p) => p.uploaderRole).join(', ')}`; } });
+      const aw = adm.disputes.find(isWh);
+      checkPhotos(aw.photos, 'admin');
+      assert.deepStrictEqual(aw.photos.map((x) => [x.url, x.uploaderRole]), T.whDispute.urls.map((u) => [u, 'warehouse']));
+
+      // Phản hồi của POST /api/disputes/:id/photos trả tranh chấp kèm photos mới (người mua của đơn kho bổ sung).
+      const b2Urls = await upload('Bidder 2 tải 1 ảnh bằng chứng', T.b2, 'dispute', 1);
+      const added = await api('Người mua bổ sung ảnh vào tranh chấp kho mở', 'POST', `/api/disputes/${T.whDispute.id}/photos`,
+        { token: T.b2, body: { photoUrls: b2Urls }, expect: 201, note: (j) => `${j.data.photos.length} ảnh` });
+      checkPhotos(added.photos, 'phản hồi bổ sung');
+      assert.deepStrictEqual(added.photos.map((x) => x.uploaderRole), ['warehouse', 'warehouse', 'bidder']);
+      assert.strictEqual(added.photos[2].url, b2Urls[0]);
     });
   } finally {
     await api('Khoá lại tài khoản Kho', 'PATCH', `/api/admin/ops-accounts/${wh.id}`, { token: T.admin, body: { status: 'suspended' } });

@@ -771,8 +771,15 @@ Tiến trình giao hàng: [`GET /api/orders/:id/tracking`](#get-apiordersidtrack
   "title": "Đồng hồ chạy chậm", "status": "open", "escrowAmount": 1143000, "resolution": "none", "resolvedBy": null,
   "finalPrice": 1050000, "payoutStatus": "disputed",
   "buyer": { "id": "168", "name": "Người mua Một" }, "seller": { "id": "167", "storeName": "Shop Demo" },
-  "timeline": [ { "note": "Người mua mở tranh chấp: Chậm 5 phút mỗi ngày", "at": "2026-10-10T15:30:08.523235+00:00" } ] }
+  "timeline": [ { "note": "Người mua mở tranh chấp: Chậm 5 phút mỗi ngày", "at": "2026-10-10T15:30:08.523235+00:00" },
+                { "note": "Người mua đính kèm 2 ảnh bằng chứng", "at": "2026-10-10T15:30:08.523235+00:00" } ],
+  "photos": [ { "id": "51", "url": "https://<project-ref>.supabase.co/storage/v1/object/public/listing-photos/dispute/168/1791812307070-0d2895e1720e.png",
+                "uploaderRole": "bidder", "createdAt": "2026-10-10T15:30:08.523235+00:00" },
+              { "id": "52", "url": "https://<project-ref>.supabase.co/storage/v1/object/public/listing-photos/dispute/168/1791812307071-4b1c9a02f3d5.jpg",
+                "uploaderRole": "bidder", "createdAt": "2026-10-10T15:30:08.523235+00:00" } ] }
 ```
+
+`photos`: ảnh bằng chứng của tranh chấp, cũ trước mới sau (`id` là chuỗi; `uploaderRole`: `bidder` | `seller` | `warehouse`; `createdAt` ISO 8601). Tranh chấp không có ảnh trả `[]`. Cùng cấu trúc tranh chấp này (kèm `photos`) cũng được trả ở [`GET /api/disputes/mine`](#get-apidisputesmine), [`POST /api/disputes/:id/photos`](#post-apidisputesidphotos), [`GET /api/admin/disputes`](#get-apiadmindisputes) và [`POST /api/admin/disputes/:id/resolve`](#post-apiadmindisputesidresolve).
 
 `escrowAmount` = số người mua đã trả cho đơn. Lỗi: `400 VALIDATION_ERROR` (kể cả `photoUrls` không phải mảng), `400 INVALID_PHOTO_URL`, `400 TOO_MANY_FILES` (quá 6 ảnh một lần), `404 NOT_FOUND`, `409 INVALID_STATE` ("Chỉ mở tranh chấp cho đơn đã thanh toán"), `409 ALREADY_RELEASED`, `409 DISPUTE_OPEN`.
 
@@ -790,7 +797,7 @@ Lỗi: `400 VALIDATION_ERROR` (không có ảnh / `photoUrls` không phải mả
 
 ### `GET /api/disputes/mine`
 
-`bidder` / `seller`. Tranh chấp trên các đơn của tôi: `{ "disputes": [ <tranh chấp>, ... ] }`.
+`bidder` / `seller`. Tranh chấp trên các đơn của tôi: `{ "disputes": [ <tranh chấp>, ... ] }`, mỗi tranh chấp có `photos` (ảnh của cả người mua, người bán và kho).
 
 ### `GET /api/admin/disputes`
 

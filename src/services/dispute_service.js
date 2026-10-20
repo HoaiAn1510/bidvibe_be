@@ -103,7 +103,11 @@ const DISPUTE_SELECT = `
          rb.name AS resolved_by, l.title AS item_title, o.final_price, o.payout_status,
          o.bidder_id, buyer.full_name AS buyer_name, o.seller_id, sl.store_name,
          (SELECT json_agg(json_build_object('note', t.note, 'at', t.at) ORDER BY t.at, t.id)
-            FROM dispute_timeline t WHERE t.dispute_id = d.id) AS timeline
+            FROM dispute_timeline t WHERE t.dispute_id = d.id) AS timeline,
+         -- Ảnh bằng chứng gộp ngay trong truy vấn danh sách (không truy vấn từng tranh chấp), cũ trước mới sau.
+         (SELECT json_agg(json_build_object('id', p.id::text, 'url', p.url, 'uploaderRole', p.uploader_role, 'createdAt', p.created_at)
+                          ORDER BY p.created_at, p.id)
+            FROM dispute_photos p WHERE p.dispute_id = d.id) AS photos
   FROM disputes d
   JOIN orders o ON o.id = d.order_id
   JOIN auctions a ON a.id = o.auction_id
@@ -130,6 +134,8 @@ function toView(r) {
     buyer: { id: r.bidder_id, name: r.buyer_name },
     seller: { id: r.seller_id, storeName: r.store_name },
     timeline: r.timeline || [],
+    // Ảnh bằng chứng: [{ id, url, uploaderRole: 'bidder' | 'seller' | 'warehouse', createdAt }], không có ảnh thì []
+    photos: r.photos || [],
   };
 }
 
