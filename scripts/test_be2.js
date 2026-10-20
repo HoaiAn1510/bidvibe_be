@@ -804,6 +804,52 @@ async function main() {
       assert.ok(tl1.some((n) => n === 'Người mua đính kèm 2 ảnh bằng chứng'), `timeline: ${tl1.join(' | ')}`);
       record('Tranh chấp kèm 2 ảnh', `dispute_photos: 2 dòng (account/bidder), timeline: "${tl1[tl1.length - 1]}"`);
       T.photoDispute = { id: d1.id, orderId: P1.orderId, urls: bUrls };
+
+      // ---- Việc 3: bổ sung ảnh khi tranh chấp còn mở ----
+      const addPhotos = (label, token, photoUrls, expect, code) => api(label, 'POST', `/api/disputes/${d1.id}/photos`,
+        { token, body: { photoUrls }, expect, code,
+          note: (j) => (j.success ? `status=${j.data.status}` : `${j.error.code}: ${j.error.message}`) });
+      const countOf = async () => (await photoRows(d1.id)).length;
+      const latestDisputeNote = async (token) => {
+        const r = await fetch(`${base}/api/notifications?limit=50`, { headers: { Authorization: `Bearer ${token}` } });
+        return (await r.json()).data.notifications.find((n) => n.type === 'dispute' && n.data && n.data.disputeId === String(d1.id) && n.title.includes('bổ sung'));
+      };
+      const more = await upload('Bidder tải thêm 1 ảnh', T.b1, 'dispute', 1);
+      await addPhotos('Người mua bổ sung 1 ảnh khi tranh chấp đang mở', T.b1, more, 201);
+      assert.strictEqual(await countOf(), 3);
+      assert.ok((await timelineOf(d1.id)).includes('Người mua bổ sung 1 ảnh'));
+      const toSeller = await latestDisputeNote(T.seller);
+      assert.ok(toSeller, 'người bán phải nhận thông báo bổ sung ảnh');
+      assert.deepStrictEqual(toSeller.data, { orderId: String(P1.orderId), auctionId: String(P1.auctionId), disputeId: String(d1.id) });
+      record('Bên kia (người bán) nhận thông báo', `type=dispute, data=${JSON.stringify(toSeller.data)}`);
+      const sUrls = await upload('Seller tải 1 ảnh bằng chứng', T.seller, 'dispute', 1);
+      await addPhotos('Người bán bổ sung 1 ảnh', T.seller, sUrls, 201);
+      const sellerRow = (await photoRows(d1.id)).pop();
+      assert.deepStrictEqual([sellerRow.kind, sellerRow.role], ['account', 'seller']);
+      assert.ok((await timelineOf(d1.id)).includes('Người bán bổ sung 1 ảnh'));
+      assert.ok(await latestDisputeNote(T.b1), 'người mua nhận thông báo khi người bán bổ sung ảnh');
+
+      await addPhotos('Người ngoài đơn bổ sung ảnh', T.b2, more, 404, 'NOT_FOUND');
+      await addPhotos('Admin không được thêm ảnh', T.admin, more, 403, 'FORBIDDEN');
+      await addPhotos('Không gửi ảnh nào', T.b1, [], 400, 'VALIDATION_ERROR');
+      await addPhotos('URL ngoài bucket', T.b1, ['https://picsum.photos/seed/y/800/600'], 400, 'INVALID_PHOTO_URL');
+      await addPhotos('Quá 6 ảnh một lần', T.b1, Array(7).fill(more[0]), 400, 'TOO_MANY_FILES');
+      await api('Tranh chấp không tồn tại', 'POST', '/api/disputes/999999999/photos', { token: T.b1, body: { photoUrls: more }, expect: 404, code: 'NOT_FOUND' });
+      assert.strictEqual(await countOf(), 4, 'các lần bị từ chối không ghi ảnh');
+
+      // Tổng tối đa 12: đang có 4; thêm 6 -> 10; thêm 3 -> vượt (13); thêm 2 -> đúng 12; thêm 1 -> vượt.
+      const six = await upload('Bidder tải 6 ảnh', T.b1, 'dispute', 6);
+      await addPhotos('Bổ sung đúng 6 ảnh một lần', T.b1, six, 201);
+      assert.strictEqual(await countOf(), 10);
+      await addPhotos('Vượt tổng 12 ảnh (10 + 3)', T.b1, six.slice(0, 3), 400, 'TOO_MANY_FILES');
+      await addPhotos('Đủ đúng 12 ảnh (10 + 2)', T.b1, six.slice(0, 2), 201);
+      assert.strictEqual(await countOf(), 12);
+      await addPhotos('Đã đủ 12 ảnh thì không thêm được', T.b1, six.slice(0, 1), 400, 'TOO_MANY_FILES');
+
+      await api('Admin phán quyết giữ nguyên', 'POST', `/api/admin/disputes/${d1.id}/resolve`, { token: T.admin, body: { resolution: 'keep' } });
+      await addPhotos('Bổ sung sau khi Admin đã xử lý', T.b1, six.slice(0, 1), 409, 'INVALID_STATE');
+      assert.strictEqual(await countOf(), 12, 'ảnh vẫn được giữ làm bằng chứng sau khi xử lý');
+      record('Ảnh vẫn còn sau khi tranh chấp đã xử lý', '12 ảnh, không xoá');
     });
   } finally {
     await api('Khoá lại tài khoản Kho', 'PATCH', `/api/admin/ops-accounts/${wh.id}`, { token: T.admin, body: { status: 'suspended' } });

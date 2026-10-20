@@ -61,6 +61,43 @@ async function open(user, input = {}) {
   return getOne(result.disputeId);
 }
 
+// Người mua / người bán của đơn bổ sung ảnh bằng chứng khi tranh chấp còn 'open' (1–6 ảnh mỗi lần, tổng tối đa 12).
+// Người ngoài đơn -> 404 (không lộ tranh chấp của người khác); đã xử lý -> 409 INVALID_STATE; vượt tổng -> 400 TOO_MANY_FILES.
+async function addPhotos(user, disputeId, input = {}) {
+  const photoUrls = disputePhotos.parsePhotoUrls(input.photoUrls, { required: true });
+  const result = await inTransaction(async (client) => {
+    // Khoá dòng tranh chấp: chạy lần lượt với Admin phán quyết (resolve cũng khoá dòng này trước) và với lần bổ sung khác.
+    const { rows } = await client.query(
+      `SELECT d.id, d.status, d.title, o.id AS order_id, o.auction_id, o.bidder_id, o.seller_id
+       FROM disputes d JOIN orders o ON o.id = d.order_id
+       WHERE d.id = $1 FOR UPDATE OF d`,
+      [disputeId],
+    );
+    const d = rows[0];
+    const ownerId = d && (user.role === 'bidder' ? d.bidder_id : d.seller_id);
+    if (!d || String(ownerId) !== String(user.id)) throw new AppError('Không tìm thấy tranh chấp', 404, 'NOT_FOUND');
+    if (d.status !== 'open') throw conflict('Tranh chấp đã được xử lý, không thể bổ sung ảnh', 'INVALID_STATE');
+    const have = await disputePhotos.countPhotos(client, d.id);
+    if (have + photoUrls.length > disputePhotos.MAX_PER_DISPUTE) {
+      throw new AppError(
+        `Mỗi tranh chấp tối đa ${disputePhotos.MAX_PER_DISPUTE} ảnh (đã có ${have}, còn thêm được ${Math.max(disputePhotos.MAX_PER_DISPUTE - have, 0)})`,
+        400, 'TOO_MANY_FILES',
+      );
+    }
+    await disputePhotos.insertPhotos(client, d.id, photoUrls, { kind: 'account', id: user.id, role: user.role });
+    await client.query('INSERT INTO dispute_timeline (dispute_id, note) VALUES ($1, $2)', [
+      d.id, `${WHO[user.role]} bổ sung ${photoUrls.length} ảnh`,
+    ]);
+    const other = user.role === 'bidder' ? d.seller_id : d.bidder_id;
+    const note = await notify(client, other, 'dispute',
+      `${WHO[user.role]} đã bổ sung ${photoUrls.length} ảnh bằng chứng cho tranh chấp "${d.title}"`,
+      { orderId: d.order_id, auctionId: d.auction_id, disputeId: d.id });
+    return { note };
+  });
+  emitNotification(result.note);
+  return getOne(disputeId);
+}
+
 const DISPUTE_SELECT = `
   SELECT d.id, d.order_id, d.source, d.reporter_id, d.title, d.status, d.escrow_amount, d.resolution,
          rb.name AS resolved_by, l.title AS item_title, o.final_price, o.payout_status,
@@ -181,4 +218,4 @@ async function resolve(adminId, disputeId, input = {}) {
   return getOne(disputeId);
 }
 
-module.exports = { open, listMine, listForAdmin, resolve };
+module.exports = { open, addPhotos, listMine, listForAdmin, resolve };

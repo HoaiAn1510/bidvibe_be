@@ -775,6 +775,18 @@ Tiến trình giao hàng: [`GET /api/orders/:id/tracking`](#get-apiordersidtrack
 
 `escrowAmount` = số người mua đã trả cho đơn. Lỗi: `400 VALIDATION_ERROR` (kể cả `photoUrls` không phải mảng), `400 INVALID_PHOTO_URL`, `400 TOO_MANY_FILES` (quá 6 ảnh một lần), `404 NOT_FOUND`, `409 INVALID_STATE` ("Chỉ mở tranh chấp cho đơn đã thanh toán"), `409 ALREADY_RELEASED`, `409 DISPUTE_OPEN`.
 
+### `POST /api/disputes/:id/photos`
+
+`bidder` / `seller` **của đơn** có tranh chấp (người khác → `404 NOT_FOUND`; tài khoản `ops`, kể cả Admin → `403 FORBIDDEN`). Bổ sung ảnh bằng chứng khi tranh chấp còn `open`.
+
+| Trường | Kiểu | Bắt buộc | Ràng buộc |
+|---|---|---|---|
+| `photoUrls` | mảng URL | có | 1–6 ảnh mỗi lần; **tổng tối đa 12 ảnh** cho một tranh chấp. URL phải nhận từ [`POST /api/uploads/images?purpose=dispute`](#post-apiuploadsimages) |
+
+Timeline thêm dòng "Người mua bổ sung N ảnh" (hoặc "Người bán ..."), bên kia nhận thông báo `dispute` với `data: { orderId, auctionId, disputeId }`. Phản hồi `201` là tranh chấp (cấu trúc như [`POST /api/disputes`](#post-apidisputes)). Ảnh không bị xoá khi tranh chấp đã xử lý (giữ làm bằng chứng).
+
+Lỗi: `400 VALIDATION_ERROR` (không có ảnh / `photoUrls` không phải mảng), `400 INVALID_PHOTO_URL`, `400 TOO_MANY_FILES` (quá 6 ảnh một lần, hoặc vượt tổng 12: message ghi số đã có và số còn thêm được), `403 FORBIDDEN`, `404 NOT_FOUND`, `409 INVALID_STATE` ("Tranh chấp đã được xử lý, không thể bổ sung ảnh").
+
 ### `GET /api/disputes/mine`
 
 `bidder` / `seller`. Tranh chấp trên các đơn của tôi: `{ "disputes": [ <tranh chấp>, ... ] }`.
@@ -1337,6 +1349,7 @@ Bảng này khớp 1-1 với route đăng ký trong `src/routes/` (kiểm tra b�
 | POST | `/api/warehouse/orders/:id/deliver` | warehouse | [11](#post-apiwarehouseordersiddeliver) |
 | POST | `/api/orders/:id/confirm-delivery` | bidder | [12](#post-apiordersidconfirm-delivery) |
 | POST | `/api/disputes` | bidder, seller | [13](#post-apidisputes) |
+| POST | `/api/disputes/:id/photos` | bidder, seller (của đơn) | [13](#post-apidisputesidphotos) |
 | GET | `/api/disputes/mine` | bidder, seller | [13](#get-apidisputesmine) |
 | GET | `/api/admin/disputes` | admin | [13](#get-apiadmindisputes) |
 | POST | `/api/admin/disputes/:id/resolve` | admin | [13](#post-apiadmindisputesidresolve) |
