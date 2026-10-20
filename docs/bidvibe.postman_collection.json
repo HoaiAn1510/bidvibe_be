@@ -684,7 +684,7 @@
                 }
               ]
             },
-            "description": "Quyền: bidder, seller. form-data, trường files (chọn 1–8 ảnh JPEG/PNG/WEBP, mỗi ảnh ≤ 5 MB). Trả { urls } để gửi vào POST /api/listings/:id/photos. Chưa cấu hình Storage: 503 UPLOAD_NOT_CONFIGURED. Chi tiết: docs/api.md mục 5.",
+            "description": "Quyền: bidder, seller. form-data, trường files (chọn 1–8 ảnh JPEG/PNG/WEBP, mỗi ảnh ≤ 5 MB). Trả { urls } để gửi vào POST /api/listings/:id/photos. Chưa cấu hình Storage: 503 UPLOAD_NOT_CONFIGURED. Chi tiết: docs/api.md mục 5. purpose: listing | avatar | dispute (bidder/seller) | inspection (chỉ tài khoản Kho).",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -1731,7 +1731,7 @@
                 "inspect"
               ]
             },
-            "description": "Quyền: warehouse. Chi tiết: docs/api.md mục 11.",
+            "description": "Quyền: warehouse. Chi tiết: docs/api.md mục 11. photoUrls (không bắt buộc, 0–6): URL từ POST /api/uploads/images?purpose=inspection (chỉ tài khoản Kho), gắn vào tranh chấp khi mismatch.",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -1744,7 +1744,7 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"result\": \"match\",\n  \"notes\": \"Đạt, tình trạng Như mới\"\n}",
+              "raw": "{\n  \"result\": \"match\",\n  \"notes\": \"Đạt, tình trạng Như mới\",\n  \"photoUrls\": []\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1944,7 +1944,7 @@
                 "disputes"
               ]
             },
-            "description": "Quyền: bidder, seller. Chi tiết: docs/api.md mục 13.",
+            "description": "Quyền: bidder, seller. Chi tiết: docs/api.md mục 13. photoUrls (không bắt buộc, 0–6): URL nhận từ POST /api/uploads/images?purpose=dispute.",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -1957,7 +1957,51 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"orderId\": \"{{order_id}}\",\n  \"title\": \"Hàng không đúng mô tả\",\n  \"reason\": \"Mô tả ghi nguyên vẹn nhưng có vết nứt\"\n}",
+              "raw": "{\n  \"orderId\": \"{{order_id}}\",\n  \"title\": \"Hàng không đúng mô tả\",\n  \"reason\": \"Mô tả ghi nguyên vẹn nhưng có vết nứt\",\n  \"photoUrls\": []\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        },
+        {
+          "name": "POST /api/disputes/:id/photos",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/disputes/{{dispute_id}}/photos",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "disputes",
+                "{{dispute_id}}",
+                "photos"
+              ]
+            },
+            "description": "Quyền: bidder / seller của đơn. Bổ sung 1–6 ảnh bằng chứng khi tranh chấp còn open, tổng tối đa 12. URL lấy từ POST /api/uploads/images?purpose=dispute. Chi tiết: docs/api.md mục 13.",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{token_bidder}}",
+                  "type": "string"
+                }
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"photoUrls\": [\n    \"<URL từ POST /api/uploads/images?purpose=dispute>\"\n  ]\n}",
               "options": {
                 "raw": {
                   "language": "json"

@@ -10,6 +10,7 @@ const walletService = require('./wallet_service');
 const { createNotification, emitNotification } = require('./notification_service');
 const { lockOrder, paidAmount } = require('./fulfilment_service');
 const validate = require('../utils/validate');
+const disputePhotos = require('./dispute_photos');
 
 const conflict = (message, code) => new AppError(message, 409, code);
 const notify = (client, accountId, type, title, data) => createNotification(client, { accountId, type, title, data });
@@ -19,6 +20,8 @@ async function open(user, input = {}) {
   const orderId = validate.int(input.orderId, 'orderId', { min: 1 });
   const title = validate.text(input.title, 'Tiêu đề', { max: 200 });
   const reason = validate.text(input.reason, 'Lý do', { max: 2000 });
+  // Ảnh bằng chứng (không bắt buộc, 0–6): kiểm URL trước khi mở giao dịch; không gửi thì chạy như cũ.
+  const photoUrls = disputePhotos.parsePhotoUrls(input.photoUrls);
 
   const result = await inTransaction(async (client) => {
     const o = await lockOrder(client, String(orderId));
@@ -40,6 +43,14 @@ async function open(user, input = {}) {
       `${WHO[user.role]} mở tranh chấp: ${reason}`,
       'Khoản ký quỹ được giữ lại cho tới khi Admin phán quyết.',
     ]);
+    if (photoUrls.length) {
+      // Cùng giao dịch mở tranh chấp: hoặc có cả tranh chấp lẫn ảnh, hoặc không có gì.
+      await disputePhotos.insertPhotos(client, disputeId, photoUrls, { kind: 'account', id: user.id, role: user.role });
+      await client.query('INSERT INTO dispute_timeline (dispute_id, note) VALUES ($1, $2)', [
+        disputeId,
+        `${WHO[user.role]} đính kèm ${photoUrls.length} ảnh bằng chứng`,
+      ]);
+    }
     await client.query(`UPDATE orders SET payout_status = 'disputed' WHERE id = $1`, [o.id]);
     const other = user.role === 'bidder' ? o.seller_id : o.bidder_id;
     const note = await notify(client, other, 'dispute', `${WHO[user.role]} đã mở tranh chấp cho đơn "${o.title}": ${title}`,
@@ -50,12 +61,53 @@ async function open(user, input = {}) {
   return getOne(result.disputeId);
 }
 
+// Người mua / người bán của đơn bổ sung ảnh bằng chứng khi tranh chấp còn 'open' (1–6 ảnh mỗi lần, tổng tối đa 12).
+// Người ngoài đơn -> 404 (không lộ tranh chấp của người khác); đã xử lý -> 409 INVALID_STATE; vượt tổng -> 400 TOO_MANY_FILES.
+async function addPhotos(user, disputeId, input = {}) {
+  const photoUrls = disputePhotos.parsePhotoUrls(input.photoUrls, { required: true });
+  const result = await inTransaction(async (client) => {
+    // Khoá dòng tranh chấp: chạy lần lượt với Admin phán quyết (resolve cũng khoá dòng này trước) và với lần bổ sung khác.
+    const { rows } = await client.query(
+      `SELECT d.id, d.status, d.title, o.id AS order_id, o.auction_id, o.bidder_id, o.seller_id
+       FROM disputes d JOIN orders o ON o.id = d.order_id
+       WHERE d.id = $1 FOR UPDATE OF d`,
+      [disputeId],
+    );
+    const d = rows[0];
+    const ownerId = d && (user.role === 'bidder' ? d.bidder_id : d.seller_id);
+    if (!d || String(ownerId) !== String(user.id)) throw new AppError('Không tìm thấy tranh chấp', 404, 'NOT_FOUND');
+    if (d.status !== 'open') throw conflict('Tranh chấp đã được xử lý, không thể bổ sung ảnh', 'INVALID_STATE');
+    const have = await disputePhotos.countPhotos(client, d.id);
+    if (have + photoUrls.length > disputePhotos.MAX_PER_DISPUTE) {
+      throw new AppError(
+        `Mỗi tranh chấp tối đa ${disputePhotos.MAX_PER_DISPUTE} ảnh (đã có ${have}, còn thêm được ${Math.max(disputePhotos.MAX_PER_DISPUTE - have, 0)})`,
+        400, 'TOO_MANY_FILES',
+      );
+    }
+    await disputePhotos.insertPhotos(client, d.id, photoUrls, { kind: 'account', id: user.id, role: user.role });
+    await client.query('INSERT INTO dispute_timeline (dispute_id, note) VALUES ($1, $2)', [
+      d.id, `${WHO[user.role]} bổ sung ${photoUrls.length} ảnh`,
+    ]);
+    const other = user.role === 'bidder' ? d.seller_id : d.bidder_id;
+    const note = await notify(client, other, 'dispute',
+      `${WHO[user.role]} đã bổ sung ${photoUrls.length} ảnh bằng chứng cho tranh chấp "${d.title}"`,
+      { orderId: d.order_id, auctionId: d.auction_id, disputeId: d.id });
+    return { note };
+  });
+  emitNotification(result.note);
+  return getOne(disputeId);
+}
+
 const DISPUTE_SELECT = `
   SELECT d.id, d.order_id, d.source, d.reporter_id, d.title, d.status, d.escrow_amount, d.resolution,
          rb.name AS resolved_by, l.title AS item_title, o.final_price, o.payout_status,
          o.bidder_id, buyer.full_name AS buyer_name, o.seller_id, sl.store_name,
          (SELECT json_agg(json_build_object('note', t.note, 'at', t.at) ORDER BY t.at, t.id)
-            FROM dispute_timeline t WHERE t.dispute_id = d.id) AS timeline
+            FROM dispute_timeline t WHERE t.dispute_id = d.id) AS timeline,
+         -- Ảnh bằng chứng gộp ngay trong truy vấn danh sách (không truy vấn từng tranh chấp), cũ trước mới sau.
+         (SELECT json_agg(json_build_object('id', p.id::text, 'url', p.url, 'uploaderRole', p.uploader_role, 'createdAt', p.created_at)
+                          ORDER BY p.created_at, p.id)
+            FROM dispute_photos p WHERE p.dispute_id = d.id) AS photos
   FROM disputes d
   JOIN orders o ON o.id = d.order_id
   JOIN auctions a ON a.id = o.auction_id
@@ -82,6 +134,8 @@ function toView(r) {
     buyer: { id: r.bidder_id, name: r.buyer_name },
     seller: { id: r.seller_id, storeName: r.store_name },
     timeline: r.timeline || [],
+    // Ảnh bằng chứng: [{ id, url, uploaderRole: 'bidder' | 'seller' | 'warehouse', createdAt }], không có ảnh thì []
+    photos: r.photos || [],
   };
 }
 
@@ -170,4 +224,4 @@ async function resolve(adminId, disputeId, input = {}) {
   return getOne(disputeId);
 }
 
-module.exports = { open, listMine, listForAdmin, resolve };
+module.exports = { open, addPhotos, listMine, listForAdmin, resolve };
