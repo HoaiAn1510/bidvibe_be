@@ -684,7 +684,7 @@
                 }
               ]
             },
-            "description": "Quyền: bidder, seller. form-data, trường files (chọn 1–8 ảnh JPEG/PNG/WEBP, mỗi ảnh ≤ 5 MB). Trả { urls } để gửi vào POST /api/listings/:id/photos. Chưa cấu hình Storage: 503 UPLOAD_NOT_CONFIGURED. Chi tiết: docs/api.md mục 5.",
+            "description": "Quyền: bidder, seller. form-data, trường files (chọn 1–8 ảnh JPEG/PNG/WEBP, mỗi ảnh ≤ 5 MB). Trả { urls } để gửi vào POST /api/listings/:id/photos. Chưa cấu hình Storage: 503 UPLOAD_NOT_CONFIGURED. Chi tiết: docs/api.md mục 5. purpose: listing | avatar | dispute (bidder/seller) | inspection (chỉ tài khoản Kho).",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -1731,7 +1731,7 @@
                 "inspect"
               ]
             },
-            "description": "Quyền: warehouse. Chi tiết: docs/api.md mục 11.",
+            "description": "Quyền: warehouse. Chi tiết: docs/api.md mục 11. photoUrls (không bắt buộc, 0–6): URL từ POST /api/uploads/images?purpose=inspection (chỉ tài khoản Kho), gắn vào tranh chấp khi mismatch.",
             "auth": {
               "type": "bearer",
               "bearer": [
@@ -1744,7 +1744,7 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"result\": \"match\",\n  \"notes\": \"Đạt, tình trạng Như mới\"\n}",
+              "raw": "{\n  \"result\": \"match\",\n  \"notes\": \"Đạt, tình trạng Như mới\",\n  \"photoUrls\": []\n}",
               "options": {
                 "raw": {
                   "language": "json"

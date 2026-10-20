@@ -11,6 +11,7 @@ const { inTransaction } = require('./auction_engine');
 const { createNotification, emitNotification } = require('./notification_service');
 const { releasePayout } = require('./payout_service');
 const validate = require('../utils/validate');
+const disputePhotos = require('./dispute_photos');
 
 const PAYOUT_WINDOW_HOURS = 72;
 const FEE_RATE = 0.05;        // khớp auction_engine.js (BE1)
@@ -259,6 +260,9 @@ async function receive(orderId) {
 async function inspect(inspectorId, orderId, input = {}) {
   const result = validate.oneOf(input.result, ['match', 'mismatch'], 'Kết quả kiểm');
   const notes = validate.text(input.notes, 'Ghi chú kiểm hàng', { max: 2000, required: result === 'mismatch' });
+  // Ảnh kiểm hàng (không bắt buộc, 0–6, URL từ POST /api/uploads/images?purpose=inspection). Chỉ được lưu khi mismatch:
+  // gắn vào tranh chấp kho tự mở. Kiểm 'match' thì không có tranh chấp để gắn nên ảnh không được lưu (vẫn kiểm URL hợp lệ).
+  const photoUrls = disputePhotos.parsePhotoUrls(input.photoUrls);
   return withNotes(async (client) => {
     const o = await lockOrder(client, orderId);
     const r = await lockReceipt(client, orderId);
@@ -282,6 +286,12 @@ async function inspect(inspectorId, orderId, input = {}) {
         `Kho phát hiện sai lệch khi kiểm hàng: ${notes}`,
         'Kho tạm giữ hàng, khoản ký quỹ được giữ lại cho tới khi Admin phán quyết.',
       ]);
+      if (photoUrls.length) {
+        await disputePhotos.insertPhotos(client, d.rows[0].id, photoUrls, { kind: 'ops', id: inspectorId, role: 'warehouse' });
+        await client.query('INSERT INTO dispute_timeline (dispute_id, note) VALUES ($1, $2)', [
+          d.rows[0].id, `Kho đính kèm ${photoUrls.length} ảnh bằng chứng`,
+        ]);
+      }
       await client.query(`UPDATE orders SET payout_status = 'disputed' WHERE id = $1`, [orderId]);
       out.push(await notify(client, o.bidder_id, 'dispute', `Kho phát hiện "${o.title}" không khớp mô tả. Admin sẽ xử lý.`, { ...orderData(o), disputeId: d.rows[0].id }));
       out.push(await notify(client, o.seller_id, 'dispute', `Kho phát hiện "${o.title}" không khớp mô tả, đơn đang chờ Admin xử lý.`, { ...orderData(o), disputeId: d.rows[0].id }));

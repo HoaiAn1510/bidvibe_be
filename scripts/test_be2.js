@@ -850,6 +850,38 @@ async function main() {
       await addPhotos('Bổ sung sau khi Admin đã xử lý', T.b1, six.slice(0, 1), 409, 'INVALID_STATE');
       assert.strictEqual(await countOf(), 12, 'ảnh vẫn được giữ làm bằng chứng sau khi xử lý');
       record('Ảnh vẫn còn sau khi tranh chấp đã xử lý', '12 ảnh, không xoá');
+
+      // ---- Việc 4: Kho tải ảnh kiểm hàng (purpose=inspection) và gắn vào tranh chấp khi mismatch ----
+      const one = () => formOf([png()]);
+      await api('Kho tải ảnh khi không ghi purpose (mặc định listing)', 'POST', '/api/uploads/images', { token: T.wh, form: one(), expect: 403, code: 'FORBIDDEN' });
+      await api('Kho tải ảnh với purpose=dispute', 'POST', '/api/uploads/images?purpose=dispute', { token: T.wh, form: one(), expect: 403, code: 'FORBIDDEN' });
+      await api('Thẩm định tải ảnh kiểm hàng', 'POST', '/api/uploads/images?purpose=inspection', { token: T.ap, form: one(), expect: 403, code: 'FORBIDDEN' });
+      await api('Admin tải ảnh kiểm hàng', 'POST', '/api/uploads/images?purpose=inspection', { token: T.admin, form: one(), expect: 403, code: 'FORBIDDEN' });
+      await api('Người mua tải ảnh kiểm hàng', 'POST', '/api/uploads/images?purpose=inspection', { token: T.b1, form: one(), expect: 403, code: 'FORBIDDEN' });
+      const wUrls = await upload('Kho tải 2 ảnh kiểm hàng (purpose=inspection)', T.wh, 'inspection', 2);
+      assert.ok(wUrls.every((u) => u.includes(`/inspection/ops-${wh.id}/`)), 'ảnh kho nằm trong inspection/ops-<id>/');
+
+      const W1 = await sellOne(named('Ảnh kiểm hàng (mismatch)'), T.b2);
+      await api('Kiểm hàng mismatch với ảnh ngoài bucket', 'POST', `/api/warehouse/orders/${W1.orderId}/inspect`,
+        { token: T.wh, body: { result: 'mismatch', notes: 'Vỏ móp', photoUrls: ['https://picsum.photos/seed/z/800/600'] }, expect: 400, code: 'INVALID_PHOTO_URL' });
+      const untouched = await q1('SELECT inspection_result FROM warehouse_receipts WHERE order_id = $1', [W1.orderId]);
+      assert.strictEqual(untouched.inspection_result, null, 'ảnh sai thì chưa ghi kết quả kiểm');
+      await api('Kiểm hàng mismatch kèm 2 ảnh -> tự mở tranh chấp có ảnh', 'POST', `/api/warehouse/orders/${W1.orderId}/inspect`,
+        { token: T.wh, body: { result: 'mismatch', notes: 'Vỏ móp, khác ảnh thẩm định', photoUrls: wUrls }, note: (j) => `stage=${j.data.stage}, payoutStatus=${j.data.payoutStatus}` });
+      const wd = await q1('SELECT id, source FROM disputes WHERE order_id = $1', [W1.orderId]);
+      assert.strictEqual(wd.source, 'warehouse');
+      const wRows = await photoRows(wd.id);
+      assert.deepStrictEqual(wRows.map((r) => r.url), wUrls);
+      assert.ok(wRows.every((r) => r.kind === 'ops' && String(r.by) === String(wh.id) && r.role === 'warehouse'));
+      assert.ok((await timelineOf(wd.id)).includes('Kho đính kèm 2 ảnh bằng chứng'));
+      record('Tranh chấp kho mở có ảnh của kho', `dispute ${wd.id}: 2 ảnh (ops/warehouse), timeline "Kho đính kèm 2 ảnh bằng chứng"`);
+      T.whDispute = { id: wd.id, orderId: W1.orderId, urls: wUrls };
+
+      const W2 = await sellOne(named('Ảnh kiểm hàng (match)'), T.b2);
+      await api('Kiểm hàng match kèm ảnh: không có tranh chấp nên ảnh không được lưu', 'POST', `/api/warehouse/orders/${W2.orderId}/inspect`,
+        { token: T.wh, body: { result: 'match', photoUrls: wUrls.slice(0, 1) }, note: (j) => `stage=${j.data.stage}` });
+      const noDispute = await q1('SELECT count(*)::int AS n FROM disputes WHERE order_id = $1', [W2.orderId]);
+      assert.strictEqual(noDispute.n, 0);
     });
   } finally {
     await api('Khoá lại tài khoản Kho', 'PATCH', `/api/admin/ops-accounts/${wh.id}`, { token: T.admin, body: { status: 'suspended' } });

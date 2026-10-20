@@ -303,7 +303,7 @@ Lỗi: `404 NOT_FOUND`, `409 INVALID_STATE` ("Không thể sửa khi tin đăng 
 
 ### `POST /api/uploads/images`
 
-`bidder` / `seller` (tài khoản `ops` → `403 FORBIDDEN`). Tải ảnh chọn / chụp trên điện thoại lên Supabase Storage, nhận lại URL public để gửi tiếp vào [`POST /api/listings/:id/photos`](#post-apilistingsidphotos) hoặc `avatarUrl` của [`PATCH /api/me`](#patch-apime).
+`bidder` / `seller`; tài khoản `ops` chỉ có **Kho** (`warehouse`) với `?purpose=inspection` (ảnh kiểm hàng), mọi trường hợp `ops` khác → `403 FORBIDDEN`. Người mua / người bán dùng `purpose=inspection` cũng `403`. Tải ảnh chọn / chụp trên điện thoại lên Supabase Storage, nhận lại URL public để gửi tiếp vào [`POST /api/listings/:id/photos`](#post-apilistingsidphotos) hoặc `avatarUrl` của [`PATCH /api/me`](#patch-apime).
 
 - `multipart/form-data`, trường **`files`** (lặp lại cho mỗi ảnh), 1–8 ảnh mỗi lần, tối đa **5 MB** mỗi ảnh.
 - Chỉ JPEG, PNG, WEBP. Server nhận diện bằng nội dung file (magic bytes), không tin `Content-Type` hay đuôi tên file.
@@ -319,7 +319,7 @@ Lỗi: `404 NOT_FOUND`, `409 INVALID_STATE` ("Không thể sửa khi tin đăng 
 { "code": "UPLOAD_NOT_CONFIGURED", "message": "Máy chủ chưa cấu hình nơi lưu ảnh (Supabase Storage)" }
 ```
 
-URL có dạng `{SUPABASE_URL}/storage/v1/object/public/{bucket}/{purpose}/{accountId}/{thời điểm}-{ngẫu nhiên}.{jpg|png|webp}`. Dạng URL ở ví dụ `201` đã kiểm với Supabase Storage thật (`npm run test:be2` tải lên, `GET` URL public trả 200, rồi xoá); mã project được che thành `<project-ref>`. `SUPABASE_URL` dán cả đuôi `/rest/v1` (RESTful endpoint) vẫn chạy: backend chỉ lấy phần gốc. Code Dart: [`fe-quickstart.md`](fe-quickstart.md#5c-tải-ảnh).
+URL có dạng `{SUPABASE_URL}/storage/v1/object/public/{bucket}/{purpose}/{accountId}/{thời điểm}-{ngẫu nhiên}.{jpg|png|webp}`; ảnh kiểm hàng của Kho nằm ở `{purpose}/ops-{opsId}/...` (ví dụ `inspection/ops-12/...`). Dạng URL ở ví dụ `201` đã kiểm với Supabase Storage thật (`npm run test:be2` tải lên, `GET` URL public trả 200, rồi xoá); mã project được che thành `<project-ref>`. `SUPABASE_URL` dán cả đuôi `/rest/v1` (RESTful endpoint) vẫn chạy: backend chỉ lấy phần gốc. Code Dart: [`fe-quickstart.md`](fe-quickstart.md#5c-tải-ảnh).
 
 Lỗi: `400 INVALID_FILE_TYPE` ("Ảnh thứ 2 không phải JPEG, PNG hoặc WEBP"), `413 FILE_TOO_LARGE` ("Mỗi ảnh tối đa 5 MB"), `400 TOO_MANY_FILES` ("Tối đa 8 ảnh mỗi lần"), `400 VALIDATION_ERROR` (không có file, sai tên trường, `purpose` sai), `403 FORBIDDEN`, `502 UPLOAD_FAILED` (Storage trả lỗi / không kết nối được), `503 UPLOAD_NOT_CONFIGURED`.
 
@@ -701,10 +701,11 @@ Lỗi: `404 NOT_FOUND`, `409 INVALID_STATE` ("Người bán chưa báo gửi hà
 |---|---|---|---|
 | `result` | string | có | `match` hoặc `mismatch` |
 | `notes` | string | khi `mismatch` | ≤ 2000 |
+| `photoUrls` | mảng URL | không | 0–6 ảnh kiểm hàng, URL nhận từ [`POST /api/uploads/images?purpose=inspection`](#post-apiuploadsimages); URL khác → `400 INVALID_PHOTO_URL` |
 
-`match` → `stage: inspected`. `mismatch` → tự mở tranh chấp nguồn kho, `payoutStatus: disputed`, `stage: inspection_failed`, hai bên nhận thông báo; đơn dừng tới khi Admin xử lý.
+`match` → `stage: inspected`. `mismatch` → tự mở tranh chấp nguồn kho, `payoutStatus: disputed`, `stage: inspection_failed`, hai bên nhận thông báo; đơn dừng tới khi Admin xử lý. Ảnh trong `photoUrls` được gắn vào tranh chấp đó (`uploaderRole: warehouse`) và timeline thêm "Kho đính kèm N ảnh bằng chứng". Kiểm `match` không có tranh chấp nên ảnh không được lưu (URL vẫn được kiểm hợp lệ).
 
-Lỗi: `400 VALIDATION_ERROR`, `404 NOT_FOUND`, `409 INVALID_STATE` ("Kho chưa nhận hàng, chưa thể kiểm", "Đơn này đã được kiểm").
+Lỗi: `400 VALIDATION_ERROR`, `400 INVALID_PHOTO_URL`, `400 TOO_MANY_FILES` (quá 6 ảnh), `404 NOT_FOUND`, `409 INVALID_STATE` ("Kho chưa nhận hàng, chưa thể kiểm", "Đơn này đã được kiểm"). Ảnh sai thì không ghi kết quả kiểm.
 
 ### `POST /api/warehouse/orders/:id/pack`
 
