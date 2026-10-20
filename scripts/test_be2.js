@@ -380,10 +380,11 @@ async function main() {
   await api('Bidder xác nhận khi chưa giao', 'POST', `/api/orders/${O1}/confirm-delivery`, { token: T.b1, expect: 409 });
   const dv = await api('Giao thành công', 'POST', `/api/warehouse/orders/${O1}/deliver`,
     { token: T.wh, note: (j) => `stage=${j.data.stage}, payoutDeadline=${j.data.payoutDeadline}` });
-  // payout_deadline do DB đặt (now() + 72 giờ) còn Date.now() là giờ máy chạy test: hai đồng hồ lệch nhau (DB đang nhanh hơn
-  // máy khoảng 1 giây) nên đầu trên cho dung sai +2 giây, kẻo trượt chỉ vì chênh lệch đồng hồ. Đầu dưới giữ 71.9 giờ.
-  const hours = (new Date(dv.payoutDeadline) - Date.now()) / 3600_000;
-  assert.ok(hours > 71.9 && hours <= 72 + 2 / 3600, `payout_deadline phải là +72 giờ, nhận ${hours}`);
+  // payout_deadline do DB đặt (now() + 72 giờ) nên so với giờ DB đọc ngay sau bước deliver, KHÔNG so với Date.now() của máy chạy
+  // test (hai đồng hồ có thể lệch nhau nhiều giây). Từ lúc deliver tới lúc đọc giờ DB chỉ vài trăm mili giây nên dung sai ±2 giây là đủ.
+  const dbNow = new Date((await q1('SELECT now() AS t')).t);
+  const driftSec = (new Date(dv.payoutDeadline) - dbNow) / 1000 - 72 * 3600;
+  assert.ok(Math.abs(driftSec) <= 2, `payout_deadline phải là +72 giờ so với giờ DB, lệch ${driftSec} giây`);
   await api('Bidder 2 xác nhận đơn không phải của mình', 'POST', `/api/orders/${O1}/confirm-delivery`, { token: T.b2, expect: 404 });
   await api('Bidder 1 xác nhận đã nhận hàng', 'POST', `/api/orders/${O1}/confirm-delivery`,
     { token: T.b1, note: (j) => `stage=${j.data.stage}, payoutStatus=${j.data.payoutStatus}` });
