@@ -10,6 +10,7 @@ const walletService = require('./wallet_service');
 const { createNotification, emitNotification } = require('./notification_service');
 const { lockOrder, paidAmount } = require('./fulfilment_service');
 const validate = require('../utils/validate');
+const disputePhotos = require('./dispute_photos');
 
 const conflict = (message, code) => new AppError(message, 409, code);
 const notify = (client, accountId, type, title, data) => createNotification(client, { accountId, type, title, data });
@@ -19,6 +20,8 @@ async function open(user, input = {}) {
   const orderId = validate.int(input.orderId, 'orderId', { min: 1 });
   const title = validate.text(input.title, 'Tiêu đề', { max: 200 });
   const reason = validate.text(input.reason, 'Lý do', { max: 2000 });
+  // Ảnh bằng chứng (không bắt buộc, 0–6): kiểm URL trước khi mở giao dịch; không gửi thì chạy như cũ.
+  const photoUrls = disputePhotos.parsePhotoUrls(input.photoUrls);
 
   const result = await inTransaction(async (client) => {
     const o = await lockOrder(client, String(orderId));
@@ -40,6 +43,14 @@ async function open(user, input = {}) {
       `${WHO[user.role]} mở tranh chấp: ${reason}`,
       'Khoản ký quỹ được giữ lại cho tới khi Admin phán quyết.',
     ]);
+    if (photoUrls.length) {
+      // Cùng giao dịch mở tranh chấp: hoặc có cả tranh chấp lẫn ảnh, hoặc không có gì.
+      await disputePhotos.insertPhotos(client, disputeId, photoUrls, { kind: 'account', id: user.id, role: user.role });
+      await client.query('INSERT INTO dispute_timeline (dispute_id, note) VALUES ($1, $2)', [
+        disputeId,
+        `${WHO[user.role]} đính kèm ${photoUrls.length} ảnh bằng chứng`,
+      ]);
+    }
     await client.query(`UPDATE orders SET payout_status = 'disputed' WHERE id = $1`, [o.id]);
     const other = user.role === 'bidder' ? o.seller_id : o.bidder_id;
     const note = await notify(client, other, 'dispute', `${WHO[user.role]} đã mở tranh chấp cho đơn "${o.title}": ${title}`,

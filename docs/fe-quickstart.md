@@ -121,7 +121,7 @@ Ký hiệu: → gọi theo thứ tự; (socket) cần Socket.io.
 | Seller: đơn đã bán | [`GET /api/orders/selling`](api.md#get-apiordersselling) → [`POST /api/orders/:id/ship-to-warehouse`](api.md#post-apiordersidship-to-warehouse) → [`GET /api/orders/:id/tracking`](api.md#get-apiordersidtracking) | Báo gửi kho khi `stage == awaiting_seller_shipment` |
 | Hàng chờ thẩm định | [`GET /api/appraisals/queue`](api.md#get-apiappraisalsqueue) → [`GET /api/appraisals/:listingId`](api.md#get-apiappraisalslistingid) → [`POST /api/appraisals/:listingId/decision`](api.md#post-apiappraisalslistingiddecision) | Duyệt là mở phiên ngay |
 | Kho | [`GET /api/warehouse/orders?stage=...`](api.md#get-apiwarehouseorders) → [`receive`](api.md#post-apiwarehouseordersidreceive) → [`inspect`](api.md#post-apiwarehouseordersidinspect) → [`pack`](api.md#post-apiwarehouseordersidpack) → [`ship`](api.md#post-apiwarehouseordersidship) → [`deliver`](api.md#post-apiwarehouseordersiddeliver) | Mỗi tab một `stage`. `ship` lỗi `ORDER_NO_ADDRESS` khi người mua chưa chọn địa chỉ |
-| Tranh chấp | Người dùng: [`POST /api/disputes`](api.md#post-apidisputes), [`GET /api/disputes/mine`](api.md#get-apidisputesmine). Admin: [`GET /api/admin/disputes`](api.md#get-apiadmindisputes) → [`POST /api/admin/disputes/:id/resolve`](api.md#post-apiadmindisputesidresolve) | |
+| Tranh chấp | Người dùng: [`POST /api/disputes`](api.md#post-apidisputes), [`GET /api/disputes/mine`](api.md#get-apidisputesmine). Admin: [`GET /api/admin/disputes`](api.md#get-apiadmindisputes) → [`POST /api/admin/disputes/:id/resolve`](api.md#post-apiadmindisputesidresolve) | Ảnh bằng chứng: tải trước bằng [`POST /api/uploads/images?purpose=dispute`](api.md#post-apiuploadsimages) (tối đa 6 ảnh mỗi lần) rồi gửi `photoUrls` trong `POST /api/disputes` ([mục 5c](#5c-tải-ảnh)). Không có ảnh thì bỏ trường này |
 | Admin | [`GET /api/admin/dashboard`](api.md#get-apiadmindashboard), [`GET /api/admin/report/weekly`](api.md#get-apiadminreportweekly), [`GET /api/admin/flags`](api.md#get-apiadminflags) → [`POST /api/admin/flags/:id/action`](api.md#post-apiadminflagsidaction), [`/api/admin/ops-accounts`](api.md#get-apiadminops-accounts), [`/api/admin/accounts`](api.md#get-apiadminaccounts) | |
 | Chatbot | [`POST /api/chat/messages`](api.md#post-apichatmessages), [`GET /api/chat/sessions/:id/messages`](api.md#get-apichatsessionsidmessages) | Giữ `sessionId` để hỏi tiếp |
 
@@ -260,7 +260,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:image_picker/image_picker.dart';
 
-// Bước 1: tải ảnh lên, nhận URL public. purpose: 'listing' | 'avatar'.
+// Bước 1: tải ảnh lên, nhận URL public. purpose: 'listing' | 'avatar' | 'dispute'.
 Future<List<String>> uploadImages(String baseUrl, String token, List<XFile> images,
     {String purpose = 'listing'}) async {
   final req = http.MultipartRequest('POST', Uri.parse('$baseUrl/api/uploads/images?purpose=$purpose'))

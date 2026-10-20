@@ -213,6 +213,26 @@ function startMockStorage() {
   }));
 }
 
+// Chạy fn với Storage: thật nếu đã cấu hình, không thì Storage giả lập trong tiến trình. Luôn xoá ảnh test đã tải lên.
+async function withStorage(fn) {
+  const realStorage = uploadService.isConfigured();
+  const savedEnv = { url: env.supabaseUrl, key: env.supabaseServiceKey, bucket: env.storageBucket };
+  let mock = null;
+  if (!realStorage) {
+    mock = await startMockStorage();
+    Object.assign(env, { supabaseUrl: mock.url, supabaseServiceKey: 'sb_secret_gia_lap', storageBucket: `${RUN}bucket`.replace(/_/g, '-') });
+  }
+  try {
+    return await fn({ realStorage, mock });
+  } finally {
+    await deleteUploaded();
+    if (mock) {
+      Object.assign(env, { supabaseUrl: savedEnv.url, supabaseServiceKey: savedEnv.key, storageBucket: savedEnv.bucket });
+      await new Promise((r) => mock.server.close(r));
+    }
+  }
+}
+
 async function wallet(token) {
   const res = await fetch(`${base}/api/wallet`, { headers: { Authorization: `Bearer ${token}` } });
   return (await res.json()).data;
@@ -733,6 +753,61 @@ async function main() {
     }
   }
   record('Xoá các ảnh test vừa tải lên Storage', realStorage ? 'đã xoá đúng các object của lần chạy' : 'Storage giả lập: đã xoá');
+
+  // ------------------------------------------------------------------
+  begin('12b. Ảnh bằng chứng của tranh chấp');
+  // Mục 10 kết thúc bằng "Khoá lại tài khoản Kho": mở khoá để dùng Kho trong mục này, khoá lại ở cuối để giữ nguyên trạng thái đó.
+  await api('Mở khoá tài khoản Kho cho mục này', 'PATCH', `/api/admin/ops-accounts/${wh.id}`, { token: T.admin, body: { status: 'active' } });
+  try {
+    await withStorage(async () => {
+      const b1Id = (await q1('SELECT id FROM accounts WHERE email = $1', [email('b1')])).id;
+      const upload = async (label, token, purpose, n = 1) => {
+        const r = await api(label, 'POST', `/api/uploads/images?purpose=${purpose}`,
+          { token, form: formOf(Array.from({ length: n }, png)), expect: 201, note: (j) => j.data.urls.map((u) => u.replace(/^.*\/object\/public\//, '…/public/')).join(', ') });
+        r.urls.forEach((u) => uploadedPaths.push(uploadService.pathFromPublicUrl(u)));
+        return r.urls;
+      };
+      const photoRows = async (disputeId) => (await pool.query(
+        'SELECT url, uploaded_by_kind AS kind, uploaded_by_id AS by, uploader_role AS role FROM dispute_photos WHERE dispute_id = $1 ORDER BY id', [disputeId])).rows;
+      const timelineOf = async (disputeId) => (await pool.query(
+        'SELECT note FROM dispute_timeline WHERE dispute_id = $1 ORDER BY at, id', [disputeId])).rows.map((r) => r.note);
+
+      // Tranh chấp mở KHÔNG kèm ảnh (mục 7) vẫn như cũ: không có ảnh, timeline không có dòng đính kèm.
+      assert.strictEqual((await photoRows(dc.id)).length, 0);
+      assert.ok(!(await timelineOf(dc.id)).some((n) => n.includes('đính kèm')));
+      record('Tranh chấp mở không kèm ảnh chạy như cũ', 'không có dòng dispute_photos, timeline không có dòng "đính kèm"');
+
+      const bUrls = await upload('Bidder tải 2 ảnh bằng chứng (purpose=dispute)', T.b1, 'dispute', 2);
+      assert.ok(bUrls.every((u) => u.includes(`/dispute/${b1Id}/`)), 'ảnh nằm trong dispute/<mã tài khoản>/');
+      await upload('Seller cũng tải được ảnh bằng chứng (purpose=dispute)', T.seller, 'dispute', 1);
+
+      const P1 = await sellOne(named('Ảnh bằng chứng 1'), T.b1);
+      await shipAndDeliver(P1.orderId);
+      const open = (label, body, expect, code) => api(label, 'POST', '/api/disputes',
+        { token: T.b1, body: { orderId: Number(P1.orderId), title: 'Hàng có vết xước', reason: 'Mặt kính xước', ...body }, expect, code,
+          note: (j) => (j.success ? `id=${j.data.id}, source=${j.data.source}` : `${j.error.code}: ${j.error.message}`) });
+      await open('URL ngoài bucket Storage bị từ chối', { photoUrls: ['https://picsum.photos/seed/x/800/600'] }, 400, 'INVALID_PHOTO_URL');
+      await open('URL của bucket khác bị từ chối', { photoUrls: [`${env.supabaseUrl}/storage/v1/object/public/bucket-khac/dispute/${b1Id}/x.png`] }, 400, 'INVALID_PHOTO_URL');
+      await open('Phần tử không phải chuỗi bị từ chối', { photoUrls: [123] }, 400, 'INVALID_PHOTO_URL');
+      await open('Một URL hợp lệ lẫn một URL ngoài vẫn bị từ chối cả lần gửi', { photoUrls: [bUrls[0], 'https://example.com/a.png'] }, 400, 'INVALID_PHOTO_URL');
+      await open('Quá 6 ảnh một lần', { photoUrls: Array(7).fill(bUrls[0]) }, 400, 'TOO_MANY_FILES');
+      await open('photoUrls không phải mảng', { photoUrls: bUrls[0] }, 400, 'VALIDATION_ERROR');
+      const none = await q1('SELECT (SELECT count(*)::int FROM disputes WHERE order_id = $1) AS disputes, payout_status FROM orders WHERE id = $1', [P1.orderId]);
+      assert.ok(none.disputes === 0 && none.payout_status !== 'disputed', 'lỗi kiểm tra ảnh thì không được mở tranh chấp');
+      record('Gửi ảnh sai thì không mở tranh chấp', `đơn ${P1.orderId}: 0 tranh chấp, payoutStatus=${none.payout_status}`);
+
+      const d1 = await open('Mở tranh chấp kèm ảnh (URL trùng chỉ tính một)', { photoUrls: [bUrls[0], bUrls[0], bUrls[1]] }, 201);
+      const rows1 = await photoRows(d1.id);
+      assert.deepStrictEqual(rows1.map((r) => r.url), bUrls, 'đúng 2 ảnh, theo thứ tự gửi, bỏ ảnh trùng');
+      assert.ok(rows1.every((r) => r.kind === 'account' && String(r.by) === String(b1Id) && r.role === 'bidder'));
+      const tl1 = await timelineOf(d1.id);
+      assert.ok(tl1.some((n) => n === 'Người mua đính kèm 2 ảnh bằng chứng'), `timeline: ${tl1.join(' | ')}`);
+      record('Tranh chấp kèm 2 ảnh', `dispute_photos: 2 dòng (account/bidder), timeline: "${tl1[tl1.length - 1]}"`);
+      T.photoDispute = { id: d1.id, orderId: P1.orderId, urls: bUrls };
+    });
+  } finally {
+    await api('Khoá lại tài khoản Kho', 'PATCH', `/api/admin/ops-accounts/${wh.id}`, { token: T.admin, body: { status: 'suspended' } });
+  }
 
   // ------------------------------------------------------------------
   begin('13. Hồ sơ, đổi mật khẩu, đọc hết thông báo, xoá ảnh tin đăng');
