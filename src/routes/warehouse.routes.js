@@ -15,7 +15,8 @@ router.post('/orders/:id/receive', async (req, res) => {
   ok(res, await fulfilment.receive(idParam(req.params.id)));
 });
 
-// { result: 'match' | 'mismatch', notes }  (mismatch bắt buộc notes, tự mở tranh chấp)
+// { result: 'match' | 'mismatch', notes, photoUrls? }  (mismatch bắt buộc notes, tự mở tranh chấp; photoUrls 0–6 ảnh
+// từ POST /api/uploads/images?purpose=inspection, gắn vào tranh chấp đó)
 router.post('/orders/:id/inspect', async (req, res) => {
   ok(res, await fulfilment.inspect(req.user.id, idParam(req.params.id), req.body || {}));
 });

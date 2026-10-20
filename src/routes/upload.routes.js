@@ -28,13 +28,23 @@ function receiveFiles(req, res, next) {
   });
 }
 
-// POST /api/uploads/images?purpose=listing|avatar   multipart/form-data, trường files (1–8 ảnh)
+// POST /api/uploads/images?purpose=listing|avatar|dispute|inspection   multipart/form-data, trường files (1–8 ảnh)
+// Người mua / người bán: listing, avatar, dispute. Tài khoản nội bộ: chỉ Kho, chỉ purpose=inspection (ảnh kiểm hàng, lưu ở
+// inspection/ops-<id>/...); vai trò nội bộ khác vẫn 403 như trước.
 router.post('/images', requireAuth, (req, res, next) => {
-  if (req.user.kind !== 'account') return next(new AppError('Chỉ tài khoản người dùng được tải ảnh', 403, 'FORBIDDEN'));
+  const purpose = req.query.purpose || 'listing';
+  if (req.user.kind !== 'account') {
+    if (req.user.role !== 'warehouse') return next(new AppError('Chỉ tài khoản người dùng được tải ảnh', 403, 'FORBIDDEN'));
+    if (purpose !== 'inspection') return next(new AppError('Tài khoản kho chỉ tải ảnh kiểm hàng (purpose=inspection)', 403, 'FORBIDDEN'));
+  } else if (purpose === 'inspection') {
+    return next(new AppError('Chỉ tài khoản kho được tải ảnh kiểm hàng', 403, 'FORBIDDEN'));
+  }
   try { uploadService.assertConfigured(); } catch (err) { return next(err); }
   return next();
 }, receiveFiles, async (req, res) => {
-  const urls = await uploadService.uploadImages(req.user.id, req.files, req.query.purpose || 'listing');
+  // Thư mục theo người tải: tài khoản người dùng là <id>, tài khoản nội bộ là ops-<id> (hai bảng có dãy id riêng)
+  const owner = req.user.kind === 'account' ? req.user.id : `ops-${req.user.id}`;
+  const urls = await uploadService.uploadImages(owner, req.files, req.query.purpose || 'listing');
   ok(res, { urls }, 201);
 });
 

@@ -8,7 +8,7 @@ const { AppError } = require('../middleware/errorHandler');
 
 const MAX_BYTES = 5 * 1024 * 1024;
 const MAX_FILES = 8;
-const PURPOSES = ['listing', 'avatar'];
+const PURPOSES = ['listing', 'avatar', 'dispute', 'inspection'];
 const TYPES = {
   jpeg: { ext: 'jpg', mime: 'image/jpeg' },
   png: { ext: 'png', mime: 'image/png' },

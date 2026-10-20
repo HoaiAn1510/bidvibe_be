@@ -213,6 +213,26 @@ function startMockStorage() {
   }));
 }
 
+// Chạy fn với Storage: thật nếu đã cấu hình, không thì Storage giả lập trong tiến trình. Luôn xoá ảnh test đã tải lên.
+async function withStorage(fn) {
+  const realStorage = uploadService.isConfigured();
+  const savedEnv = { url: env.supabaseUrl, key: env.supabaseServiceKey, bucket: env.storageBucket };
+  let mock = null;
+  if (!realStorage) {
+    mock = await startMockStorage();
+    Object.assign(env, { supabaseUrl: mock.url, supabaseServiceKey: 'sb_secret_gia_lap', storageBucket: `${RUN}bucket`.replace(/_/g, '-') });
+  }
+  try {
+    return await fn({ realStorage, mock });
+  } finally {
+    await deleteUploaded();
+    if (mock) {
+      Object.assign(env, { supabaseUrl: savedEnv.url, supabaseServiceKey: savedEnv.key, storageBucket: savedEnv.bucket });
+      await new Promise((r) => mock.server.close(r));
+    }
+  }
+}
+
 async function wallet(token) {
   const res = await fetch(`${base}/api/wallet`, { headers: { Authorization: `Bearer ${token}` } });
   return (await res.json()).data;
@@ -380,10 +400,11 @@ async function main() {
   await api('Bidder xác nhận khi chưa giao', 'POST', `/api/orders/${O1}/confirm-delivery`, { token: T.b1, expect: 409 });
   const dv = await api('Giao thành công', 'POST', `/api/warehouse/orders/${O1}/deliver`,
     { token: T.wh, note: (j) => `stage=${j.data.stage}, payoutDeadline=${j.data.payoutDeadline}` });
-  // payout_deadline do DB đặt (now() + 72 giờ) còn Date.now() là giờ máy chạy test: hai đồng hồ lệch nhau (DB đang nhanh hơn
-  // máy khoảng 1 giây) nên đầu trên cho dung sai +2 giây, kẻo trượt chỉ vì chênh lệch đồng hồ. Đầu dưới giữ 71.9 giờ.
-  const hours = (new Date(dv.payoutDeadline) - Date.now()) / 3600_000;
-  assert.ok(hours > 71.9 && hours <= 72 + 2 / 3600, `payout_deadline phải là +72 giờ, nhận ${hours}`);
+  // payout_deadline do DB đặt (now() + 72 giờ) nên so với giờ DB đọc ngay sau bước deliver, KHÔNG so với Date.now() của máy chạy
+  // test (hai đồng hồ có thể lệch nhau nhiều giây). Từ lúc deliver tới lúc đọc giờ DB chỉ vài trăm mili giây nên dung sai ±2 giây là đủ.
+  const dbNow = new Date((await q1('SELECT now() AS t')).t);
+  const driftSec = (new Date(dv.payoutDeadline) - dbNow) / 1000 - 72 * 3600;
+  assert.ok(Math.abs(driftSec) <= 2, `payout_deadline phải là +72 giờ so với giờ DB, lệch ${driftSec} giây`);
   await api('Bidder 2 xác nhận đơn không phải của mình', 'POST', `/api/orders/${O1}/confirm-delivery`, { token: T.b2, expect: 404 });
   await api('Bidder 1 xác nhận đã nhận hàng', 'POST', `/api/orders/${O1}/confirm-delivery`,
     { token: T.b1, note: (j) => `stage=${j.data.stage}, payoutStatus=${j.data.payoutStatus}` });
@@ -732,6 +753,179 @@ async function main() {
     }
   }
   record('Xoá các ảnh test vừa tải lên Storage', realStorage ? 'đã xoá đúng các object của lần chạy' : 'Storage giả lập: đã xoá');
+
+  // ------------------------------------------------------------------
+  begin('12b. Ảnh bằng chứng của tranh chấp');
+  // Mục 10 kết thúc bằng "Khoá lại tài khoản Kho": mở khoá để dùng Kho trong mục này, khoá lại ở cuối để giữ nguyên trạng thái đó.
+  await api('Mở khoá tài khoản Kho cho mục này', 'PATCH', `/api/admin/ops-accounts/${wh.id}`, { token: T.admin, body: { status: 'active' } });
+  try {
+    await withStorage(async () => {
+      const b1Id = (await q1('SELECT id FROM accounts WHERE email = $1', [email('b1')])).id;
+      const upload = async (label, token, purpose, n = 1) => {
+        const r = await api(label, 'POST', `/api/uploads/images?purpose=${purpose}`,
+          { token, form: formOf(Array.from({ length: n }, png)), expect: 201, note: (j) => j.data.urls.map((u) => u.replace(/^.*\/object\/public\//, '…/public/')).join(', ') });
+        r.urls.forEach((u) => uploadedPaths.push(uploadService.pathFromPublicUrl(u)));
+        return r.urls;
+      };
+      const photoRows = async (disputeId) => (await pool.query(
+        'SELECT url, uploaded_by_kind AS kind, uploaded_by_id AS by, uploader_role AS role FROM dispute_photos WHERE dispute_id = $1 ORDER BY id', [disputeId])).rows;
+      const timelineOf = async (disputeId) => (await pool.query(
+        'SELECT note FROM dispute_timeline WHERE dispute_id = $1 ORDER BY at, id', [disputeId])).rows.map((r) => r.note);
+
+      // Tranh chấp mở KHÔNG kèm ảnh (mục 7) vẫn như cũ: không có ảnh, timeline không có dòng đính kèm.
+      assert.strictEqual((await photoRows(dc.id)).length, 0);
+      assert.ok(!(await timelineOf(dc.id)).some((n) => n.includes('đính kèm')));
+      record('Tranh chấp mở không kèm ảnh chạy như cũ', 'không có dòng dispute_photos, timeline không có dòng "đính kèm"');
+
+      const bUrls = await upload('Bidder tải 2 ảnh bằng chứng (purpose=dispute)', T.b1, 'dispute', 2);
+      assert.ok(bUrls.every((u) => u.includes(`/dispute/${b1Id}/`)), 'ảnh nằm trong dispute/<mã tài khoản>/');
+      await upload('Seller cũng tải được ảnh bằng chứng (purpose=dispute)', T.seller, 'dispute', 1);
+
+      const P1 = await sellOne(named('Ảnh bằng chứng 1'), T.b1);
+      await shipAndDeliver(P1.orderId);
+      const open = (label, body, expect, code) => api(label, 'POST', '/api/disputes',
+        { token: T.b1, body: { orderId: Number(P1.orderId), title: 'Hàng có vết xước', reason: 'Mặt kính xước', ...body }, expect, code,
+          note: (j) => (j.success ? `id=${j.data.id}, source=${j.data.source}` : `${j.error.code}: ${j.error.message}`) });
+      await open('URL ngoài bucket Storage bị từ chối', { photoUrls: ['https://picsum.photos/seed/x/800/600'] }, 400, 'INVALID_PHOTO_URL');
+      await open('URL của bucket khác bị từ chối', { photoUrls: [`${env.supabaseUrl}/storage/v1/object/public/bucket-khac/dispute/${b1Id}/x.png`] }, 400, 'INVALID_PHOTO_URL');
+      await open('Phần tử không phải chuỗi bị từ chối', { photoUrls: [123] }, 400, 'INVALID_PHOTO_URL');
+      await open('Một URL hợp lệ lẫn một URL ngoài vẫn bị từ chối cả lần gửi', { photoUrls: [bUrls[0], 'https://example.com/a.png'] }, 400, 'INVALID_PHOTO_URL');
+      await open('Quá 6 ảnh một lần', { photoUrls: Array(7).fill(bUrls[0]) }, 400, 'TOO_MANY_FILES');
+      await open('photoUrls không phải mảng', { photoUrls: bUrls[0] }, 400, 'VALIDATION_ERROR');
+      const none = await q1('SELECT (SELECT count(*)::int FROM disputes WHERE order_id = $1) AS disputes, payout_status FROM orders WHERE id = $1', [P1.orderId]);
+      assert.ok(none.disputes === 0 && none.payout_status !== 'disputed', 'lỗi kiểm tra ảnh thì không được mở tranh chấp');
+      record('Gửi ảnh sai thì không mở tranh chấp', `đơn ${P1.orderId}: 0 tranh chấp, payoutStatus=${none.payout_status}`);
+
+      const d1 = await open('Mở tranh chấp kèm ảnh (URL trùng chỉ tính một)', { photoUrls: [bUrls[0], bUrls[0], bUrls[1]] }, 201);
+      const rows1 = await photoRows(d1.id);
+      assert.deepStrictEqual(rows1.map((r) => r.url), bUrls, 'đúng 2 ảnh, theo thứ tự gửi, bỏ ảnh trùng');
+      assert.ok(rows1.every((r) => r.kind === 'account' && String(r.by) === String(b1Id) && r.role === 'bidder'));
+      const tl1 = await timelineOf(d1.id);
+      assert.ok(tl1.some((n) => n === 'Người mua đính kèm 2 ảnh bằng chứng'), `timeline: ${tl1.join(' | ')}`);
+      record('Tranh chấp kèm 2 ảnh', `dispute_photos: 2 dòng (account/bidder), timeline: "${tl1[tl1.length - 1]}"`);
+      T.photoDispute = { id: d1.id, orderId: P1.orderId, urls: bUrls };
+
+      // ---- Việc 3: bổ sung ảnh khi tranh chấp còn mở ----
+      const addPhotos = (label, token, photoUrls, expect, code) => api(label, 'POST', `/api/disputes/${d1.id}/photos`,
+        { token, body: { photoUrls }, expect, code,
+          note: (j) => (j.success ? `status=${j.data.status}` : `${j.error.code}: ${j.error.message}`) });
+      const countOf = async () => (await photoRows(d1.id)).length;
+      const latestDisputeNote = async (token) => {
+        const r = await fetch(`${base}/api/notifications?limit=50`, { headers: { Authorization: `Bearer ${token}` } });
+        return (await r.json()).data.notifications.find((n) => n.type === 'dispute' && n.data && n.data.disputeId === String(d1.id) && n.title.includes('bổ sung'));
+      };
+      const more = await upload('Bidder tải thêm 1 ảnh', T.b1, 'dispute', 1);
+      await addPhotos('Người mua bổ sung 1 ảnh khi tranh chấp đang mở', T.b1, more, 201);
+      assert.strictEqual(await countOf(), 3);
+      assert.ok((await timelineOf(d1.id)).includes('Người mua bổ sung 1 ảnh'));
+      const toSeller = await latestDisputeNote(T.seller);
+      assert.ok(toSeller, 'người bán phải nhận thông báo bổ sung ảnh');
+      assert.deepStrictEqual(toSeller.data, { orderId: String(P1.orderId), auctionId: String(P1.auctionId), disputeId: String(d1.id) });
+      record('Bên kia (người bán) nhận thông báo', `type=dispute, data=${JSON.stringify(toSeller.data)}`);
+      const sUrls = await upload('Seller tải 1 ảnh bằng chứng', T.seller, 'dispute', 1);
+      await addPhotos('Người bán bổ sung 1 ảnh', T.seller, sUrls, 201);
+      const sellerRow = (await photoRows(d1.id)).pop();
+      assert.deepStrictEqual([sellerRow.kind, sellerRow.role], ['account', 'seller']);
+      assert.ok((await timelineOf(d1.id)).includes('Người bán bổ sung 1 ảnh'));
+      assert.ok(await latestDisputeNote(T.b1), 'người mua nhận thông báo khi người bán bổ sung ảnh');
+
+      await addPhotos('Người ngoài đơn bổ sung ảnh', T.b2, more, 404, 'NOT_FOUND');
+      await addPhotos('Admin không được thêm ảnh', T.admin, more, 403, 'FORBIDDEN');
+      await addPhotos('Không gửi ảnh nào', T.b1, [], 400, 'VALIDATION_ERROR');
+      await addPhotos('URL ngoài bucket', T.b1, ['https://picsum.photos/seed/y/800/600'], 400, 'INVALID_PHOTO_URL');
+      await addPhotos('Quá 6 ảnh một lần', T.b1, Array(7).fill(more[0]), 400, 'TOO_MANY_FILES');
+      await api('Tranh chấp không tồn tại', 'POST', '/api/disputes/999999999/photos', { token: T.b1, body: { photoUrls: more }, expect: 404, code: 'NOT_FOUND' });
+      assert.strictEqual(await countOf(), 4, 'các lần bị từ chối không ghi ảnh');
+
+      // Tổng tối đa 12: đang có 4; thêm 6 -> 10; thêm 3 -> vượt (13); thêm 2 -> đúng 12; thêm 1 -> vượt.
+      const six = await upload('Bidder tải 6 ảnh', T.b1, 'dispute', 6);
+      await addPhotos('Bổ sung đúng 6 ảnh một lần', T.b1, six, 201);
+      assert.strictEqual(await countOf(), 10);
+      await addPhotos('Vượt tổng 12 ảnh (10 + 3)', T.b1, six.slice(0, 3), 400, 'TOO_MANY_FILES');
+      await addPhotos('Đủ đúng 12 ảnh (10 + 2)', T.b1, six.slice(0, 2), 201);
+      assert.strictEqual(await countOf(), 12);
+      await addPhotos('Đã đủ 12 ảnh thì không thêm được', T.b1, six.slice(0, 1), 400, 'TOO_MANY_FILES');
+
+      await api('Admin phán quyết giữ nguyên', 'POST', `/api/admin/disputes/${d1.id}/resolve`, { token: T.admin, body: { resolution: 'keep' } });
+      await addPhotos('Bổ sung sau khi Admin đã xử lý', T.b1, six.slice(0, 1), 409, 'INVALID_STATE');
+      assert.strictEqual(await countOf(), 12, 'ảnh vẫn được giữ làm bằng chứng sau khi xử lý');
+      record('Ảnh vẫn còn sau khi tranh chấp đã xử lý', '12 ảnh, không xoá');
+
+      // ---- Việc 4: Kho tải ảnh kiểm hàng (purpose=inspection) và gắn vào tranh chấp khi mismatch ----
+      const one = () => formOf([png()]);
+      await api('Kho tải ảnh khi không ghi purpose (mặc định listing)', 'POST', '/api/uploads/images', { token: T.wh, form: one(), expect: 403, code: 'FORBIDDEN' });
+      await api('Kho tải ảnh với purpose=dispute', 'POST', '/api/uploads/images?purpose=dispute', { token: T.wh, form: one(), expect: 403, code: 'FORBIDDEN' });
+      await api('Thẩm định tải ảnh kiểm hàng', 'POST', '/api/uploads/images?purpose=inspection', { token: T.ap, form: one(), expect: 403, code: 'FORBIDDEN' });
+      await api('Admin tải ảnh kiểm hàng', 'POST', '/api/uploads/images?purpose=inspection', { token: T.admin, form: one(), expect: 403, code: 'FORBIDDEN' });
+      await api('Người mua tải ảnh kiểm hàng', 'POST', '/api/uploads/images?purpose=inspection', { token: T.b1, form: one(), expect: 403, code: 'FORBIDDEN' });
+      const wUrls = await upload('Kho tải 2 ảnh kiểm hàng (purpose=inspection)', T.wh, 'inspection', 2);
+      assert.ok(wUrls.every((u) => u.includes(`/inspection/ops-${wh.id}/`)), 'ảnh kho nằm trong inspection/ops-<id>/');
+
+      const W1 = await sellOne(named('Ảnh kiểm hàng (mismatch)'), T.b2);
+      await api('Kiểm hàng mismatch với ảnh ngoài bucket', 'POST', `/api/warehouse/orders/${W1.orderId}/inspect`,
+        { token: T.wh, body: { result: 'mismatch', notes: 'Vỏ móp', photoUrls: ['https://picsum.photos/seed/z/800/600'] }, expect: 400, code: 'INVALID_PHOTO_URL' });
+      const untouched = await q1('SELECT inspection_result FROM warehouse_receipts WHERE order_id = $1', [W1.orderId]);
+      assert.strictEqual(untouched.inspection_result, null, 'ảnh sai thì chưa ghi kết quả kiểm');
+      await api('Kiểm hàng mismatch kèm 2 ảnh -> tự mở tranh chấp có ảnh', 'POST', `/api/warehouse/orders/${W1.orderId}/inspect`,
+        { token: T.wh, body: { result: 'mismatch', notes: 'Vỏ móp, khác ảnh thẩm định', photoUrls: wUrls }, note: (j) => `stage=${j.data.stage}, payoutStatus=${j.data.payoutStatus}` });
+      const wd = await q1('SELECT id, source FROM disputes WHERE order_id = $1', [W1.orderId]);
+      assert.strictEqual(wd.source, 'warehouse');
+      const wRows = await photoRows(wd.id);
+      assert.deepStrictEqual(wRows.map((r) => r.url), wUrls);
+      assert.ok(wRows.every((r) => r.kind === 'ops' && String(r.by) === String(wh.id) && r.role === 'warehouse'));
+      assert.ok((await timelineOf(wd.id)).includes('Kho đính kèm 2 ảnh bằng chứng'));
+      record('Tranh chấp kho mở có ảnh của kho', `dispute ${wd.id}: 2 ảnh (ops/warehouse), timeline "Kho đính kèm 2 ảnh bằng chứng"`);
+      T.whDispute = { id: wd.id, orderId: W1.orderId, urls: wUrls };
+
+      const W2 = await sellOne(named('Ảnh kiểm hàng (match)'), T.b2);
+      await api('Kiểm hàng match kèm ảnh: không có tranh chấp nên ảnh không được lưu', 'POST', `/api/warehouse/orders/${W2.orderId}/inspect`,
+        { token: T.wh, body: { result: 'match', photoUrls: wUrls.slice(0, 1) }, note: (j) => `stage=${j.data.stage}` });
+      const noDispute = await q1('SELECT count(*)::int AS n FROM disputes WHERE order_id = $1', [W2.orderId]);
+      assert.strictEqual(noDispute.n, 0);
+
+      // ---- Việc 5: trả photos trong tranh chấp ----
+      const checkPhotos = (photos, label) => {
+        assert.ok(Array.isArray(photos), `${label}: photos phải là mảng`);
+        for (const ph of photos) {
+          assert.deepStrictEqual(Object.keys(ph).sort(), ['createdAt', 'id', 'uploaderRole', 'url'], `${label}: trường của ảnh`);
+          assert.strictEqual(typeof ph.id, 'string', `${label}: id là chuỗi`);
+          assert.ok(['bidder', 'seller', 'warehouse'].includes(ph.uploaderRole));
+          assert.ok(!Number.isNaN(Date.parse(ph.createdAt)));
+        }
+        for (let i = 1; i < photos.length; i += 1) assert.ok(Date.parse(photos[i].createdAt) >= Date.parse(photos[i - 1].createdAt), `${label}: sắp theo thời gian`);
+      };
+      const mineOf = async (token) => (await api('GET /api/disputes/mine', 'GET', '/api/disputes/mine',
+        { token, note: (j) => `${j.data.disputes.length} tranh chấp` })).disputes;
+      const pb = (await mineOf(T.b1)).find((x) => String(x.id) === String(d1.id));
+      checkPhotos(pb.photos, 'người mua');
+      assert.strictEqual(pb.photos.length, 12);
+      assert.deepStrictEqual(pb.photos.slice(0, 4).map((x) => x.uploaderRole), ['bidder', 'bidder', 'bidder', 'seller']);
+      assert.deepStrictEqual(pb.photos.slice(0, 2).map((x) => x.url), bUrls);
+      const ps = (await mineOf(T.seller)).find((x) => String(x.id) === String(d1.id));
+      assert.deepStrictEqual(ps.photos, pb.photos, 'người bán thấy cùng các ảnh');
+      assert.ok(!(await mineOf(T.b2)).some((x) => String(x.id) === String(d1.id)), 'người ngoài không thấy tranh chấp này');
+      const noPhoto = (await mineOf(T.b1)).find((x) => String(x.id) === String(dc.id));
+      assert.deepStrictEqual(noPhoto.photos, [], 'tranh chấp không có ảnh trả mảng rỗng');
+      record('GET /api/disputes/mine có photos', `người mua và người bán: 12 ảnh (id chuỗi, url, uploaderRole, createdAt, sắp theo thời gian); tranh chấp không ảnh: []`);
+
+      const isWh = (x) => String(x.id) === String(T.whDispute.id);
+      const adm = await api('Admin xem tranh chấp có ảnh của kho', 'GET', await pageOf('/api/admin/disputes', T.admin, 'disputes', isWh),
+        { token: T.admin, note: (j) => { const x = j.data.disputes.find(isWh); return `${x.photos.length} ảnh: ${x.photos.map((p) => p.uploaderRole).join(', ')}`; } });
+      const aw = adm.disputes.find(isWh);
+      checkPhotos(aw.photos, 'admin');
+      assert.deepStrictEqual(aw.photos.map((x) => [x.url, x.uploaderRole]), T.whDispute.urls.map((u) => [u, 'warehouse']));
+
+      // Phản hồi của POST /api/disputes/:id/photos trả tranh chấp kèm photos mới (người mua của đơn kho bổ sung).
+      const b2Urls = await upload('Bidder 2 tải 1 ảnh bằng chứng', T.b2, 'dispute', 1);
+      const added = await api('Người mua bổ sung ảnh vào tranh chấp kho mở', 'POST', `/api/disputes/${T.whDispute.id}/photos`,
+        { token: T.b2, body: { photoUrls: b2Urls }, expect: 201, note: (j) => `${j.data.photos.length} ảnh` });
+      checkPhotos(added.photos, 'phản hồi bổ sung');
+      assert.deepStrictEqual(added.photos.map((x) => x.uploaderRole), ['warehouse', 'warehouse', 'bidder']);
+      assert.strictEqual(added.photos[2].url, b2Urls[0]);
+    });
+  } finally {
+    await api('Khoá lại tài khoản Kho', 'PATCH', `/api/admin/ops-accounts/${wh.id}`, { token: T.admin, body: { status: 'suspended' } });
+  }
 
   // ------------------------------------------------------------------
   begin('13. Hồ sơ, đổi mật khẩu, đọc hết thông báo, xoá ảnh tin đăng');

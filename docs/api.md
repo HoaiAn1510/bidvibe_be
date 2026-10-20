@@ -303,11 +303,11 @@ Lỗi: `404 NOT_FOUND`, `409 INVALID_STATE` ("Không thể sửa khi tin đăng 
 
 ### `POST /api/uploads/images`
 
-`bidder` / `seller` (tài khoản `ops` → `403 FORBIDDEN`). Tải ảnh chọn / chụp trên điện thoại lên Supabase Storage, nhận lại URL public để gửi tiếp vào [`POST /api/listings/:id/photos`](#post-apilistingsidphotos) hoặc `avatarUrl` của [`PATCH /api/me`](#patch-apime).
+`bidder` / `seller`; tài khoản `ops` chỉ có **Kho** (`warehouse`) với `?purpose=inspection` (ảnh kiểm hàng), mọi trường hợp `ops` khác → `403 FORBIDDEN`. Người mua / người bán dùng `purpose=inspection` cũng `403`. Tải ảnh chọn / chụp trên điện thoại lên Supabase Storage, nhận lại URL public để gửi tiếp vào [`POST /api/listings/:id/photos`](#post-apilistingsidphotos) hoặc `avatarUrl` của [`PATCH /api/me`](#patch-apime).
 
 - `multipart/form-data`, trường **`files`** (lặp lại cho mỗi ảnh), 1–8 ảnh mỗi lần, tối đa **5 MB** mỗi ảnh.
 - Chỉ JPEG, PNG, WEBP. Server nhận diện bằng nội dung file (magic bytes), không tin `Content-Type` hay đuôi tên file.
-- Query `?purpose=listing` (mặc định) hoặc `?purpose=avatar`: chỉ quyết định thư mục lưu.
+- Query `?purpose=listing` (mặc định), `?purpose=avatar` hoặc `?purpose=dispute` (ảnh bằng chứng tranh chấp, gửi tiếp vào `photoUrls` của [`POST /api/disputes`](#post-apidisputes)): chỉ quyết định thư mục lưu.
 
 ```json
 // 201 — urls theo đúng thứ tự file gửi lên
@@ -319,7 +319,7 @@ Lỗi: `404 NOT_FOUND`, `409 INVALID_STATE` ("Không thể sửa khi tin đăng 
 { "code": "UPLOAD_NOT_CONFIGURED", "message": "Máy chủ chưa cấu hình nơi lưu ảnh (Supabase Storage)" }
 ```
 
-URL có dạng `{SUPABASE_URL}/storage/v1/object/public/{bucket}/{purpose}/{accountId}/{thời điểm}-{ngẫu nhiên}.{jpg|png|webp}`. Dạng URL ở ví dụ `201` đã kiểm với Supabase Storage thật (`npm run test:be2` tải lên, `GET` URL public trả 200, rồi xoá); mã project được che thành `<project-ref>`. `SUPABASE_URL` dán cả đuôi `/rest/v1` (RESTful endpoint) vẫn chạy: backend chỉ lấy phần gốc. Code Dart: [`fe-quickstart.md`](fe-quickstart.md#5c-tải-ảnh).
+URL có dạng `{SUPABASE_URL}/storage/v1/object/public/{bucket}/{purpose}/{accountId}/{thời điểm}-{ngẫu nhiên}.{jpg|png|webp}`; ảnh kiểm hàng của Kho nằm ở `{purpose}/ops-{opsId}/...` (ví dụ `inspection/ops-12/...`). Dạng URL ở ví dụ `201` đã kiểm với Supabase Storage thật (`npm run test:be2` tải lên, `GET` URL public trả 200, rồi xoá); mã project được che thành `<project-ref>`. `SUPABASE_URL` dán cả đuôi `/rest/v1` (RESTful endpoint) vẫn chạy: backend chỉ lấy phần gốc. Code Dart: [`fe-quickstart.md`](fe-quickstart.md#5c-tải-ảnh).
 
 Lỗi: `400 INVALID_FILE_TYPE` ("Ảnh thứ 2 không phải JPEG, PNG hoặc WEBP"), `413 FILE_TOO_LARGE` ("Mỗi ảnh tối đa 5 MB"), `400 TOO_MANY_FILES` ("Tối đa 8 ảnh mỗi lần"), `400 VALIDATION_ERROR` (không có file, sai tên trường, `purpose` sai), `403 FORBIDDEN`, `502 UPLOAD_FAILED` (Storage trả lỗi / không kết nối được), `503 UPLOAD_NOT_CONFIGURED`.
 
@@ -701,10 +701,11 @@ Lỗi: `404 NOT_FOUND`, `409 INVALID_STATE` ("Người bán chưa báo gửi hà
 |---|---|---|---|
 | `result` | string | có | `match` hoặc `mismatch` |
 | `notes` | string | khi `mismatch` | ≤ 2000 |
+| `photoUrls` | mảng URL | không | 0–6 ảnh kiểm hàng, URL nhận từ [`POST /api/uploads/images?purpose=inspection`](#post-apiuploadsimages); URL khác → `400 INVALID_PHOTO_URL` |
 
-`match` → `stage: inspected`. `mismatch` → tự mở tranh chấp nguồn kho, `payoutStatus: disputed`, `stage: inspection_failed`, hai bên nhận thông báo; đơn dừng tới khi Admin xử lý.
+`match` → `stage: inspected`. `mismatch` → tự mở tranh chấp nguồn kho, `payoutStatus: disputed`, `stage: inspection_failed`, hai bên nhận thông báo; đơn dừng tới khi Admin xử lý. Ảnh trong `photoUrls` được gắn vào tranh chấp đó (`uploaderRole: warehouse`) và timeline thêm "Kho đính kèm N ảnh bằng chứng". Kiểm `match` không có tranh chấp nên ảnh không được lưu (URL vẫn được kiểm hợp lệ).
 
-Lỗi: `400 VALIDATION_ERROR`, `404 NOT_FOUND`, `409 INVALID_STATE` ("Kho chưa nhận hàng, chưa thể kiểm", "Đơn này đã được kiểm").
+Lỗi: `400 VALIDATION_ERROR`, `400 INVALID_PHOTO_URL`, `400 TOO_MANY_FILES` (quá 6 ảnh), `404 NOT_FOUND`, `409 INVALID_STATE` ("Kho chưa nhận hàng, chưa thể kiểm", "Đơn này đã được kiểm"). Ảnh sai thì không ghi kết quả kiểm.
 
 ### `POST /api/warehouse/orders/:id/pack`
 
@@ -758,6 +759,9 @@ Tiến trình giao hàng: [`GET /api/orders/:id/tracking`](#get-apiordersidtrack
 | `orderId` | id | có | đơn của mình |
 | `title` | string | có | ≤ 200 |
 | `reason` | string | có | ≤ 2000 |
+| `photoUrls` | mảng URL | không | 0–6 ảnh bằng chứng. Mỗi URL phải là URL public vừa nhận từ [`POST /api/uploads/images?purpose=dispute`](#post-apiuploadsimages) (cùng bucket Storage của server), URL khác → `400 INVALID_PHOTO_URL`. URL trùng trong một lần gửi chỉ tính một ảnh |
+
+Ảnh được lưu trong cùng giao dịch mở tranh chấp (lỗi ảnh thì không mở tranh chấp) và timeline có thêm dòng "Người mua đính kèm N ảnh bằng chứng". Không gửi `photoUrls` thì chạy như cũ.
 
 Đơn chuyển `payoutStatus: disputed` (dừng giải ngân), bên kia nhận thông báo `dispute`.
 
@@ -767,14 +771,33 @@ Tiến trình giao hàng: [`GET /api/orders/:id/tracking`](#get-apiordersidtrack
   "title": "Đồng hồ chạy chậm", "status": "open", "escrowAmount": 1143000, "resolution": "none", "resolvedBy": null,
   "finalPrice": 1050000, "payoutStatus": "disputed",
   "buyer": { "id": "168", "name": "Người mua Một" }, "seller": { "id": "167", "storeName": "Shop Demo" },
-  "timeline": [ { "note": "Người mua mở tranh chấp: Chậm 5 phút mỗi ngày", "at": "2026-10-10T15:30:08.523235+00:00" } ] }
+  "timeline": [ { "note": "Người mua mở tranh chấp: Chậm 5 phút mỗi ngày", "at": "2026-10-10T15:30:08.523235+00:00" },
+                { "note": "Người mua đính kèm 2 ảnh bằng chứng", "at": "2026-10-10T15:30:08.523235+00:00" } ],
+  "photos": [ { "id": "51", "url": "https://<project-ref>.supabase.co/storage/v1/object/public/listing-photos/dispute/168/1791812307070-0d2895e1720e.png",
+                "uploaderRole": "bidder", "createdAt": "2026-10-10T15:30:08.523235+00:00" },
+              { "id": "52", "url": "https://<project-ref>.supabase.co/storage/v1/object/public/listing-photos/dispute/168/1791812307071-4b1c9a02f3d5.jpg",
+                "uploaderRole": "bidder", "createdAt": "2026-10-10T15:30:08.523235+00:00" } ] }
 ```
 
-`escrowAmount` = số người mua đã trả cho đơn. Lỗi: `400 VALIDATION_ERROR`, `404 NOT_FOUND`, `409 INVALID_STATE` ("Chỉ mở tranh chấp cho đơn đã thanh toán"), `409 ALREADY_RELEASED`, `409 DISPUTE_OPEN`.
+`photos`: ảnh bằng chứng của tranh chấp, cũ trước mới sau (`id` là chuỗi; `uploaderRole`: `bidder` | `seller` | `warehouse`; `createdAt` ISO 8601). Tranh chấp không có ảnh trả `[]`. Cùng cấu trúc tranh chấp này (kèm `photos`) cũng được trả ở [`GET /api/disputes/mine`](#get-apidisputesmine), [`POST /api/disputes/:id/photos`](#post-apidisputesidphotos), [`GET /api/admin/disputes`](#get-apiadmindisputes) và [`POST /api/admin/disputes/:id/resolve`](#post-apiadmindisputesidresolve).
+
+`escrowAmount` = số người mua đã trả cho đơn. Lỗi: `400 VALIDATION_ERROR` (kể cả `photoUrls` không phải mảng), `400 INVALID_PHOTO_URL`, `400 TOO_MANY_FILES` (quá 6 ảnh một lần), `404 NOT_FOUND`, `409 INVALID_STATE` ("Chỉ mở tranh chấp cho đơn đã thanh toán"), `409 ALREADY_RELEASED`, `409 DISPUTE_OPEN`.
+
+### `POST /api/disputes/:id/photos`
+
+`bidder` / `seller` **của đơn** có tranh chấp (người khác → `404 NOT_FOUND`; tài khoản `ops`, kể cả Admin → `403 FORBIDDEN`). Bổ sung ảnh bằng chứng khi tranh chấp còn `open`.
+
+| Trường | Kiểu | Bắt buộc | Ràng buộc |
+|---|---|---|---|
+| `photoUrls` | mảng URL | có | 1–6 ảnh mỗi lần; **tổng tối đa 12 ảnh** cho một tranh chấp. URL phải nhận từ [`POST /api/uploads/images?purpose=dispute`](#post-apiuploadsimages) |
+
+Timeline thêm dòng "Người mua bổ sung N ảnh" (hoặc "Người bán ..."), bên kia nhận thông báo `dispute` với `data: { orderId, auctionId, disputeId }`. Phản hồi `201` là tranh chấp (cấu trúc như [`POST /api/disputes`](#post-apidisputes)). Ảnh không bị xoá khi tranh chấp đã xử lý (giữ làm bằng chứng).
+
+Lỗi: `400 VALIDATION_ERROR` (không có ảnh / `photoUrls` không phải mảng), `400 INVALID_PHOTO_URL`, `400 TOO_MANY_FILES` (quá 6 ảnh một lần, hoặc vượt tổng 12: message ghi số đã có và số còn thêm được), `403 FORBIDDEN`, `404 NOT_FOUND`, `409 INVALID_STATE` ("Tranh chấp đã được xử lý, không thể bổ sung ảnh").
 
 ### `GET /api/disputes/mine`
 
-`bidder` / `seller`. Tranh chấp trên các đơn của tôi: `{ "disputes": [ <tranh chấp>, ... ] }`.
+`bidder` / `seller`. Tranh chấp trên các đơn của tôi: `{ "disputes": [ <tranh chấp>, ... ] }`, mỗi tranh chấp có `photos` (ảnh của cả người mua, người bán và kho).
 
 ### `GET /api/admin/disputes`
 
@@ -1241,7 +1264,8 @@ Gom từ mọi `AppError` trong code. "Gợi ý hiển thị" khi muốn khác `
 | `PHOTOS_REQUIRED` | 400 | Gửi thẩm định khi chưa có ảnh | Chuyển tới bước thêm ảnh |
 | `WRONG_PASSWORD` | 400 | Đổi mật khẩu: mật khẩu hiện tại sai | Hiện `message` ở trường mật khẩu hiện tại |
 | `INVALID_FILE_TYPE` | 400 | Tải ảnh không phải JPEG / PNG / WEBP | Hiện `message`, cho chọn ảnh khác |
-| `TOO_MANY_FILES` | 400 | Tải quá 8 ảnh một lần | Chia nhỏ lần tải |
+| `TOO_MANY_FILES` | 400 | Tải quá 8 ảnh một lần; gửi `photoUrls` quá 6 ảnh một lần | Chia nhỏ lần tải / lần gửi |
+| `INVALID_PHOTO_URL` | 400 | Ảnh bằng chứng không phải URL public của bucket Storage của server (không tải qua `POST /api/uploads/images`) | Tải ảnh lại rồi gửi URL nhận được |
 | `UNAUTHORIZED` | 401 | Thiếu / sai / hết hạn token, tài khoản đã bị xoá | Xoá token, về màn đăng nhập |
 | `INVALID_CREDENTIALS` | 401 | Sai email hoặc mật khẩu | Hiện `message` ở form đăng nhập |
 | `INSUFFICIENT_FUNDS` | 402 | Ví không đủ tiền cọc / thanh toán | Gợi ý nạp tiền ([ví](#post-apiwallettopup)) |
@@ -1333,6 +1357,7 @@ Bảng này khớp 1-1 với route đăng ký trong `src/routes/` (kiểm tra b�
 | POST | `/api/warehouse/orders/:id/deliver` | warehouse | [11](#post-apiwarehouseordersiddeliver) |
 | POST | `/api/orders/:id/confirm-delivery` | bidder | [12](#post-apiordersidconfirm-delivery) |
 | POST | `/api/disputes` | bidder, seller | [13](#post-apidisputes) |
+| POST | `/api/disputes/:id/photos` | bidder, seller (của đơn) | [13](#post-apidisputesidphotos) |
 | GET | `/api/disputes/mine` | bidder, seller | [13](#get-apidisputesmine) |
 | GET | `/api/admin/disputes` | admin | [13](#get-apiadmindisputes) |
 | POST | `/api/admin/disputes/:id/resolve` | admin | [13](#post-apiadmindisputesidresolve) |
