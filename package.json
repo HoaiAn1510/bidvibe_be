@@ -10,10 +10,11 @@
     "db:seed": "node scripts/seed_demo.js && node scripts/seed.js",
     "db:seed:live": "node scripts/seed_live.js",
     "wallet:check": "node scripts/wallet_check.js",
+    "test:unit": "node --test test/unit/*.test.js",
     "test:fraud": "node scripts/test_fraud_unit.js",
     "test:be1": "node scripts/test_be1.js",
     "test:be2": "node scripts/test_be2.js",
-    "test": "npm run test:fraud && npm run test:be1 && npm run test:be2",
+    "test": "npm run test:unit && npm run test:fraud && npm run test:be1 && npm run test:be2",
     "test:clean": "node scripts/test_be2_clean.js",
     "docs:check": "node scripts/docs_check.js",
     "demo:bidbot": "node scripts/demo_bidbot.js"
