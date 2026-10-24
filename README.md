@@ -2,7 +2,7 @@
 
 Backend cho BidVibe - nền tảng đấu giá trực tuyến thời gian thực cho đồ cũ/vật phẩm sưu tầm.
 
-Công nghệ: Node.js + Express 5 + Socket.io, dữ liệu lưu trong PostgreSQL (host trên Supabase), kết nối bằng thư viện `pg`.
+Công nghệ: Node.js + Express 5 + Socket.io, dữ liệu lưu trong PostgreSQL (Supabase hoặc PostgreSQL cục bộ qua Docker), kết nối bằng thư viện `pg`.
 
 ## Cài đặt
 
@@ -15,15 +15,15 @@ npm run dev
 
 ### Biến môi trường
 
-`.env.example` liệt kê đúng các biến code đọc:
+`.env.example` liệt kê các biến backend và các mặc định local E2E:
 
 | Biến | Ý nghĩa |
 |---|---|
 | `PORT` | Cổng server. Không đặt thì `3000`; nhóm và app Flutter dùng `5000`. |
 | `CORS_ORIGIN` | Nguồn được phép gọi API (mặc định `*`). |
 | `NODE_ENV` | `production` thì lỗi 5xx chỉ trả "Lỗi hệ thống". |
-| `DATABASE_URL` | Chuỗi kết nối Postgres. Với Supabase dùng chuỗi **Session pooler** (host `*.pooler.supabase.com`, cổng 5432, username dạng `postgres.<mã project>`). **Không** dùng Direct connection: nó chỉ có IPv6 nên nhiều mạng không kết nối được. |
-| `DB_SSL` | `true` khi dùng Supabase. |
+| `DATABASE_URL` | Chuỗi kết nối Postgres. Với Supabase dùng chuỗi **Session pooler** (host `*.pooler.supabase.com`, cổng 5432, username dạng `postgres.<mã project>`). **Không** dùng Direct connection: nó chỉ có IPv6 nên nhiều mạng không kết nối được. Với Docker local, dùng URL tới `localhost:5433` (xem mục E2E bên dưới). |
+| `DB_SSL` | `true` khi dùng Supabase; `false` cho Docker local. |
 | `DB_POOL_MAX` | Tuỳ chọn, số kết nối tối đa của pool (bỏ trống thì 10; `.env.example` đặt 4). Session pooler của Supabase chỉ cho **15 kết nối cho cả database**, cộng dồn mọi bản đang chạy: `npm run dev` của từng người, `test:be1`, `test:be2` (hai bộ test tự dùng 4), mỗi tiến trình thêm 1 kết nối riêng cho `LISTEN` của `pause_listener`. Vượt giới hạn thì gặp lỗi `EMAXCONNSESSION`. Không đổi sang transaction pooler (cổng 6543) vì `LISTEN` không chạy qua đó. **Người làm app (FE) tự chạy backend riêng để thử: đặt `DB_POOL_MAX=2`.** |
 | `JWT_SECRET` | Khoá ký token đăng nhập. Bắt buộc, không có giá trị mặc định. |
 | `AUTO_PAYOUT_ENABLED` | `false` để tắt job tự giải ngân sau 72 giờ (mặc định bật). |
@@ -33,6 +33,24 @@ npm run dev
 | `STORAGE_BUCKET` | Tuỳ chọn, tên bucket chứa ảnh (mặc định `listing-photos`). Chưa có thì backend tự tạo bucket public, giới hạn 5 MB, chỉ nhận JPEG / PNG / WEBP. |
 
 Thiếu `SUPABASE_URL` hoặc `SUPABASE_SERVICE_KEY` thì server vẫn chạy bình thường, chỉ route tải ảnh trả `503 UPLOAD_NOT_CONFIGURED` (app vẫn thêm ảnh được bằng URL có sẵn).
+
+### Local PostgreSQL for E2E
+
+To run E2E tests against an isolated local database instead of the shared Supabase database:
+
+1. Set `POSTGRES_DB`, `POSTGRES_USER`, and a local-only `POSTGRES_PASSWORD` in `.env`. Set `DATABASE_URL` to `postgresql://<user>:<password>@localhost:5433/<database>` and `DB_SSL=false`.
+2. Start PostgreSQL and initialize its schema/demo data:
+
+   ```bash
+   docker compose up -d postgres
+   npm run db:migrate
+   npm run db:seed
+   ```
+
+   The Compose service binds only to `127.0.0.1:5433` (host port 5432 may be in use by another local database) and stores data in the `bidvibe_postgres_data` volume. This creates a fresh local database; it does not copy data from Supabase. Stop the service with `docker compose stop postgres`; the named volume preserves the database.
+3. Start the backend with `npm run dev`. The E2E defaults are `BACKEND_URL=http://127.0.0.1:5000`, `TEST_PASSWORD=123456`, `TEST_BIDDER_EMAIL=bot1@bidvibe.demo`, and `TEST_BUYER_EMAIL=minhanh@gmail.com`. The bidder bot is intended for automated bidding; use the separate demo buyer account for buyer flows.
+
+The E2E variables are configuration for future test tooling; current test scripts do not consume them yet. Keep the local-only password and demo credentials out of production environments.
 
 **Lấy key Storage**: Supabase Dashboard → chọn project → **Project Settings → API Keys**.
 - Tab "API Keys": bấm tạo / hiện **Secret key** (`sb_secret_...`).
@@ -53,8 +71,8 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 | `npm run db:migrate` | Chạy các file trong `migrations/` chưa được áp dụng |
 | `npm run db:seed` | Thêm dữ liệu demo (BE1 + BE2), chạy lại nhiều lần không bị trùng. Mật khẩu demo `123456`: tài khoản demo đã có mà bị đổi mật khẩu thì được đặt lại về `123456` (chỉ tài khoản demo và 3 bot; số dư ví giữ nguyên). **Thử đổi mật khẩu / sửa hồ sơ (`POST /api/me/password`, `PATCH /api/me`) chỉ trên tài khoản tự đăng ký**, không dùng tài khoản demo |
 | `npm run test:fraud` | Unit test các luật gian lận (`analyze()` của `fraud_detection.js`), không cần database: mỗi luật có ca phát hiện đúng và ca không báo nhầm, kể cả sát ngưỡng |
-| `npm run test:be1` | Kiểm thử end-to-end phần đấu giá/ví/tạm dừng/gian lận trên DB dùng chung (tài khoản `test_be1_*`, tự dọn) |
-| `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật (tài khoản `test_be2_<mã lần chạy>_*`, tự dọn) |
+| `npm run test:be1` | Kiểm thử end-to-end phần đấu giá/ví/tạm dừng/gian lận trên DB trong `DATABASE_URL` (tài khoản `test_be1_*`, tự dọn) |
+| `npm run test:be2` | Kiểm thử end-to-end phần BE2 qua HTTP thật trên DB trong `DATABASE_URL` (tài khoản `test_be2_<mã lần chạy>_*`, tự dọn) |
 | `npm test` | Chạy `test:fraud`, `test:be1` rồi `test:be2` |
 | `npm run test:clean [-- --dry-run]` | Dọn dữ liệu `test_be2_` bỏ sót từ lần chạy bị ngắt (chỉ lần chạy bắt đầu hơn 1 giờ trước; in danh sách trước khi xoá). Chỉ chạy khi cần |
 | `npm run wallet:check [-- --bidder-ids=1,2]` | Đối soát ví (CHỈ ĐỌC): so số dư và tiền đang giữ của từng ví với sổ `wallet_transactions` và các khoản cọc; in bảng ví lệch, có lệch thì thoát mã 1 (công thức ở dưới) |
@@ -62,9 +80,9 @@ File `.env` chứa mật khẩu nên **không được đưa lên git** (đã c�
 | `npm run db:seed:live [-- --extend]` | Bảo đảm 9 phiên demo đang diễn ra trước buổi demo (xem bên dưới) |
 | `npm run demo:bidbot -- --auction <id>` | 3 tài khoản bot trả giá một phiên để demo giá nhảy real-time (xem bên dưới) |
 
-#### Chạy kiểm thử trên database dùng chung
+#### Chạy kiểm thử BE1/BE2
 
-Cả hai bộ test chạy trên Supabase dùng chung nên được viết để **không đụng dữ liệu thật**:
+Cả hai bộ test dùng database trong `DATABASE_URL`. Khi trỏ tới Supabase dùng chung, chúng được viết để **không đụng dữ liệu thật**; để chạy cô lập, trỏ `DATABASE_URL` tới PostgreSQL Docker theo mục trên:
 
 - Mọi dữ liệu test có tiền tố riêng: `test_be1_*` (BE1: email `test_be1_<mã lần chạy>_<tên>_<số>@be1test.local`, tin đăng `test_be1_<mã lần chạy>_item`) và `test_be2_*` (BE2: email `test_be2_<mã lần chạy>_<tên>@example.com`; họ tên, tên gian hàng, tiêu đề tin cũng bắt đầu bằng `test_be2_<mã lần chạy>_`).
 - Test chỉ ghi/xoá các dòng đi ra từ những tài khoản có tiền tố đó; dữ liệu seed và dữ liệu của đồng đội không bị sửa hay xoá. Test BE1: cuối mỗi lần chạy (kể cả khi lỗi) chỉ dọn dữ liệu của **chính lần chạy đó** (theo mã lần chạy), đầu lần chạy chỉ dọn dữ liệu `test_be1_` bỏ dở từ hơn 30 phút trước — nên hai người chạy `test:be1` cùng lúc không xoá dữ liệu của nhau. Test BE2: cuối mỗi lần chạy (kể cả khi lỗi) cũng chỉ dọn dữ liệu của chính lần chạy đó; đầu lần chạy không dọn gì. Mọi thứ test BE2 cần ghi (tài khoản, tin, phiên, đơn, tranh chấp, cờ) đều tạo mới; job tự giải ngân trong test chỉ xét đơn của lần chạy đó. Hai `test:be2`, hoặc `test:be2` cùng `test:be1`, chạy song song được.
