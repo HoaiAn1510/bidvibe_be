@@ -280,6 +280,31 @@ async function placeBid({ bidderId, auctionId, amount: requested, increment }) {
 
 // ---------- Đóng phiên ----------
 
+// Hoàn mọi cọc 'held' của phiên (trừ người thắng nếu có): cọc -> 'released', trả tiền đang giữ về số dư
+// (walletService.releaseDeposit ghi giao dịch), tạo thông báo 'refund'. Chạy trong giao dịch của nơi gọi;
+// trả về các thông báo để nơi gọi phát SAU COMMIT.
+async function refundHeldDeposits(client, a, { exceptBidderId = null, reason }) {
+  const deposits = await client.query(
+    `SELECT id, bidder_id, amount FROM auction_deposits
+     WHERE auction_id = $1 AND status = 'held' ORDER BY id`,
+    [a.id],
+  );
+  const notes = [];
+  for (const d of deposits.rows) {
+    if (exceptBidderId != null && String(d.bidder_id) === String(exceptBidderId)) continue;
+    const amount = Number(d.amount);
+    await client.query(`UPDATE auction_deposits SET status = 'released' WHERE id = $1`, [d.id]);
+    await walletService.releaseDeposit(client, { bidderId: d.bidder_id, auctionId: a.id, amount });
+    notes.push(await createNotification(client, {
+      accountId: d.bidder_id,
+      type: 'refund',
+      title: `Đã hoàn cọc ${fmt(amount)} · ${a.title} (${reason})`,
+      data: { auctionId: String(a.id) },
+    }));
+  }
+  return notes;
+}
+
 // Đóng một phiên đã hết giờ. Trả về null nếu phiên đang bị xử lý chỗ khác / chưa hết giờ.
 async function closeAuction(auctionId) {
   const outcome = await inTransaction(async (client) => {
@@ -293,6 +318,8 @@ async function closeAuction(auctionId) {
     if (!latest) {
       await client.query(`UPDATE auctions SET status = 'ended' WHERE id = $1`, [auctionId]);
       await client.query(`UPDATE listings SET status = 'ended' WHERE id = $1`, [a.listing_id]);
+      // Không ai đặt giá: hoàn cọc cho mọi người đã đặt cọc (issue #34).
+      notes.push(...await refundHeldDeposits(client, a, { reason: 'phiên kết thúc không có lượt giá' }));
       return { auctionId, hasWinner: false, notes };
     }
 
@@ -311,34 +338,24 @@ async function closeAuction(auctionId) {
       [auctionId, winnerId, a.seller_id, finalPrice, String(PAYMENT_WINDOW_MS)],
     );
 
-    const deposits = await client.query(
-      `SELECT id, bidder_id, amount FROM auction_deposits
-       WHERE auction_id = $1 AND status = 'held' ORDER BY id`,
-      [auctionId],
+    // Cọc người thắng trừ vào thanh toán.
+    const won = await client.query(
+      `UPDATE auction_deposits SET status = 'applied_to_payment'
+       WHERE auction_id = $1 AND bidder_id = $2 AND status = 'held' RETURNING id`,
+      [auctionId, winnerId],
     );
-    for (const d of deposits.rows) {
-      const amount = Number(d.amount);
-      if (String(d.bidder_id) === String(winnerId)) {
-        await client.query(`UPDATE auction_deposits SET status = 'applied_to_payment' WHERE id = $1`, [d.id]);
-        notes.push(await createNotification(client, {
-          accountId: d.bidder_id,
-          type: 'win',
-          title: winTitle({
-            title: a.title, finalPrice, orderId: order.rows[0].id, paymentDeadline: order.rows[0].payment_deadline,
-          }),
-          data: { auctionId: String(auctionId), orderId: String(order.rows[0].id) },
-        }));
-      } else {
-        await client.query(`UPDATE auction_deposits SET status = 'released' WHERE id = $1`, [d.id]);
-        await walletService.releaseDeposit(client, { bidderId: d.bidder_id, auctionId, amount });
-        notes.push(await createNotification(client, {
-          accountId: d.bidder_id,
-          type: 'refund',
-          title: `Đã hoàn cọc ${fmt(amount)} · ${a.title} (bạn không thắng phiên)`,
-          data: { auctionId: String(auctionId) },
-        }));
-      }
+    if (won.rowCount) {
+      notes.push(await createNotification(client, {
+        accountId: winnerId,
+        type: 'win',
+        title: winTitle({
+          title: a.title, finalPrice, orderId: order.rows[0].id, paymentDeadline: order.rows[0].payment_deadline,
+        }),
+        data: { auctionId: String(auctionId), orderId: String(order.rows[0].id) },
+      }));
     }
+    // Người thua được hoàn cọc ngay.
+    notes.push(...await refundHeldDeposits(client, a, { exceptBidderId: winnerId, reason: 'bạn không thắng phiên' }));
     notes.push(await createNotification(client, {
       accountId: a.seller_id,
       type: 'sold',

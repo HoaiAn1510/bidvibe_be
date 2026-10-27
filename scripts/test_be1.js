@@ -67,6 +67,13 @@ async function mkAuction(sellerId, startPrice = 1_000_000) {
 
 const wallet = async (id) => (await pool.query(
   'SELECT wallet_balance::int AS b, wallet_held::int AS h FROM bidders WHERE account_id = $1', [id])).rows[0];
+// Database tạm / cục bộ: host localhost (vd. Postgres trong Docker), hoặc người chạy tự xác nhận bằng TEST_THROWAWAY_DB=1.
+function isThrowawayDb() {
+  if (process.env.TEST_THROWAWAY_DB === '1') return true;
+  try {
+    return ['localhost', '127.0.0.1', '[::1]'].includes(new URL(process.env.DATABASE_URL || '').hostname);
+  } catch { return false; }
+}
 const expire = (auctionId) => pool.query(`UPDATE auctions SET ends_at = now() - interval '1 second', starts_at = now() - interval '1 hour' WHERE id = $1`, [auctionId]);
 
 // Chỉ xoá những dòng đi ra từ tài khoản test_be1_*: phiên của người bán test, và mọi dòng
@@ -269,6 +276,40 @@ async function main() {
     assert.strictEqual((await pool.query('SELECT status FROM auctions WHERE id = $1', [a3])).rows[0].status, 'ended');
     assert.strictEqual((await pool.query('SELECT 1 FROM orders WHERE auction_id = $1', [a3])).rowCount, 0);
   });
+  // Issue #34. Chỉ chạy trên database tạm / cục bộ (localhost, hoặc đặt TEST_THROWAWAY_DB=1), không chạy trên Supabase dùng chung.
+  if (isThrowawayDb()) {
+    await step('không có lượt đặt giá nhưng có người đặt cọc: hoàn cọc tất cả (issue #34)', async () => {
+      const { auctionId: an } = await mkAuction(seller); // giá khởi điểm 1.000.000đ -> cọc 100.000đ
+      const [P, Q] = [await mkAccount('bidder', 'NoBidP'), await mkAccount('bidder', 'NoBidQ')];
+      for (const id of [P, Q]) await tx((c) => walletService.topUp(c, { bidderId: id, amount: 1_000_000 }));
+      const before = { [P]: await wallet(P), [Q]: await wallet(Q) };
+      for (const id of [P, Q]) await engine.joinAuction({ bidderId: id, auctionId: an });
+      for (const id of [P, Q]) assert.deepStrictEqual(await wallet(id), { b: before[id].b - 100_000, h: 100_000 });
+      // So với giờ DATABASE (không dùng giờ máy) để không lệ thuộc độ lệch đồng hồ.
+      const dbNow = (await pool.query('SELECT clock_timestamp() AS t')).rows[0].t;
+      await expire(an);
+      await closedAuction(an);
+
+      assert.strictEqual((await pool.query('SELECT status FROM auctions WHERE id = $1', [an])).rows[0].status, 'ended');
+      assert.strictEqual((await pool.query('SELECT 1 FROM orders WHERE auction_id = $1', [an])).rowCount, 0);
+      const deps = (await pool.query('SELECT status FROM auction_deposits WHERE auction_id = $1 ORDER BY id', [an])).rows;
+      assert.deepStrictEqual(deps.map((d) => d.status), ['released', 'released']);
+      for (const id of [P, Q]) {
+        assert.deepStrictEqual(await wallet(id), { b: before[id].b, h: 0 }, 'số dư phải về như trước khi cọc, tiền đang giữ = 0');
+        const t = (await pool.query(
+          `SELECT amount::int AS amount, balance_after::int AS after FROM wallet_transactions
+           WHERE bidder_id = $1 AND related_auction_id = $2 AND kind = 'deposit_release' AND created_at >= $3`,
+          [id, an, dbNow])).rows;
+        assert.deepStrictEqual(t, [{ amount: 100_000, after: before[id].b }], 'đúng một giao dịch hoàn cọc');
+        const n = (await pool.query(
+          `SELECT data FROM notifications WHERE account_id = $1 AND type = 'refund' AND created_at >= $2`, [id, dbNow])).rows;
+        assert.strictEqual(n.length, 1, 'đúng một thông báo hoàn cọc');
+        assert.deepStrictEqual(n[0].data, { auctionId: String(an) });
+      }
+    });
+  } else {
+    console.log('  - bỏ qua bước hoàn cọc khi không có lượt giá (issue #34): chỉ chạy trên database tạm (localhost hoặc TEST_THROWAWAY_DB=1)');
+  }
   await step('Admin huỷ phiên: hoàn cọc mọi người tham gia', async () => {
     const { auctionId: a4 } = await mkAuction(seller);
     const before = await wallet(B);
