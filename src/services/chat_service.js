@@ -9,7 +9,7 @@ const validate = require('../utils/validate');
 const ANSWERS = [
   [/cọc|đặt cọc/i, 'Để tham gia một phiên, bạn đặt cọc 10% giá khởi điểm (làm tròn nghìn) từ ví. Thua phiên thì cọc được hoàn ngay khi phiên kết thúc; thắng thì cọc được trừ vào số tiền thanh toán.'],
   [/đặt giá|trả giá|bước giá|vượt giá/i, 'Giá đặt phải từ giá hiện tại cộng bước giá trở lên, và bạn không thể tự vượt giá của chính mình. Nếu đặt giá trong 30 giây cuối, phiên được gia hạn còn đúng 30 giây.'],
-  [/thanh toán|hạn trả|quá hạn/i, 'Thắng phiên, bạn có 24 giờ để thanh toán (giá chốt + phí dịch vụ 5% + phí vận chuyển 40.000đ, đã trừ cọc). Quá 24 giờ chưa thanh toán thì mất cọc và giao dịch bị huỷ.'],
+  [/thanh toán|hạn trả|quá hạn/i, 'Thắng phiên, bạn có 24 giờ để thanh toán (giá chốt + phí dịch vụ 5% + phí vận chuyển 40.000đ, đã trừ cọc). Quá hạn chưa thanh toán thì mất cọc. Nếu tính năng mời người trả giá cao thứ hai được bật và có người hợp lệ, họ sẽ được mời mua; nếu không, giao dịch bị huỷ.'],
   [/giao hàng|kho|vận chuyển|mã vận đơn/i, 'Sau khi bạn thanh toán, người bán gửi hàng về kho BidVibe. Kho nhận, kiểm đối chiếu mô tả, đóng gói rồi gửi cho bạn. Bạn theo dõi tiến trình trong mục Đơn hàng.'],
   [/giải ngân|nhận tiền|xác nhận/i, 'Khi nhận được hàng, bạn bấm "Đã nhận hàng" để giải ngân cho người bán. Nếu không phản hồi trong 72 giờ sau khi giao, hệ thống tự giải ngân.'],
   [/tranh chấp|khiếu nại|hoàn tiền|không đúng mô tả/i, 'Nếu hàng có vấn đề, hãy mở tranh chấp trước khi đơn được giải ngân. Khoản tiền được giữ lại, Admin xem xét rồi quyết định hoàn tiền cho bạn hoặc giữ nguyên giao dịch.'],

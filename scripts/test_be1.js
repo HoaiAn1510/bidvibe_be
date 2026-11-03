@@ -9,11 +9,17 @@
 // Supabase session pooler giới hạn tổng số kết nối của cả database (15): test dùng ít kết nối để
 // chạy song song với lần chạy khác / test:be2 / server của đồng đội. Đặt trước khi nạp pool.
 process.env.DB_POOL_MAX = process.env.DB_POOL_MAX || '4';
+// Các ca cũ giữ kỳ vọng huỷ đơn; ca BE-06 bên dưới bật tính năng riêng để kiểm cả hai nhánh.
+process.env.RUNNER_UP_OFFER_ENABLED = 'false';
 // /api/dev phải tắt trong tiến trình test dù .env của người chạy có bật DEV_TOOLS; phần test /api/dev tự bật cho server con.
 process.env.DEV_TOOLS = 'false';
 const assert = require('assert');
 const { pool } = require('../src/config/db');
 const engine = require('../src/services/auction_engine');
+const env = require('../src/config/env');
+const fulfilment = require('../src/services/fulfilment_service');
+const listingService = require('../src/services/listing_service');
+const auctionModel = require('../src/models/auction.model');
 const walletService = require('../src/services/wallet_service');
 const fraud = require('../src/services/fraud_detection');
 // Giới hạn tốc độ đặt giá (1 lượt / giây / người) tắt trong các bước khác, vì chúng đặt giá liên tiếp nhanh bằng cùng một tài khoản;
@@ -152,6 +158,37 @@ async function main() {
   const seller = await mkAccount('seller', 'Seller');
   const [A, B, C] = [await mkAccount('bidder', 'Alice'), await mkAccount('bidder', 'Bob'), await mkAccount('bidder', 'Carl')];
   const tx = (f) => engine.inTransaction(f);
+
+  console.log('Tìm kiếm phiên (BE-05)');
+  const searchSeller = await mkAccount('seller', 'SearchSeller');
+  const searchFixtures = [
+    `${RUN}100%`, `${RUN}1000`, `${RUN}under_score`,
+    `${RUN}underXscore`, `${RUN}Cà Phê`, `${RUN}back\\slash`,
+    `${RUN}backXslash`, 'x'.repeat(100),
+  ];
+  const searchIds = [];
+  for (const title of searchFixtures) {
+    const fixture = await mkAuction(searchSeller);
+    await pool.query('UPDATE listings SET title = $2 WHERE id = $1', [fixture.listingId, title]);
+    searchIds.push(String(fixture.auctionId));
+  }
+  const search = async (q) => {
+    const filters = { status: 'live', q };
+    const [items, total] = await Promise.all([auctionModel.list(filters), auctionModel.count(filters)]);
+    assert.strictEqual(total, items.length, 'total phải bằng số phiên khớp');
+    return items.map((item) => String(item.id));
+  };
+  await step('ký tự % và _ trong q chỉ khớp tiêu đề chứa đúng ký tự đó', async () => {
+    assert.deepStrictEqual(await search(`${RUN}100%`), [searchIds[0]]);
+    assert.deepStrictEqual(await search(`${RUN}under_`), [searchIds[2]]);
+  });
+  await step('ký tự \\ và tiếng Việt có dấu, không phân biệt hoa thường', async () => {
+    assert.deepStrictEqual(await search(`${RUN}back\\`), [searchIds[5]]);
+    assert.deepStrictEqual(await search(`  ${RUN}cÀ pHê  `), [searchIds[4]]);
+  });
+  await step('q dài hơn 100 ký tự được cắt im lặng', async () => {
+    assert.deepStrictEqual(await search(`${'x'.repeat(100)}phần bị cắt`), [searchIds[7]]);
+  });
 
   console.log('Ví');
   await step('nạp tiền, từ chối số tiền sai', async () => {
@@ -2286,6 +2323,146 @@ ${out.slice(-600)}`);
       })));
     }
   }
+
+  console.log('Mời người trả giá cao thứ hai (BE-06)');
+  const offerSeller = await mkAccount('seller', 'OfferSeller');
+  const [OfferA, OfferB, OfferC] = [
+    await mkAccount('bidder', 'OfferA'),
+    await mkAccount('bidder', 'OfferB'),
+    await mkAccount('bidder', 'OfferC'),
+  ];
+  for (const bidderId of [OfferA, OfferB, OfferC]) {
+    await tx((client) => walletService.topUp(client, { bidderId, amount: 10_000_000 }));
+  }
+  const soldWithBids = async (bids) => {
+    const { auctionId, listingId } = await mkAuction(offerSeller);
+    for (const bidderId of [...new Set(bids.map((bid) => bid[0]))]) {
+      await engine.joinAuction({ bidderId, auctionId });
+    }
+    for (const [bidderId, amount] of bids) await engine.placeBid({ bidderId, auctionId, amount });
+    await expire(auctionId);
+    await closedAuction(auctionId);
+    const order = (await pool.query(
+      `SELECT id, bidder_id FROM orders WHERE auction_id = $1 AND payment_status <> 'expired'`,
+      [auctionId],
+    )).rows[0];
+    assert.ok(order, 'phiên đã chốt phải có đơn thắng');
+    return { auctionId, listingId, order };
+  };
+  const timeout = async (orderId) => {
+    await pool.query(`UPDATE orders SET payment_deadline = now() - interval '1 minute' WHERE id = $1`, [orderId]);
+    assert.ok((await engine.processPaymentTimeouts()).map(String).includes(String(orderId)));
+  };
+
+  env.runnerUpOfferEnabled = true;
+  const offered = await soldWithBids([
+    [OfferA, 1_050_000], [OfferB, 1_100_000],
+    [OfferA, 1_150_000], [OfferB, 1_200_000],
+  ]);
+  await step('người thắng quá hạn: đúng một đơn mời theo giá cao nhất của người thứ hai', async () => {
+    await timeout(offered.order.id);
+    const orders = (await pool.query(
+      `SELECT id, bidder_id, final_price::int AS price, payment_status, is_runner_up_offer
+       FROM orders WHERE auction_id = $1 ORDER BY id`, [offered.auctionId],
+    )).rows;
+    assert.strictEqual(orders.length, 2);
+    assert.strictEqual(orders[0].payment_status, 'expired');
+    assert.deepStrictEqual(
+      [String(orders[1].bidder_id), orders[1].price, orders[1].payment_status, orders[1].is_runner_up_offer],
+      [String(OfferA), 1_150_000, 'awaiting_payment', true],
+    );
+    const view = await engine.getOrderForBidder(OfferA, orders[1].id);
+    assert.strictEqual(view.isRunnerUpOffer, true);
+    assert.strictEqual(view.depositApplied, 0);
+    assert.strictEqual(view.amountToPay, view.totalDue);
+    assert.ok(Math.abs(new Date(view.paymentDeadline).getTime() - Date.now()
+      - require('../src/config/business').paymentWindowMs) < 60_000);
+    assert.strictEqual((await engine.listOrdersForBidder(OfferA))
+      .find((item) => String(item.id) === String(orders[1].id)).depositApplied, 0);
+    assert.strictEqual((await engine.getAuction(offered.auctionId, OfferA)).won, true);
+    assert.strictEqual((await engine.getAuction(offered.auctionId, OfferB)).won, false);
+    const a = (await pool.query(
+      `SELECT a.winner_id, a.current_price::int AS current_price, l.status AS listing_status
+       FROM auctions a JOIN listings l ON l.id = a.listing_id WHERE a.id = $1`, [offered.auctionId],
+    )).rows[0];
+    assert.deepStrictEqual([String(a.winner_id), a.current_price, a.listing_status], [String(OfferA), 1_200_000, 'ended']);
+    assert.strictEqual((await pool.query(
+      `SELECT status FROM auction_deposits WHERE auction_id = $1 AND bidder_id = $2`,
+      [offered.auctionId, OfferB],
+    )).rows[0].status, 'forfeited');
+    const note = (await pool.query(
+      `SELECT type, title, data FROM notifications WHERE account_id = $1 AND type = 'win'
+       AND data->>'orderId' = $2`, [OfferA, String(orders[1].id)],
+    )).rows;
+    assert.strictEqual(note.length, 1);
+    assert.ok(note[0].title.includes('được mời mua') && note[0].title.includes('1.150.000'));
+    assert.deepStrictEqual(note[0].data, { auctionId: String(offered.auctionId), orderId: String(orders[1].id) });
+    const sellerNote = (await pool.query(
+      `SELECT title, data FROM notifications WHERE account_id = $1 AND type = 'warn'
+       AND data->>'orderId' = $2`, [offerSeller, String(orders[1].id)],
+    )).rows;
+    assert.strictEqual(sellerNote.length, 1);
+    assert.ok(sellerNote[0].title.includes('Đã mời người trả giá cao thứ hai'));
+    const selling = (await fulfilment.listSelling(offerSeller, { limit: 50, offset: 0 }))
+      .filter((item) => String(item.auctionId) === String(offered.auctionId));
+    assert.strictEqual(selling.length, 1);
+    assert.strictEqual(selling[0].isRunnerUpOffer, true);
+    assert.strictEqual((await listingService.listMine(offerSeller, { limit: 50, offset: 0 }))
+      .filter((item) => String(item.id) === String(offered.listingId)).length, 1);
+    offered.runnerOrderId = orders[1].id;
+    offered.totalDue = view.totalDue;
+  });
+  await step('người được mời trả bằng ví đủ totalDue, không trừ cọc lần hai', async () => {
+    const before = await wallet(OfferA);
+    const paid = await engine.payOrder({ bidderId: OfferA, orderId: offered.runnerOrderId, method: 'wallet' });
+    const after = await wallet(OfferA);
+    assert.strictEqual(paid.totalDue, offered.totalDue);
+    assert.strictEqual(before.b - after.b, offered.totalDue);
+    assert.strictEqual(before.h, after.h);
+  });
+
+  const twice = await soldWithBids([[OfferA, 1_050_000], [OfferB, 1_100_000]]);
+  await step('người được mời cũng quá hạn: huỷ tin, không mời lần ba', async () => {
+    await timeout(twice.order.id);
+    const runner = (await pool.query(
+      `SELECT id FROM orders WHERE auction_id = $1 AND is_runner_up_offer = true`, [twice.auctionId],
+    )).rows[0];
+    await timeout(runner.id);
+    const orders = (await pool.query(
+      `SELECT payment_status FROM orders WHERE auction_id = $1`, [twice.auctionId],
+    )).rows;
+    assert.deepStrictEqual(orders.map((o) => o.payment_status), ['expired', 'expired']);
+    assert.strictEqual((await pool.query('SELECT status FROM listings WHERE id = $1', [twice.listingId])).rows[0].status, 'cancelled');
+    assert.strictEqual((await fulfilment.listSelling(offerSeller, { limit: 50, offset: 0 }))
+      .filter((item) => String(item.auctionId) === String(twice.auctionId)).length, 1);
+  });
+
+  const single = await soldWithBids([[OfferA, 1_050_000]]);
+  await step('một người đặt giá: quá hạn giữ hành vi cũ', async () => {
+    await timeout(single.order.id);
+    assert.strictEqual((await pool.query('SELECT count(*)::int AS n FROM orders WHERE auction_id = $1', [single.auctionId])).rows[0].n, 1);
+    assert.strictEqual((await pool.query('SELECT status FROM listings WHERE id = $1', [single.listingId])).rows[0].status, 'cancelled');
+  });
+
+  env.runnerUpOfferEnabled = false;
+  const disabled = await soldWithBids([[OfferA, 1_050_000], [OfferB, 1_100_000]]);
+  await step('RUNNER_UP_OFFER_ENABLED=false: không tạo đơn mời', async () => {
+    await timeout(disabled.order.id);
+    assert.strictEqual((await pool.query('SELECT count(*)::int AS n FROM orders WHERE auction_id = $1', [disabled.auctionId])).rows[0].n, 1);
+    assert.strictEqual((await pool.query('SELECT status FROM listings WHERE id = $1', [disabled.listingId])).rows[0].status, 'cancelled');
+  });
+
+  env.runnerUpOfferEnabled = true;
+  const suspended = await soldWithBids([
+    [OfferC, 1_050_000], [OfferA, 1_100_000], [OfferB, 1_150_000],
+  ]);
+  await step('người thứ hai bị khoá: không mời người thứ ba', async () => {
+    await pool.query(`UPDATE accounts SET status = 'suspended' WHERE id = $1`, [OfferA]);
+    await timeout(suspended.order.id);
+    assert.strictEqual((await pool.query('SELECT count(*)::int AS n FROM orders WHERE auction_id = $1', [suspended.auctionId])).rows[0].n, 1);
+    assert.strictEqual((await pool.query('SELECT status FROM listings WHERE id = $1', [suspended.listingId])).rows[0].status, 'cancelled');
+  });
+  env.runnerUpOfferEnabled = false;
 
   finished = true;
   console.log(`\nTất cả ${passed} bước đạt.`);

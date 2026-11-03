@@ -428,7 +428,7 @@ Mọi vai trò. Query (đều tuỳ chọn):
 |---|---|
 | `status` | `live` (đang diễn ra), `ended` (kết thúc hoặc huỷ), `joined` (phiên mình đã đặt cọc) |
 | `category` | `shoes`, `elec`, `antique` |
-| `q` | tìm theo tiêu đề |
+| `q` | Tìm theo tiêu đề, không phân biệt hoa thường. Tự bỏ khoảng trắng đầu/cuối và cắt im lặng sau 100 ký tự; `%`, `_`, `\` được tìm như ký tự thường. Chuỗi rỗng sau khi bỏ khoảng trắng không lọc. |
 | `sort` | `ending` (mặc định), `newest`, `price_asc`, `price_desc`, `popular` |
 | `limit`, `offset` | phân trang (mặc định 50, tối đa 100); phản hồi có `total` = tổng số phiên khớp bộ lọc |
 
@@ -586,7 +586,11 @@ Lỗi: `400 VALIDATION_ERROR` ("Số tiền nạp phải từ 1 đến 100000000
 
 ## 10. Đơn hàng (Bidder và Seller)
 
-Đơn được tạo tự động khi phiên kết thúc có người thắng (`paymentStatus = awaiting_payment`, hạn thanh toán 24 giờ).
+Đơn được tạo tự động khi phiên kết thúc có người thắng (`paymentStatus = awaiting_payment`, hạn thanh toán theo `PAYMENT_WINDOW_HOURS`, mặc định 24 giờ). Nếu người thắng đầu tiên quá hạn, server có thể tạo thêm đúng một đơn mời người trả giá cao thứ hai của phiên. Đơn cũ vẫn là `expired` để người mua cũ xem lịch sử; mỗi phiên chỉ có tối đa một đơn chưa hết hạn.
+
+`RUNNER_UP_OFFER_ENABLED` mặc định `true`; đặt `false` để giữ hành vi cũ: quá hạn thì tin chuyển `cancelled`, không mời ai. Khi bật, người được mời là người có **giá cao nhất của chính họ** đứng đầu trong những người khác người thắng; tài khoản đó phải còn `active`. Không có người hợp lệ thì hành vi cũ được giữ nguyên. Nếu đơn mời cũng quá hạn, tin chuyển `cancelled` và không mời lần nữa.
+
+Khi tạo đơn mời, server giữ `listings.status = ended`, đổi `winnerId` của phiên sang người được mời, giữ nguyên các lượt giá và `currentPrice`. Người thắng cũ vẫn mất cọc và nhận thông báo quá hạn như trước. Người được mời nhận thông báo `win` với `{ auctionId, orderId }` của đơn mới; người bán nhận thông báo `warn` cho biết đã mời người thứ hai. Các thông báo và `auction:update` (`reason: runner_up_offer`) chỉ phát sau khi giao dịch hoàn tất.
 
 ### `GET /api/orders/mine`
 
@@ -598,7 +602,7 @@ Chỉ `bidder`, đơn của mình (khác → `404 NOT_FOUND`).
 
 ```json
 // 200
-{ "id": "120", "auctionId": "355", "title": "Máy nghe nhạc cassette 1988",
+{ "id": "120", "auctionId": "355", "isRunnerUpOffer": false, "title": "Máy nghe nhạc cassette 1988",
   "finalPrice": 1200000, "fee": 60000, "shippingFee": 40000, "totalDue": 1300000,
   "depositApplied": 100000, "amountToPay": 1200000,
   "paymentStatus": "awaiting_payment", "paymentDeadline": "2026-10-11T15:29:32.100Z",
@@ -609,7 +613,7 @@ Chỉ `bidder`, đơn của mình (khác → `404 NOT_FOUND`).
     "ward": "Phường 6", "district": "Quận 3", "city": "TP.HCM" } }
 ```
 
-`fee` = 5 phần trăm giá chốt (làm tròn nghìn); `totalDue` = `finalPrice + fee + shippingFee`; `amountToPay` = `totalDue - depositApplied`. `coverUrl` là ảnh bìa của tin; `seller.name` như ở danh sách phiên. `shippingAddress` là địa chỉ đã chọn qua [`POST /api/orders/:id/shipping-address`](#post-apiordersidshipping-address), chưa chọn thì `null` (kho sẽ chặn gửi hàng, người mua nhận thông báo `address_reminder` sau khi thanh toán).
+`fee` = 5 phần trăm giá chốt (làm tròn nghìn); `totalDue` = `finalPrice + fee + shippingFee`; `amountToPay` = `totalDue - depositApplied`. `isRunnerUpOffer` là `true` chỉ ở đơn mời người thứ hai. Cọc của người đó đã được hoàn khi đóng phiên, nên `depositApplied = 0`, `amountToPay = totalDue`; khi thanh toán ví sẽ trừ đủ `totalDue`. `coverUrl` là ảnh bìa của tin; `seller.name` như ở danh sách phiên. `shippingAddress` là địa chỉ đã chọn qua [`POST /api/orders/:id/shipping-address`](#post-apiordersidshipping-address), chưa chọn thì `null` (kho sẽ chặn gửi hàng, người mua nhận thông báo `address_reminder` sau khi thanh toán).
 
 ### `POST /api/orders/:id/pay`
 
@@ -632,7 +636,7 @@ Lỗi: `400 VALIDATION_ERROR`, `404 NOT_FOUND` (đơn hoặc địa chỉ không
 
 ### `GET /api/orders/selling`
 
-Chỉ `seller`. Đơn đã bán của tôi, mới nhất trước. Query `stage` (xem [enum giai đoạn](#giai-đoạn-đơn-stage)), `limit`, `offset`.
+Chỉ `seller`. Đơn đã bán của tôi, mới nhất trước. Query `stage` (xem [enum giai đoạn](#giai-đoạn-đơn-stage)), `limit`, `offset`. Mỗi phiên chỉ hiện một đơn: đơn còn hiệu lực; nếu mọi đơn đã hết hạn thì hiện đơn hết hạn mới nhất. `GET /api/listings/mine` vẫn trả mỗi tin một lần và `auction` hiện trạng thái phiên như cũ.
 
 ```json
 // 200
@@ -657,7 +661,7 @@ Lỗi: `404 NOT_FOUND`, `409 INVALID_STATE` ("Đơn chưa được thanh toán, 
 Dùng cho `/selling`, `/ship-to-warehouse`, `/shipping-address`, `/confirm-delivery`, `/tracking` và mọi endpoint kho:
 
 ```json
-{ "id": "120", "auctionId": "355", "title": "Máy nghe nhạc cassette 1988", "category": "elec", "finalPrice": 1200000,
+{ "id": "120", "auctionId": "355", "isRunnerUpOffer": false, "title": "Máy nghe nhạc cassette 1988", "category": "elec", "finalPrice": 1200000,
   "paymentStatus": "paid", "paymentDeadline": "2026-10-11T15:29:32.100Z",
   "payoutStatus": "released", "payoutDeadline": "2026-10-13T15:29:42.029Z", "deliveredConfirmedAt": "2026-10-10T15:29:43.039Z",
   "stage": "completed",
@@ -992,12 +996,12 @@ Tên khoá cố định; chỉ có khoá liên quan tới loại thông báo đ�
 | `info` | Phiên chạy lại sau khi tạm dừng | Người bán | `{ auctionId, listingId }` | BE2 |
 | `warn` | Phiên bị tạm dừng / chấm dứt | Người bán | `{ auctionId, listingId }` | BE2 |
 | `outbid` | Bị vượt giá | Người mua | `{ auctionId }` | BE1 |
-| `win` | Thắng phiên, cần thanh toán | Người mua | `{ auctionId, orderId }` | BE1 |
+| `win` | Thắng phiên hoặc được mời mua khi người thắng đầu tiên quá hạn; cần thanh toán | Người mua | `{ auctionId, orderId }` | BE1 |
 | `address_reminder` | Đã thanh toán, đơn chưa có địa chỉ | Người mua | `{ orderId, auctionId }` | BE1 |
 | `refund` | Hoàn cọc khi thua phiên / phiên bị huỷ | Người mua | `{ auctionId }` | BE1 |
 | `sold` | Phiên của mình kết thúc có người thắng | Người bán | `{ auctionId, orderId }` | BE1 |
 | `warn` | Quá hạn thanh toán, mất cọc | Người mua | `{ orderId, auctionId }` | BE1 |
-| `warn` | Người thắng quá hạn thanh toán, đơn bị huỷ (title: `Đơn bị huỷ · <tên tin>. Người mua không thanh toán đúng hạn.`) | Người bán | `{ orderId, auctionId }` | BE1 |
+| `warn` | Người thắng quá hạn: đơn bị huỷ nếu không có người thứ hai hợp lệ, hoặc đã mời người thứ hai (title nói rõ trường hợp); `orderId` trỏ tới đơn còn hiệu lực khi có lời mời | Người bán | `{ orderId, auctionId }` | BE1 |
 
 Cùng một `type` có thể đến từ nhiều tình huống (ví dụ `refund`, `warn`, `info`, `payout`); app điều hướng theo khoá trong `data`, không theo `type`.
 
@@ -1030,6 +1034,8 @@ Lỗi: `403 FORBIDDEN` (tài khoản `ops`).
 ### `POST /api/chat/messages`
 
 `bidder` / `seller`. Body `{ "content": string (≤ 2000), "sessionId"?: id }` — không có `sessionId` thì mở phiên trò chuyện mới. Trả lời soạn sẵn theo từ khoá (cọc, đặt giá, thanh toán, giao hàng, giải ngân, tranh chấp, ví, đăng tin), chưa gọi mô hình AI.
+
+Câu trả lời về quá hạn thanh toán nêu rõ khả năng mời người trả giá cao thứ hai khi tính năng này bật và có người hợp lệ.
 
 ```json
 // 201
@@ -1093,7 +1099,7 @@ Lỗi: `400 VALIDATION_ERROR` (`seconds` ngoài khoảng / không phải số ng
 
 ### `POST /api/dev/orders/:id/expire-payment`
 
-Cùng điều kiện bật như trên. Không có body. Đưa `paymentDeadline` của đơn đang chờ thanh toán về quá khứ; scheduler (vài giây sau) đánh dấu đơn `expired`, tịch thu cọc và gửi thông báo `warn` như khi quá 24 giờ thật.
+Cùng điều kiện bật như trên. Không có body. Đưa `paymentDeadline` của đơn đang chờ thanh toán về quá khứ; scheduler (vài giây sau) xử lý như quá hạn thật, gồm lời mời người thứ hai nếu `RUNNER_UP_OFFER_ENABLED=true` và có người hợp lệ.
 
 ```json
 // 200
@@ -1146,7 +1152,7 @@ Tạm dừng không phải một giá trị `status`: xem trường `paused`.
 |---|---|---|
 | `awaiting_payment` | Chờ thanh toán | Trong 24 giờ kể từ lúc thắng |
 | `paid` | Đã thanh toán | Tiền nằm trong ký quỹ nền tảng |
-| `expired` | Quá hạn | Quá 24 giờ, mất cọc, giao dịch huỷ |
+| `expired` | Quá hạn | Quá hạn thanh toán; cọc người thắng ban đầu bị tịch thu; có thể đã mời người thứ hai thay thế |
 
 #### Đơn hàng — giải ngân (`payoutStatus`)
 

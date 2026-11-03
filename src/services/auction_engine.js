@@ -2,6 +2,7 @@
 // Mọi thao tác đụng tiền / nhiều bảng chạy trong MỘT giao dịch trên cùng một client;
 // dòng `auctions` được khoá bằng SELECT ... FOR UPDATE để hai người không đặt trùng.
 const { pool } = require('../config/db');
+const env = require('../config/env');
 const { AppError } = require('../middleware/errorHandler');
 const auctionModel = require('../models/auction.model');
 const bidModel = require('../models/bid.model');
@@ -432,11 +433,13 @@ async function cancelAuction(client, auctionId, { reason = 'Phiên bị huỷ b�
 function orderView(r) {
   const finalPrice = Number(r.final_price);
   const fee = feeFor(finalPrice);
-  const deposit = Number(r.deposit_amount || 0);
+  // Người được mời đã nhận lại cọc khi phiên đóng, không được trừ cọc lần nữa.
+  const deposit = r.is_runner_up_offer ? 0 : Number(r.deposit_amount || 0);
   const totalDue = finalPrice + fee + SHIPPING_FEE;
   return {
     id: r.id,
     auctionId: r.auction_id,
+    isRunnerUpOffer: r.is_runner_up_offer,
     title: r.title,
     finalPrice,
     fee,
@@ -465,6 +468,7 @@ function orderView(r) {
 
 const ORDER_SELECT = `
   SELECT o.id, o.auction_id, o.bidder_id, o.final_price, o.payment_status, o.payment_deadline,
+         o.is_runner_up_offer,
          o.payout_status, o.created_at, l.title, l.seller_id, s.store_name, sa.full_name AS seller_full_name,
          (SELECT d.amount FROM auction_deposits d
           WHERE d.auction_id = o.auction_id AND d.bidder_id = o.bidder_id) AS deposit_amount,
@@ -519,6 +523,7 @@ async function payOrder({ bidderId, orderId, method = 'wallet' }) {
        WHERE auction_id = $1 AND bidder_id = $2 AND status = 'applied_to_payment'`,
       [o.auction_id, bidderId],
     );
+    // Đơn mời người thứ hai không có cọc applied_to_payment: phải trả đủ totalDue.
     const depositAmount = dep.rows[0] ? Number(dep.rows[0].amount) : 0;
     const finalPrice = Number(o.final_price);
     const totalDue = finalPrice + feeFor(finalPrice) + SHIPPING_FEE;
@@ -549,7 +554,7 @@ async function payOrder({ bidderId, orderId, method = 'wallet' }) {
   return out.result;
 }
 
-// Quá 24 giờ chưa thanh toán: mất cọc, huỷ giao dịch.
+// Quá hạn thanh toán: tịch thu cọc; có thể mời đúng một người trả giá cao thứ hai.
 async function processPaymentTimeouts() {
   const { rows } = await pool.query(
     `SELECT id FROM orders WHERE payment_status = 'awaiting_payment' AND payment_deadline < now() ORDER BY id`,
@@ -557,9 +562,10 @@ async function processPaymentTimeouts() {
   const expired = [];
   for (const { id } of rows) {
     try {
-      const note = await inTransaction(async (client) => {
+      const outcome = await inTransaction(async (client) => {
         const r = await client.query(
-          `SELECT o.id, o.auction_id, o.bidder_id, o.seller_id, l.title, a.listing_id
+          `SELECT o.id, o.auction_id, o.bidder_id, o.seller_id, o.is_runner_up_offer,
+                  l.title, a.listing_id
            FROM orders o JOIN auctions a ON a.id = o.auction_id JOIN listings l ON l.id = a.listing_id
            WHERE o.id = $1 AND o.payment_status = 'awaiting_payment' AND o.payment_deadline < now()
            FOR UPDATE OF o SKIP LOCKED`,
@@ -568,8 +574,13 @@ async function processPaymentTimeouts() {
         const o = r.rows[0];
         if (!o) return undefined;
 
+        // Khoá phiên và tin trước khi đổi người thắng/trạng thái; hai scheduler không tạo hai đơn.
+        const auctionState = (await client.query(
+          'SELECT current_price, bid_count, ends_at FROM auctions WHERE id = $1 FOR UPDATE',
+          [o.auction_id],
+        )).rows[0];
+        await client.query('SELECT id FROM listings WHERE id = $1 FOR UPDATE', [o.listing_id]);
         await client.query(`UPDATE orders SET payment_status = 'expired' WHERE id = $1`, [id]);
-        await client.query(`UPDATE listings SET status = 'cancelled' WHERE id = $1`, [o.listing_id]);
         const dep = await client.query(
           `UPDATE auction_deposits SET status = 'forfeited'
            WHERE auction_id = $1 AND bidder_id = $2 AND status = 'applied_to_payment'
@@ -581,6 +592,36 @@ async function processPaymentTimeouts() {
             bidderId: o.bidder_id, auctionId: o.auction_id, amount: Number(dep.rows[0].amount),
           });
         }
+        let offer = null;
+        if (env.runnerUpOfferEnabled && !o.is_runner_up_offer) {
+          // Chọn giá cao nhất của từng người, bỏ người thắng cũ. Nếu người thứ hai
+          // đã bị khoá thì không mời tiếp người thứ ba.
+          // Khoá tài khoản được chọn để Admin không thể khoá xen giữa lúc lập đơn.
+          const runner = await client.query(
+            `SELECT ranked.bidder_id, ranked.final_price, acc.status
+             FROM (
+               SELECT bidder_id, max(amount) AS final_price, max(id) AS last_bid_id
+               FROM bids WHERE auction_id = $1 AND bidder_id <> $2
+               GROUP BY bidder_id
+             ) ranked
+             JOIN accounts acc ON acc.id = ranked.bidder_id
+             ORDER BY ranked.final_price DESC, ranked.last_bid_id DESC, ranked.bidder_id
+             LIMIT 1 FOR UPDATE OF acc`,
+            [o.auction_id, o.bidder_id],
+          );
+          if (runner.rows[0]?.status === 'active') {
+            const next = runner.rows[0];
+            const created = await client.query(
+              `INSERT INTO orders (auction_id, bidder_id, seller_id, final_price, payment_deadline, is_runner_up_offer)
+               VALUES ($1, $2, $3, $4, now() + ($5 || ' milliseconds')::interval, true)
+               RETURNING id, payment_deadline`,
+              [o.auction_id, next.bidder_id, o.seller_id, next.final_price, String(PAYMENT_WINDOW_MS)],
+            );
+            await client.query('UPDATE auctions SET winner_id = $2 WHERE id = $1', [o.auction_id, next.bidder_id]);
+            offer = { ...created.rows[0], bidderId: next.bidder_id, finalPrice: Number(next.final_price) };
+          }
+        }
+        if (!offer) await client.query(`UPDATE listings SET status = 'cancelled' WHERE id = $1`, [o.listing_id]);
         const data = { orderId: String(o.id), auctionId: String(o.auction_id) };
         const buyer = await createNotification(client, {
           accountId: o.bidder_id,
@@ -588,16 +629,39 @@ async function processPaymentTimeouts() {
           title: `Quá hạn thanh toán · ${o.title}. Cọc đã bị tịch thu và giao dịch bị huỷ.`,
           data,
         });
-        // Người bán cũng phải biết đơn đã bị huỷ để không chờ gửi hàng.
+        // Người bán biết đã có lời mời mới, hoặc đơn đã huỷ nếu không có người hợp lệ.
         const seller = await createNotification(client, {
           accountId: o.seller_id,
           type: 'warn',
-          title: `Đơn bị huỷ · ${o.title}. Người mua không thanh toán đúng hạn.`,
-          data,
+          title: offer
+            ? `Người thắng không thanh toán đúng hạn · ${o.title}. Đã mời người trả giá cao thứ hai mua sản phẩm.`
+            : `Đơn bị huỷ · ${o.title}. Người mua không thanh toán đúng hạn.`,
+          data: offer ? { orderId: String(offer.id), auctionId: String(o.auction_id) } : data,
         });
-        return { buyer, seller };
+        const runnerNote = offer ? await createNotification(client, {
+          accountId: offer.bidderId,
+          type: 'win',
+          title: `Bạn được mời mua · ${o.title} vì người thắng không thanh toán. Giá ${fmt(offer.finalPrice)}. Đơn #${offer.id}: thanh toán trước ${fmtDateTime(offer.payment_deadline)} và chọn địa chỉ giao hàng.`,
+          data: { auctionId: String(o.auction_id), orderId: String(offer.id) },
+        }) : null;
+        return { buyer, seller, runnerNote, offer, auctionId: o.auction_id, auctionState };
       });
-      if (note !== undefined) { emitNotification(note.buyer); emitNotification(note.seller); expired.push(id); } // sau COMMIT
+      if (outcome !== undefined) {
+        // Mọi thông báo và thay đổi người thắng chỉ phát sau COMMIT.
+        emitNotification(outcome.buyer);
+        emitNotification(outcome.seller);
+        emitNotification(outcome.runnerNote);
+        if (outcome.offer) {
+          emit(`auction:${outcome.auctionId}`, 'auction:update', {
+            auctionId: String(outcome.auctionId), reason: 'runner_up_offer',
+            status: 'ended', winnerId: String(outcome.offer.bidderId),
+            paused: false, pausedAt: null, remainingSeconds: 0,
+            currentPrice: Number(outcome.auctionState.current_price),
+            bidCount: outcome.auctionState.bid_count, endsAt: outcome.auctionState.ends_at,
+          });
+        }
+        expired.push(id);
+      }
     } catch (err) {
       console.error(`[auction] lỗi xử lý quá hạn đơn ${id}:`, err.message);
     }
