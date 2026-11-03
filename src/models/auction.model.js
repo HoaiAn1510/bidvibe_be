@@ -115,7 +115,13 @@ function buildFilter({ viewerId = null, category, status, q } = {}) {
   const params = [viewerId];
   const where = [];
   if (category) { params.push(category); where.push(`c.code = $${params.length}`); }
-  if (q) { params.push(`%${q}%`); where.push(`l.title ILIKE $${params.length}`); }
+  const term = typeof q === 'string' ? q.trim().slice(0, 100) : '';
+  if (term) {
+    // Tìm ký tự %, _ và \ theo nghĩa đen; cùng bộ lọc cho danh sách và total.
+    const escaped = term.replace(/[\\%_]/g, (char) => `\\${char}`);
+    params.push(`%${escaped}%`);
+    where.push(`l.title ILIKE $${params.length} ESCAPE '\\'`);
+  }
   if (status === 'live') where.push(`a.status = 'active' AND a.ends_at > now()`);
   else if (status === 'ended') where.push(`(a.status <> 'active' OR a.ends_at <= now())`);
   else if (status === 'joined') where.push('d.id IS NOT NULL');

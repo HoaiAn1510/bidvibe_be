@@ -14,6 +14,7 @@ process.env.DEV_TOOLS = 'false';
 const assert = require('assert');
 const { pool } = require('../src/config/db');
 const engine = require('../src/services/auction_engine');
+const auctionModel = require('../src/models/auction.model');
 const walletService = require('../src/services/wallet_service');
 const fraud = require('../src/services/fraud_detection');
 // Giới hạn tốc độ đặt giá (1 lượt / giây / người) tắt trong các bước khác, vì chúng đặt giá liên tiếp nhanh bằng cùng một tài khoản;
@@ -152,6 +153,37 @@ async function main() {
   const seller = await mkAccount('seller', 'Seller');
   const [A, B, C] = [await mkAccount('bidder', 'Alice'), await mkAccount('bidder', 'Bob'), await mkAccount('bidder', 'Carl')];
   const tx = (f) => engine.inTransaction(f);
+
+  console.log('Tìm kiếm phiên (BE-05)');
+  const searchSeller = await mkAccount('seller', 'SearchSeller');
+  const searchFixtures = [
+    `${RUN}100%`, `${RUN}1000`, `${RUN}under_score`,
+    `${RUN}underXscore`, `${RUN}Cà Phê`, `${RUN}back\\slash`,
+    `${RUN}backXslash`, 'x'.repeat(100),
+  ];
+  const searchIds = [];
+  for (const title of searchFixtures) {
+    const fixture = await mkAuction(searchSeller);
+    await pool.query('UPDATE listings SET title = $2 WHERE id = $1', [fixture.listingId, title]);
+    searchIds.push(String(fixture.auctionId));
+  }
+  const search = async (q) => {
+    const filters = { status: 'live', q };
+    const [items, total] = await Promise.all([auctionModel.list(filters), auctionModel.count(filters)]);
+    assert.strictEqual(total, items.length, 'total phải bằng số phiên khớp');
+    return items.map((item) => String(item.id));
+  };
+  await step('ký tự % và _ trong q chỉ khớp tiêu đề chứa đúng ký tự đó', async () => {
+    assert.deepStrictEqual(await search(`${RUN}100%`), [searchIds[0]]);
+    assert.deepStrictEqual(await search(`${RUN}under_`), [searchIds[2]]);
+  });
+  await step('ký tự \\ và tiếng Việt có dấu, không phân biệt hoa thường', async () => {
+    assert.deepStrictEqual(await search(`${RUN}back\\`), [searchIds[5]]);
+    assert.deepStrictEqual(await search(`  ${RUN}cÀ pHê  `), [searchIds[4]]);
+  });
+  await step('q dài hơn 100 ký tự được cắt im lặng', async () => {
+    assert.deepStrictEqual(await search(`${'x'.repeat(100)}phần bị cắt`), [searchIds[7]]);
+  });
 
   console.log('Ví');
   await step('nạp tiền, từ chối số tiền sai', async () => {

@@ -428,7 +428,7 @@ Mọi vai trò. Query (đều tuỳ chọn):
 |---|---|
 | `status` | `live` (đang diễn ra), `ended` (kết thúc hoặc huỷ), `joined` (phiên mình đã đặt cọc) |
 | `category` | `shoes`, `elec`, `antique` |
-| `q` | tìm theo tiêu đề |
+| `q` | Tìm theo tiêu đề, không phân biệt hoa thường. Tự bỏ khoảng trắng đầu/cuối và cắt im lặng sau 100 ký tự; `%`, `_`, `\` được tìm như ký tự thường. Chuỗi rỗng sau khi bỏ khoảng trắng không lọc. |
 | `sort` | `ending` (mặc định), `newest`, `price_asc`, `price_desc`, `popular` |
 | `limit`, `offset` | phân trang (mặc định 50, tối đa 100); phản hồi có `total` = tổng số phiên khớp bộ lọc |
 
