@@ -346,6 +346,40 @@ async function main() {
     const t = await pool.query(`SELECT 1 FROM wallet_transactions WHERE bidder_id = $1 AND kind = 'deposit_forfeit'`, [A]);
     assert.strictEqual(t.rowCount, 1);
   });
+  await step('quá hạn thanh toán: người bán nhận đúng một thông báo huỷ đơn, người mua vẫn nhận như cũ', async () => {
+    // Người mua và người bán riêng: một lần tịch thu cọc thêm ở tài khoản dùng chung sẽ làm lệch luật phạt / số dư ở các phần sau.
+    const D = await mkAccount('bidder', 'Dora');
+    await tx((c) => walletService.topUp(c, { bidderId: D, amount: 1_000_000 }));
+    const { auctionId: a2 } = await mkAuction(ceilSeller, 1_500_000);
+    await engine.joinAuction({ bidderId: D, auctionId: a2 });
+    await engine.placeBid({ bidderId: D, auctionId: a2, amount: 1_550_000 });
+    await expire(a2);
+    await closedAuction(a2);
+    const order = (await pool.query('SELECT id FROM orders WHERE auction_id = $1', [a2])).rows[0];
+    await pool.query(`UPDATE orders SET payment_deadline = now() - interval '1 minute' WHERE id = $1`, [order.id]);
+    await engine.processPaymentTimeouts();
+    for (let i = 0; i < 20; i += 1) { // server khác có thể đã xử lý trước: chờ DB đúng trạng thái
+      const o = (await pool.query('SELECT payment_status FROM orders WHERE id = $1', [order.id])).rows[0];
+      if (o.payment_status === 'expired') break;
+      await new Promise((res) => setTimeout(res, 250));
+    }
+    const expectData = { orderId: String(order.id), auctionId: String(a2) };
+    const forOrder = (accountId) => pool.query(
+      `SELECT type, title, data FROM notifications WHERE account_id = $1 AND type = 'warn' AND data->>'orderId' = $2`, [accountId, String(order.id)]);
+    const sellerNotes = (await forOrder(ceilSeller)).rows;
+    assert.strictEqual(sellerNotes.length, 1, `người bán phải có đúng 1 thông báo, có ${sellerNotes.length}`);
+    assert.strictEqual(sellerNotes[0].type, 'warn');
+    assert.ok(sellerNotes[0].title.startsWith('Đơn bị huỷ') && sellerNotes[0].title.includes(`${RUN}item`), sellerNotes[0].title);
+    assert.deepStrictEqual(sellerNotes[0].data, expectData);
+    for (const v of Object.values(sellerNotes[0].data)) assert.strictEqual(typeof v, 'string');
+    const buyerNotes = (await forOrder(D)).rows;
+    assert.strictEqual(buyerNotes.length, 1, 'người mua vẫn nhận đúng 1 thông báo');
+    assert.ok(buyerNotes[0].title.startsWith('Quá hạn thanh toán'), buyerNotes[0].title);
+    assert.deepStrictEqual(buyerNotes[0].data, expectData);
+    // Xử lý lại lần nữa không tạo thêm thông báo (đơn đã expired).
+    await engine.processPaymentTimeouts();
+    assert.strictEqual((await forOrder(ceilSeller)).rowCount, 1);
+  });
 
   console.log('Phiên không ai đặt giá & huỷ phiên');
   await step('không có lượt đặt giá: đóng phiên, không tạo đơn', async () => {

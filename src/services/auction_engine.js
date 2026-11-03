@@ -559,7 +559,7 @@ async function processPaymentTimeouts() {
     try {
       const note = await inTransaction(async (client) => {
         const r = await client.query(
-          `SELECT o.id, o.auction_id, o.bidder_id, l.title, a.listing_id
+          `SELECT o.id, o.auction_id, o.bidder_id, o.seller_id, l.title, a.listing_id
            FROM orders o JOIN auctions a ON a.id = o.auction_id JOIN listings l ON l.id = a.listing_id
            WHERE o.id = $1 AND o.payment_status = 'awaiting_payment' AND o.payment_deadline < now()
            FOR UPDATE OF o SKIP LOCKED`,
@@ -581,14 +581,23 @@ async function processPaymentTimeouts() {
             bidderId: o.bidder_id, auctionId: o.auction_id, amount: Number(dep.rows[0].amount),
           });
         }
-        return createNotification(client, {
+        const data = { orderId: String(o.id), auctionId: String(o.auction_id) };
+        const buyer = await createNotification(client, {
           accountId: o.bidder_id,
           type: 'warn',
           title: `Quá hạn thanh toán · ${o.title}. Cọc đã bị tịch thu và giao dịch bị huỷ.`,
-          data: { orderId: String(o.id), auctionId: String(o.auction_id) },
+          data,
         });
+        // Người bán cũng phải biết đơn đã bị huỷ để không chờ gửi hàng.
+        const seller = await createNotification(client, {
+          accountId: o.seller_id,
+          type: 'warn',
+          title: `Đơn bị huỷ · ${o.title}. Người mua không thanh toán đúng hạn.`,
+          data,
+        });
+        return { buyer, seller };
       });
-      if (note !== undefined) { emitNotification(note); expired.push(id); }
+      if (note !== undefined) { emitNotification(note.buyer); emitNotification(note.seller); expired.push(id); } // sau COMMIT
     } catch (err) {
       console.error(`[auction] lỗi xử lý quá hạn đơn ${id}:`, err.message);
     }

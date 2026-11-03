@@ -99,7 +99,7 @@ Một tài khoản `accounts` chỉ là Bidder **hoặc** Seller, không cả ha
 
 - **Xem đơn** — `GET /api/orders/mine`, `GET /api/orders/:id` (BE1). Tổng = giá chốt + phí 5 phần trăm (làm tròn nghìn) + vận chuyển 40.000đ, cọc được trừ. Đơn kèm ảnh bìa, người bán và địa chỉ giao hàng đã chọn (`shippingAddress`, chưa chọn thì `null`).
 - **Thanh toán** — `POST /api/orders/:id/pay` `{ method: 'wallet' | 'qr' | 'card' }`. `payment_status`: `awaiting_payment` → `paid`; cọc rời `wallet_held`, giao dịch ví `payment`. Tiền nằm trong ký quỹ nền tảng (`payout_status = 'pending'`). Đơn chưa có địa chỉ giao hàng (`orders.shipping_address_id` NULL) thì người mua nhận thêm một thông báo `address_reminder` trong cùng giao dịch (một lần mỗi đơn).
-- **Quá hạn** — scheduler gọi `processPaymentTimeouts()`: `payment_status` → `expired`, `listings.status` → `cancelled`, cọc `forfeited` (giao dịch ví `deposit_forfeit`), thông báo `warn`.
+- **Quá hạn** — scheduler gọi `processPaymentTimeouts()`: `payment_status` → `expired`, `listings.status` → `cancelled`, cọc `forfeited` (giao dịch ví `deposit_forfeit`), thông báo `warn` cho người mua và một thông báo `warn` cho người bán (đơn bị huỷ, `data { orderId, auctionId }`), cùng một giao dịch, phát sau COMMIT.
 
 ### Bước 8 — Seller gửi hàng về kho [Đã có]
 

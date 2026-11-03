@@ -997,6 +997,7 @@ Tên khoá cố định; chỉ có khoá liên quan tới loại thông báo đ�
 | `refund` | Hoàn cọc khi thua phiên / phiên bị huỷ | Người mua | `{ auctionId }` | BE1 |
 | `sold` | Phiên của mình kết thúc có người thắng | Người bán | `{ auctionId, orderId }` | BE1 |
 | `warn` | Quá hạn thanh toán, mất cọc | Người mua | `{ orderId, auctionId }` | BE1 |
+| `warn` | Người thắng quá hạn thanh toán, đơn bị huỷ (title: `Đơn bị huỷ · <tên tin>. Người mua không thanh toán đúng hạn.`) | Người bán | `{ orderId, auctionId }` | BE1 |
 
 Cùng một `type` có thể đến từ nhiều tình huống (ví dụ `refund`, `warn`, `info`, `payout`); app điều hướng theo khoá trong `data`, không theo `type`.
 
