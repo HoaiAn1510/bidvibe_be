@@ -8,6 +8,7 @@ const bidModel = require('../models/bid.model');
 const walletService = require('./wallet_service');
 const { createNotification, emitNotification } = require('./notification_service');
 const { broadcast } = require('../sockets/broadcast');
+const business = require('../config/business');
 
 const DEFAULT_BID_STEP = 50_000;
 const SNIPE_WINDOW_MS = 30_000;       // đặt giá trong 30 giây cuối thì gia hạn thêm 30 giây
@@ -15,9 +16,7 @@ const SNIPE_WINDOW_MS = 30_000;       // đặt giá trong 30 giây cuối thì 
 // đúp nút) làm đẩy giá ảo hoặc đè DB; 1 giây vẫn đủ nhanh cho người thật và cho bot demo (mặc định 5 giây một lượt).
 // Để trong đối tượng `limits` để test đổi được (đặt 0 = tắt).
 const limits = { bidMinIntervalMs: 1000 };
-const PAYMENT_WINDOW_MS = 24 * 3600_000;
-const FEE_RATE = 0.05;
-const SHIPPING_FEE = 40_000;
+const { paymentWindowMs: PAYMENT_WINDOW_MS, feeRate: FEE_RATE, shippingFee: SHIPPING_FEE } = business;
 
 const roundThousand = (n) => Math.round(n / 1000) * 1000;
 const depositFor = (startPrice) => roundThousand(startPrice * 0.1);

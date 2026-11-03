@@ -15,8 +15,7 @@ const { createNotification } = require('../src/services/notification_service');
 const PASSWORD = '123456';
 const HOUR = 3600_000;
 const DAY = 24 * HOUR;
-const FEE_RATE = 0.05;      // khớp auction_engine (phí dịch vụ 5%)
-const SHIPPING_FEE = 40_000; // khớp auction_engine
+const { feeRate: FEE_RATE, shippingFee: SHIPPING_FEE } = require('../src/config/business');
 const roundThousand = (n) => Math.round(n / 1000) * 1000;
 const totalDueFor = (price) => price + roundThousand(price * FEE_RATE) + SHIPPING_FEE;
 const photo = (slug, i) => `https://picsum.photos/seed/bidvibe-${slug}-${i}/800/600`;

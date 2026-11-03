@@ -13,9 +13,7 @@ const { releasePayout } = require('./payout_service');
 const validate = require('../utils/validate');
 const disputePhotos = require('./dispute_photos');
 
-const PAYOUT_WINDOW_HOURS = 72;
-const FEE_RATE = 0.05;        // khớp auction_engine.js (BE1)
-const SHIPPING_FEE = 40_000;  // khớp auction_engine.js (BE1)
+const { payoutWindowHours: PAYOUT_WINDOW_HOURS, feeRate: FEE_RATE, shippingFee: SHIPPING_FEE } = require('../config/business');
 const roundThousand = (n) => Math.round(n / 1000) * 1000;
 
 const STAGES = [

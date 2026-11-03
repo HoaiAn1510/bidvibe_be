@@ -17,8 +17,7 @@
 //   đủ tiền, hoặc Ctrl+C. Từ chối chạy khi NODE_ENV=production.
 const { BOT_ACCOUNTS, BOT_EMAILS, BOT_PASSWORD } = require('./demo_bots');
 
-const FEE_RATE = 0.05; // khớp auction_engine.js
-const SHIPPING_FEE = 40_000;
+const { feeRate: FEE_RATE, shippingFee: SHIPPING_FEE } = require('../src/config/business');
 
 const fmt = (n) => `${Number(n).toLocaleString('vi-VN')}đ`;
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));

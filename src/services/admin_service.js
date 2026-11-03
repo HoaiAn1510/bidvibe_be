@@ -24,7 +24,7 @@ async function disconnectSuspended(accountId, kind) {
 }
 
 const conflict = (message, code = 'INVALID_STATE') => new AppError(message, 409, code);
-const FEE_RATE = 0.05; // khớp auction_engine.js (BE1)
+const { feeRate: FEE_RATE } = require('../config/business');
 
 // ---------- Bảng điều khiển ----------
 

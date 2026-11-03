@@ -162,6 +162,31 @@ async function main() {
     assert.deepStrictEqual(await wallet(A), { b: 5_000_000, h: 0 });
   });
 
+  console.log('Cấu hình nghiệp vụ (BE-04)');
+  // Nạp business.js trong tiến trình con với biến môi trường riêng, để biến của người chạy test không làm lệch kết quả.
+  const loadBusiness = (env) => {
+    const { execFileSync } = require('child_process');
+    const clean = { ...process.env };
+    for (const k of ['FEE_RATE', 'SHIPPING_FEE', 'PAYMENT_WINDOW_HOURS', 'PAYOUT_WINDOW_HOURS', 'BID_CEILING_MULTIPLIER', 'BID_CEILING_STEPS']) delete clean[k];
+    const out = execFileSync(process.execPath, ['-e', "console.log(JSON.stringify(require('./src/config/business')))"],
+      { cwd: require('path').join(__dirname, '..'), env: { ...clean, ...env }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    return JSON.parse(out.trim().split('\n').pop());
+  };
+  await step('mặc định giữ nguyên: phí 5%, ship 40.000đ, hạn thanh toán 24 giờ, giải ngân 72 giờ', async () => {
+    const b = loadBusiness({});
+    assert.strictEqual(b.feeRate, 0.05);
+    assert.strictEqual(b.shippingFee, 40_000);
+    assert.strictEqual(b.paymentWindowMs, 24 * 3600_000);
+    assert.strictEqual(b.payoutWindowHours, 72);
+  });
+  await step('biến môi trường ghi đè được; giá trị sai thì không khởi động', async () => {
+    const b = loadBusiness({ FEE_RATE: '0.1', SHIPPING_FEE: '30000', PAYMENT_WINDOW_HOURS: '12', PAYOUT_WINDOW_HOURS: '48' });
+    assert.deepStrictEqual([b.feeRate, b.shippingFee, b.paymentWindowMs, b.payoutWindowHours], [0.1, 30_000, 12 * 3600_000, 48]);
+    for (const bad of [{ FEE_RATE: 'abc' }, { FEE_RATE: '2' }, { SHIPPING_FEE: '-1' }, { SHIPPING_FEE: '1.5' }, { PAYOUT_WINDOW_HOURS: '0' }]) {
+      assert.throws(() => loadBusiness(bad), /không hợp lệ/, `phải từ chối ${JSON.stringify(bad)}`);
+    }
+  });
+
   console.log('Tham gia & đặt giá');
   const { auctionId } = await mkAuction(seller, 1_000_000); // cọc 10% = 100.000
   await step('cọc = 10% giá khởi điểm, giữ trong ví', async () => {
