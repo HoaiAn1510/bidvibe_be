@@ -25,6 +25,10 @@ async function disconnectSuspended(accountId, kind) {
 
 const conflict = (message, code = 'INVALID_STATE') => new AppError(message, 409, code);
 const { feeRate: FEE_RATE } = require('../config/business');
+// Báo cáo mỗi phiên một đơn: ưu tiên đơn hiệu lực, hoặc đơn hết hạn mới nhất.
+const CURRENT_ORDER_SQL = `(o.payment_status <> 'expired' OR NOT EXISTS (
+  SELECT 1 FROM orders newer WHERE newer.auction_id = o.auction_id AND newer.id > o.id
+))`;
 
 // ---------- Bảng điều khiển ----------
 
@@ -189,10 +193,10 @@ async function weeklyReport() {
          FROM auctions WHERE ends_at >= ${W} AND ends_at <= now()`),
     one(`SELECT count(*)::int AS orders, coalesce(sum(final_price), 0)::bigint AS gmv,
                 coalesce(sum(round(final_price * ${FEE_RATE} / 1000) * 1000), 0)::bigint AS fees
-         FROM orders WHERE created_at >= ${W}`),
+         FROM orders o WHERE o.created_at >= ${W} AND ${CURRENT_ORDER_SQL}`),
     one(`SELECT count(*) FILTER (WHERE payment_status = 'paid')::int AS paid,
                 count(*) FILTER (WHERE payment_status = 'expired')::int AS expired
-         FROM orders WHERE created_at >= ${W}`),
+         FROM orders o WHERE o.created_at >= ${W} AND ${CURRENT_ORDER_SQL}`),
     many(`SELECT CASE WHEN b.account_id IS NOT NULL THEN 'bidder' ELSE 'seller' END AS role, count(*)::int AS n
           FROM accounts a LEFT JOIN bidders b ON b.account_id = a.id
           WHERE a.created_at >= ${W} GROUP BY 1`),
@@ -207,7 +211,8 @@ async function weeklyReport() {
     many(`SELECT c.code, count(*)::int AS orders, coalesce(sum(o.final_price), 0)::bigint AS gmv
           FROM orders o JOIN auctions a ON a.id = o.auction_id JOIN listings l ON l.id = a.listing_id
           JOIN categories c ON c.id = l.category_id
-          WHERE o.created_at >= ${W} GROUP BY c.code ORDER BY gmv DESC`),
+          WHERE o.created_at >= ${W} AND ${CURRENT_ORDER_SQL}
+          GROUP BY c.code ORDER BY gmv DESC`),
   ]);
   const byKey = (rows, key) => Object.fromEntries(rows.map((r) => [r[key], r.n]));
   return {

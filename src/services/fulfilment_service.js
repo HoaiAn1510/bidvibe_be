@@ -38,6 +38,7 @@ const STAGE_SQL = `
 
 const ORDER_SELECT = `
   SELECT o.id, o.auction_id, o.bidder_id, o.seller_id, o.final_price, o.payment_status,
+         o.is_runner_up_offer,
          o.payment_deadline, o.payout_status, o.payout_deadline, o.delivered_confirmed_at, o.created_at,
          l.title, c.code AS category,
          buyer.full_name AS buyer_name, buyer.phone AS buyer_phone,
@@ -78,6 +79,7 @@ function toView(r, { withBuyerContact = false, withAddress = withBuyerContact } 
   return {
     id: r.id,
     auctionId: r.auction_id,
+    isRunnerUpOffer: r.is_runner_up_offer,
     title: r.title,
     category: r.category,
     finalPrice: Number(r.final_price),
@@ -178,6 +180,11 @@ const orderData = (o) => ({ orderId: o.id, auctionId: o.auction_id });
 async function listSelling(sellerId, { stage, limit, offset }) {
   const params = [sellerId];
   let where = 'o.seller_id = $1';
+  // App Seller ghép đơn theo tin: chỉ trả đơn hiệu lực, hoặc đơn hết hạn cuối cùng
+  // nếu phiên không còn đơn hiệu lực (giữ cách hiển thị đơn hết hạn cũ).
+  where += ` AND (o.payment_status <> 'expired' OR NOT EXISTS (
+    SELECT 1 FROM orders newer WHERE newer.auction_id = o.auction_id AND newer.id > o.id
+  ))`;
   if (stage) { params.push(validate.oneOf(stage, STAGES, 'Giai đoạn')); where += ` AND ${STAGE_SQL} = $${params.length}`; }
   params.push(limit, offset);
   const { rows } = await pool.query(
