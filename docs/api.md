@@ -532,6 +532,7 @@ Quy tắc:
 
 - Phải đã đặt cọc → `403 DEPOSIT_REQUIRED`.
 - Giá ≥ `currentPrice + bidStep` → nếu không: `400 BID_TOO_LOW` ("Giá tối thiểu là 1.100.000đ").
+- **Trần giá**: giá đặt ≤ `MAX(currentPrice × 3, currentPrice + 20 × bidStep)` và luôn ≤ 10.000.000.000đ; vượt thì `400 BID_TOO_HIGH` ("Giá tối đa là 3.000.000đ"), không ghi lượt giá, không đổi giá phiên. Áp dụng cho cả `amount` và `increment`; kiểm sau `BID_TOO_LOW`. Ví dụ bước 50.000đ: giá hiện tại 100.000 → tối đa 1.100.000; 1.000.000 → 3.000.000; 10.000.000 → 30.000.000. Trần tính lại theo giá hiện tại sau mỗi lượt. Hệ số 3 và số bước 20 đổi được bằng `BID_CEILING_MULTIPLIER`, `BID_CEILING_STEPS` (xem `.env.example`).
 - Không tự vượt giá của chính mình → `409 ALREADY_LEADING`.
 - **Giới hạn tốc độ**: mỗi người tối đa **một lượt đặt giá mỗi giây** (tính trên mọi phiên, theo giờ database). Đặt lại trong vòng 1 giây sau lượt trước → `429 BID_TOO_FAST` ("Bạn đặt giá quá nhanh, vui lòng thử lại sau giây lát"); lượt bị từ chối không ghi gì. Kiểm tra sau `ALREADY_LEADING`, trước `BID_TOO_LOW`. Nên khoá nút đặt giá khoảng 1 giây sau mỗi lần bấm.
 - Đặt trong **30 giây cuối**: phiên còn đúng 30 giây (`extended: true`, `endsAt` mới). Tính theo giờ database: `endsAt = max(endsAt, giờ DB + 30 giây)`, không bao giờ rút ngắn phiên.
@@ -1261,6 +1262,7 @@ Gom từ mọi `AppError` trong code. "Gợi ý hiển thị" khi muốn khác `
 | `INVALID_JSON` | 400 | Body không phải JSON | Lỗi lập trình, ghi log |
 | `BID_TOO_FAST` | 429 | Cùng một người đặt giá hai lượt trong vòng 1 giây | Hiện `message`, mở lại nút sau khoảng 1 giây |
 | `BID_TOO_LOW` | 400 | Giá thấp hơn giá hiện tại + bước giá | Hiện `message` (có giá tối thiểu), tải lại phiên |
+| `BID_TOO_HIGH` | 400 | Giá vượt trần `MAX(giá hiện tại × 3, giá hiện tại + 20 × bước giá)`, hoặc quá 10 tỷ | Hiện `message` (có giá tối đa), cho nhập lại |
 | `PHOTOS_REQUIRED` | 400 | Gửi thẩm định khi chưa có ảnh | Chuyển tới bước thêm ảnh |
 | `WRONG_PASSWORD` | 400 | Đổi mật khẩu: mật khẩu hiện tại sai | Hiện `message` ở trường mật khẩu hiện tại |
 | `INVALID_FILE_TYPE` | 400 | Tải ảnh không phải JPEG / PNG / WEBP | Hiện `message`, cho chọn ảnh khác |

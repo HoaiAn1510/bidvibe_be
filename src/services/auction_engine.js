@@ -21,6 +21,13 @@ const { paymentWindowMs: PAYMENT_WINDOW_MS, feeRate: FEE_RATE, shippingFee: SHIP
 const roundThousand = (n) => Math.round(n / 1000) * 1000;
 const depositFor = (startPrice) => roundThousand(startPrice * 0.1);
 const feeFor = (price) => roundThousand(price * FEE_RATE);
+// Trần giá đặt: chặn người chỉ cọc 10% đặt giá tuỳ ý rồi bỏ đơn. Lấy mức lớn hơn giữa "gấp N lần giá hiện tại" và
+// "cộng thêm M bước giá" (phiên giá thấp vẫn có chỗ trả giá cạnh tranh), nhưng không bao giờ quá bidAbsoluteCap.
+// Ví dụ bước 50.000đ: giá 100.000 → 1.100.000; 1.000.000 → 3.000.000; 10.000.000 → 30.000.000.
+const maxBidFor = (currentPrice, bidStep) => Math.min(
+  Math.max(Math.floor(currentPrice * business.bidCeilingMultiplier), currentPrice + business.bidCeilingSteps * bidStep),
+  business.bidAbsoluteCap,
+);
 
 const fmt = (n) => `${Number(n).toLocaleString('vi-VN')}đ`;
 // Giờ Việt Nam cho nội dung thông báo, ví dụ "14:05 13/10".
@@ -212,6 +219,10 @@ async function placeBid({ bidderId, auctionId, amount: requested, increment }) {
     const minBid = Number(a.current_price) + Number(a.bid_step);
     if (amount < minBid) {
       throw new AppError(`Giá tối thiểu là ${fmt(minBid)}`, 400, 'BID_TOO_LOW');
+    }
+    const maxBid = maxBidFor(Number(a.current_price), Number(a.bid_step));
+    if (amount > maxBid) {
+      throw new AppError(`Giá tối đa là ${fmt(maxBid)}`, 400, 'BID_TOO_HIGH');
     }
 
     const bid = await bidModel.insert(client, { auctionId, bidderId, amount });
@@ -588,6 +599,7 @@ async function processPaymentTimeouts() {
 module.exports = {
   limits,
   depositFor,
+  maxBidFor,
   inTransaction,
   createAuctionForListing,
   listAuctions,

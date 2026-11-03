@@ -235,6 +235,60 @@ async function main() {
     assert.ok(left > 25_000 && left <= 32_500, `còn ${left}ms`); // +2 giây phía trên: dung sai đồng hồ (xem chú thích ở bước tạm dừng)
   });
 
+  console.log('Trần giá đặt (BE-01)');
+  // Tài khoản và phiên riêng để không làm lệch số dư / số đếm của các phần khác.
+  const ceilSeller = await mkAccount('seller', 'CeilSeller');
+  const [P, Q] = [await mkAccount('bidder', 'CeilP'), await mkAccount('bidder', 'CeilQ')];
+  await tx((c) => walletService.topUp(c, { bidderId: P, amount: 5_000_000 }));
+  await tx((c) => walletService.topUp(c, { bidderId: Q, amount: 5_000_000 }));
+  const auctionRow = async (id) => (await pool.query(
+    'SELECT current_price::bigint AS p, bid_count AS n FROM auctions WHERE id = $1', [id])).rows[0];
+  await step('công thức trần: MAX(giá × 3, giá + 20 bước), tối đa 10 tỷ', async () => {
+    assert.strictEqual(engine.maxBidFor(100_000, 50_000), 1_100_000);
+    assert.strictEqual(engine.maxBidFor(1_000_000, 50_000), 3_000_000);
+    assert.strictEqual(engine.maxBidFor(10_000_000, 50_000), 30_000_000);
+    assert.strictEqual(engine.maxBidFor(9_000_000_000, 50_000), 10_000_000_000);
+    assert.strictEqual(engine.maxBidFor(10_000_000_000, 50_000), 10_000_000_000);
+    assert.strictEqual(engine.maxBidFor(100_000, 200_000), 4_100_000); // bước giá lớn thì "20 bước" thắng "×3"
+  });
+  const { auctionId: ceilA } = await mkAuction(ceilSeller, 1_000_000); // bước 50.000, trần ban đầu 3.000.000
+  await engine.joinAuction({ bidderId: P, auctionId: ceilA });
+  await engine.joinAuction({ bidderId: Q, auctionId: ceilA });
+  await step('đặt vượt trần: 400 BID_TOO_HIGH nêu mức tối đa, không ghi lượt giá, không đổi giá', async () => {
+    await assert.rejects(engine.placeBid({ bidderId: P, auctionId: ceilA, amount: 3_000_001 }), (e) => {
+      assert.strictEqual(e.code, 'BID_TOO_HIGH');
+      assert.strictEqual(e.statusCode, 400);
+      assert.strictEqual(e.message, `Giá tối đa là ${(3_000_000).toLocaleString('vi-VN')}đ`);
+      return true;
+    });
+    assert.deepStrictEqual(await auctionRow(ceilA), { p: '1000000', n: 0 });
+    assert.strictEqual((await pool.query('SELECT 1 FROM bids WHERE auction_id = $1', [ceilA])).rowCount, 0);
+  });
+  await step('dạng increment cũng bị chặn khi vượt trần', async () => {
+    await rejects(engine.placeBid({ bidderId: P, auctionId: ceilA, increment: 2_000_001 }), 'BID_TOO_HIGH');
+    assert.deepStrictEqual(await auctionRow(ceilA), { p: '1000000', n: 0 });
+  });
+  await step('đặt đúng bằng trần thì thành công; trần tính lại theo giá mới', async () => {
+    const r = await engine.placeBid({ bidderId: P, auctionId: ceilA, amount: 3_000_000 });
+    assert.strictEqual(r.currentPrice, 3_000_000);
+    assert.strictEqual(r.bidCount, 1);
+    // Giá hiện tại 3.000.000 → trần mới 9.000.000.
+    await rejects(engine.placeBid({ bidderId: Q, auctionId: ceilA, amount: 9_000_001 }), 'BID_TOO_HIGH');
+    assert.deepStrictEqual(await auctionRow(ceilA), { p: '3000000', n: 1 });
+    await engine.placeBid({ bidderId: Q, auctionId: ceilA, amount: 9_000_000 });
+    assert.deepStrictEqual(await auctionRow(ceilA), { p: '9000000', n: 2 });
+  });
+  await step('giá thấp hơn mức tối thiểu vẫn báo BID_TOO_LOW (kiểm trước trần)', async () => {
+    await rejects(engine.placeBid({ bidderId: P, auctionId: ceilA, amount: 9_000_000 }), 'BID_TOO_LOW');
+  });
+  await step('phiên giá thấp: giá 100.000 → trần 1.100.000 (20 bước thắng ×3)', async () => {
+    const { auctionId: low } = await mkAuction(ceilSeller, 100_000);
+    await engine.joinAuction({ bidderId: P, auctionId: low });
+    await rejects(engine.placeBid({ bidderId: P, auctionId: low, amount: 1_100_001 }), 'BID_TOO_HIGH');
+    await engine.placeBid({ bidderId: P, auctionId: low, amount: 1_100_000 });
+    assert.deepStrictEqual(await auctionRow(low), { p: '1100000', n: 1 });
+  });
+
   console.log('Đóng phiên');
   await step('hết giờ: chọn người thắng, tạo đơn, hoàn cọc người thua', async () => {
     assert.strictEqual(await engine.closeAuction(auctionId), null); // chưa hết giờ -> bỏ qua
