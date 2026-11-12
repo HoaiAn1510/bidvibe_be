@@ -1052,7 +1052,7 @@ Lỗi: `400 VALIDATION_ERROR`, `403 FORBIDDEN` (tài khoản `ops`), `404 NOT_FO
 
 ### `POST /api/ai/suggest-price`
 
-`seller` hoặc `appraiser`. Body `{ "categoryCode": string, "condition"?: string }`. Chưa dùng mô hình AI: từ 3 phiên cùng danh mục đã kết thúc trở lên thì gợi ý theo lịch sử (`basis: "history"`), ít hơn thì dùng khung giá soạn sẵn (`basis: "default"`). Tình trạng "như mới / chưa qua sử dụng" tăng giá gợi ý, "hư / hỏng" giảm.
+`seller` hoặc `appraiser`. Body `{ "categoryCode": string, "condition"?: string, "title"?: string }`. Chưa dùng mô hình AI: từ 3 phiên cùng danh mục đã kết thúc trở lên thì gợi ý theo lịch sử (`basis: "history"`), ít hơn thì dùng khung giá soạn sẵn (`basis: "default"`). Với lịch sử, các phiên có giá chốt bất thường (ngoại lệ IQR, khi có từ 5 phiên) bị loại; nếu gửi `title` và có từ 3 phiên có tên món hàng tương tự thì chỉ dùng các phiên đó. Tình trạng "như mới / chưa qua sử dụng" tăng giá (×1,1), "cũ / trầy xước" giảm nhẹ (×0,9), "hư / hỏng" giảm nhiều (×0,8); hệ số áp cho cả `suggestedStartingPrice` và `expectedFinalRange`.
 
 ```json
 // 200

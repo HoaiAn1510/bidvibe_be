@@ -11,6 +11,7 @@
     "db:seed:live": "node scripts/seed_live.js",
     "wallet:check": "node scripts/wallet_check.js",
     "test:fraud": "node scripts/test_fraud_unit.js",
+    "test:ai": "node scripts/test_ai_unit.js",
     "test:be1": "node scripts/test_be1.js",
     "test:be2": "node scripts/test_be2.js",
     "test": "npm run test:fraud && npm run test:be1 && npm run test:be2",
